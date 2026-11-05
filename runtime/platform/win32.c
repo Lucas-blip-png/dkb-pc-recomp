@@ -678,14 +678,114 @@ void plat_mem_fault_hook(int (*fn)(uint64_t addr)) {
 
 static void (*crash_fn)(const PlatCrash *c);
 
+// ---- minidumps of crashes
+// logs\crash-<pid>-<tick>.dmp beside the executable: thread stacks, registers and the module list, no heap (a few MiB).
+// MiniDumpWriteDump runs on a thread of its own, so a crash with a used-up stack (stack overflow) still gets one, and
+// dbghelp.dll is loaded only then. The dump holds stack memory of the game: it stays on this machine like the logs.
+typedef BOOL(WINAPI *MiniDumpWriteDumpFn)(HANDLE, DWORD, HANDLE, int, void *, void *, void *);
+typedef struct {
+    DWORD thread_id;
+    EXCEPTION_POINTERS *ep;    // NULL for abort and invalid parameter, which raise no exception
+    wchar_t path[MAX_PATH];
+    BOOL ok;
+} DumpJob;
+// MINIDUMP_EXCEPTION_INFORMATION (dbghelp.h), declared here to keep the header out. dbghelp.h declares it under
+// pack(4), so the pointer is at offset 4: with natural alignment MiniDumpWriteDump fails with ERROR_NOACCESS.
+#pragma pack(push, 4)
+typedef struct {
+    DWORD ThreadId;
+    EXCEPTION_POINTERS *ExceptionPointers;
+    BOOL ClientPointers;
+} DumpExceptionInfo;
+#pragma pack(pop)
+_Static_assert(sizeof(DumpExceptionInfo) == 16, "MINIDUMP_EXCEPTION_INFORMATION is 16 bytes under pack(4)");
+#define DUMP_TYPE (0x00000000 | 0x00000020 | 0x00001000)   // MiniDumpNormal | WithUnloadedModules | WithThreadInfo
+
+static DWORD WINAPI dump_thread(void *arg) {
+    DumpJob *j = arg;
+    HMODULE dbg = LoadLibraryW(L"dbghelp.dll");
+    MiniDumpWriteDumpFn write = dbg ? (MiniDumpWriteDumpFn)(void *)GetProcAddress(dbg, "MiniDumpWriteDump") : NULL;
+    if (!write) return 0;
+    HANDLE f = CreateFileW(j->path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    DumpExceptionInfo ei = {j->thread_id, j->ep, FALSE};
+    j->ok = write(GetCurrentProcess(), GetCurrentProcessId(), f, DUMP_TYPE, j->ep ? &ei : NULL, NULL, NULL);
+    CloseHandle(f);
+    if (!j->ok) DeleteFileW(j->path);
+    return 0;
+}
+
+// Writes the minidump for the crash on the calling thread; its UTF-8 path, or NULL. Once per process.
+static const char *write_crash_dump(EXCEPTION_POINTERS *ep) {
+    static DumpJob job;
+    static char path8[MAX_PATH * 3];
+    static volatile LONG once;
+    if (InterlockedExchange(&once, 1)) return NULL;
+    wchar_t exe[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+    if (!n || n >= MAX_PATH) return NULL;
+    wchar_t *slash = wcsrchr(exe, L'\\');
+    if (!slash) return NULL;
+    *slash = 0;
+    _snwprintf(job.path, MAX_PATH, L"%ls\\logs", exe);
+    CreateDirectoryW(job.path, NULL);
+    _snwprintf(job.path, MAX_PATH, L"%ls\\logs\\crash-%lu-%llu.dmp", exe, GetCurrentProcessId(),
+               (unsigned long long)GetTickCount64());
+    job.path[MAX_PATH - 1] = 0;
+    job.thread_id = GetCurrentThreadId();
+    job.ep = ep;
+    HANDLE t = CreateThread(NULL, 1 << 20, dump_thread, &job, 0, NULL);
+    if (!t) return NULL;
+    WaitForSingleObject(t, 60000);
+    CloseHandle(t);
+    if (!job.ok || !WideCharToMultiByte(CP_UTF8, 0, job.path, -1, path8, sizeof path8, NULL, NULL)) return NULL;
+    return path8;
+}
+
+static const char *exception_name(DWORD code) {
+    return code == EXCEPTION_ACCESS_VIOLATION ? "access violation"
+         : code == EXCEPTION_ILLEGAL_INSTRUCTION ? "illegal instruction"
+         : code == EXCEPTION_INT_DIVIDE_BY_ZERO ? "integer division by zero"
+         : code == EXCEPTION_PRIV_INSTRUCTION ? "privileged instruction"
+         : code == EXCEPTION_STACK_OVERFLOW ? "stack overflow"
+         : code == EXCEPTION_IN_PAGE_ERROR ? "in-page error" : NULL;
+}
+
+// The last chance: an exception no handler took, in any module (a driver, a Vulkan layer, a C++ runtime throw nobody
+// caught). Without this the process ends with the exception code and no report; with it the report names the module.
+static LONG WINAPI crash_unhandled(EXCEPTION_POINTERS *ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    uintptr_t rip = (uintptr_t)ep->ContextRecord->Rip;
+    static char what[96], module[MAX_PATH];
+    const char *name = exception_name(code);
+    if (name) snprintf(what, sizeof what, "unhandled %s", name);
+    else snprintf(what, sizeof what, "unhandled exception %#lx", (unsigned long)code);
+    HMODULE h = NULL;
+    PlatCrash c = {what, (uint32_t)code, rip, 0, -1, 0};
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)rip, &h) && h != GetModuleHandleW(NULL)) {
+        char full[MAX_PATH];
+        DWORD n = GetModuleFileNameA(h, full, sizeof full);
+        const char *base = n ? strrchr(full, '\\') : NULL;
+        snprintf(module, sizeof module, "%s", base ? base + 1 : n ? full : "unknown module");
+        c.module = module;
+        c.offset = rip - (uintptr_t)h;
+    } else if (h) {
+        c.offset = rip - (uintptr_t)h;
+    } else {
+        snprintf(module, sizeof module, "no module");
+        c.module = module;
+    }
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
+        c.access = (int)ep->ExceptionRecord->ExceptionInformation[0], c.addr = ep->ExceptionRecord->ExceptionInformation[1];
+    c.dump = write_crash_dump(ep);
+    crash_fn(&c);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 static LONG CALLBACK crash_veh(EXCEPTION_POINTERS *ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
-    const char *what = code == EXCEPTION_ACCESS_VIOLATION ? "access violation"
-                     : code == EXCEPTION_ILLEGAL_INSTRUCTION ? "illegal instruction"
-                     : code == EXCEPTION_INT_DIVIDE_BY_ZERO ? "integer division by zero"
-                     : code == EXCEPTION_PRIV_INSTRUCTION ? "privileged instruction"
-                     : code == EXCEPTION_STACK_OVERFLOW ? "stack overflow"
-                     : code == EXCEPTION_IN_PAGE_ERROR ? "in-page error" : NULL;
+    const char *what = exception_name(code);
     if (!what) return EXCEPTION_CONTINUE_SEARCH;
     uintptr_t rip = (uintptr_t)ep->ContextRecord->Rip;
     MODULEINFO mi;
@@ -695,6 +795,7 @@ static LONG CALLBACK crash_veh(EXCEPTION_POINTERS *ep) {
     PlatCrash c = {what, (uint32_t)code, rip, rip - (uintptr_t)mi.lpBaseOfDll, -1, 0};
     if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
         c.access = (int)ep->ExceptionRecord->ExceptionInformation[0], c.addr = ep->ExceptionRecord->ExceptionInformation[1];
+    c.dump = write_crash_dump(ep);
     crash_fn(&c);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -714,6 +815,7 @@ __attribute__((noinline)) static void crash_from_runtime(const char *what, uint3
             if ((uintptr_t)f[i] - base < mi.SizeOfImage) c.frames[c.nframes++] = (uintptr_t)f[i];
         if (c.nframes) c.rip = c.frames[0], c.offset = c.rip - base;
     }
+    c.dump = write_crash_dump(NULL);
     crash_fn(&c);
 }
 
@@ -728,6 +830,7 @@ static void invalid_parameter(const wchar_t *expr, const wchar_t *func, const wc
 void plat_crash_hook(void (*fn)(const PlatCrash *c)) {
     crash_fn = fn;
     AddVectoredExceptionHandler(0, crash_veh);
+    SetUnhandledExceptionFilter(crash_unhandled);
     signal(SIGABRT, abort_signal);
     _set_invalid_parameter_handler(invalid_parameter);
 }
