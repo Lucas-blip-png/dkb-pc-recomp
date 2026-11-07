@@ -18,6 +18,10 @@ executable, not the generated code, not the shader cache.
   `python tools\extract_nup.py <game>.nup --out build\extracted\dkb100-dump` writes `exefs` and `romfs` there, checking
   every file's SHA-256. Pass those two folders to the commands in the README.
 
+On Apple Silicon macOS the same steps work ([building.md](building.md), "macOS"): the commands use
+`.venv/bin/python`, the executable is `build/dkb100/dkb`, and the renderer is MoltenVK. The game boots to the mode
+select, but the destructible terrain is not drawn yet, because Metal has no geometry stage.
+
 ## Build
 
 Install the toolchain from [building.md](building.md) (MSYS2 UCRT64 Clang, Ninja, Python 3.12 in `.venv`, .NET SDK),

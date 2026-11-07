@@ -191,6 +191,51 @@ well: the shadow copies are chosen for the measured cost above, not for a missin
 The Deck's GPU (Van Gogh) has no native ASTC, so its textures go through the compute decoder (`runtime/vk_astc.c`,
 `TOTK_ASTC`) as on desktop AMD GPUs without it; frame times measured there include it.
 
+## macOS (in progress)
+
+The runtime builds and runs on Apple Silicon with MoltenVK, so the Vulkan back end is unchanged and SPIR-V reaches
+Metal through the portability driver. The window, input and menu are the SDL3 ones (`*_sdl.c`) and
+`runtime/platform/darwin.c` implements `platform.h`. Status: the selftest and the device probe pass, and the game boots
+to the mode select at about 60 fps on an M4 (16 GB). Play is not verified, and the terrain is missing: Metal has no
+geometry stage, so draws that need one are skipped (see below).
+
+Requirements:
+
+- macOS 14 or later on Apple Silicon. The locks use `os_sync_wait_on_address`, and the sections and the window thread
+  arrangement assume arm64.
+- A Vulkan 1.3 driver: MoltenVK 1.4 or later (`VK_KHR_portability_enumeration` and `VK_KHR_portability_subset`).
+- Packages:
+
+  ```sh
+  brew install llvm ninja sdl3 molten-vk vulkan-headers vulkan-loader opus libvpx zstd
+  ```
+
+  Homebrew's LLVM supplies Clang and `llvm-ar` (the build picks `/opt/homebrew/opt/llvm/bin` when it exists); Apple's
+  Clang is not used. Homebrew ships no Vulkan Memory Allocator header, so `build_game.py` fetches the pinned 3.4.0 copy
+  into `toolchain/vma/` as it does on Linux.
+- The .NET 10 SDK for the shader translator.
+
+The steps are the Windows ones with POSIX paths; `tools/build_xlate.py` builds `build/xlate/totk_xlate` for
+`osx-<machine>`, since NativeAOT targets the host OS only. `build_game.py` links against `/opt/homebrew/lib` and puts
+`@executable_path` first on the rpath, so a release can carry its own `libMoltenVK.dylib`.
+
+Memory: macOS has no write watch (nothing like `GetWriteWatch` or userfaultfd's write protection), so the CPU's writes
+to imported guest memory are not tracked and texture uploads run in full; the startup log says so once. The runtime
+therefore uses import mode (uniform memory, which Apple silicon has) with the shadow copies off, `TOTK_SHADOW=1`
+overrides that.
+
+Address space: the modules stay at `0x7000000000`, as the generated code requires, and macOS maps nothing between
+63 GiB and 448 GiB. The stack and heap block and the alias region therefore sit above the modules, in the 448-512 GiB
+window, found by `plat_mem_reserve_in` with `mach_vm_region`: libmalloc has reservations of its own in there, so the
+block goes first and the alias region takes the largest hole left, 10 to 16 GiB, which the log reports when it is not
+the full 16. When even 10 GiB does not fit, the process re-executes itself and tries a fresh layout (the log says how
+often it did). `TOTK_MEM_HOLES=1` makes the platform print the window's holes every time a reservation does not fit.
+
+Geometry stages: MoltenVK reports no `geometryShader`, so the device is accepted anyway and the pipelines that need the
+stage are skipped once with a log line, instead of failing the boot. The destructible terrain draws with a lowered
+native passthrough geometry stage (`TOTK_NATIVE_GS=1`), so it stays invisible for now; a vertex-stage replacement is
+separate work.
+
 ## Checks
 
 Before a commit:
@@ -215,7 +260,8 @@ change passes these, all run with `.venv`:
 Runtime probes, each a mode of `totk.exe` (the list is at the top of `runtime/main.c`): `--probe-kernel`,
 `--probe-vkexec`, `--probe-nvn-tex` and `--probe-shader` cover most runtime changes. `--probe-shader` and the draw
 part of `--probe-vkexec` translate shaders of the census below: they look for `build/<ver>/shaders/jobs.json` of the
-exe's own version first, then of the other one.
+exe's own version first, then of the other one. On macOS a probe that opens a window needs a desktop session, because
+the SDL video driver initialises on the process's main thread.
 
 Shaders: `.venv-py314\Scripts\python tools\shader_census.py --version <ver> --translate` extracts every Maxwell shader
 to `build\<ver>\shaders\` and runs it through the translator and `spirv-val`; failure groups go to `failures.txt`.

@@ -6,6 +6,7 @@
 // writes per crumb, and crumbs mark submissions, upload batches, ASTC chunks and presents, not draws.
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "host.h"
