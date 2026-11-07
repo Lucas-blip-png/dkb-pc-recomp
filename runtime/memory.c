@@ -23,14 +23,34 @@
 // Switch 2 sizes (Donkey Kong Bananza): the game sizes its heap from TotalMemorySize (GetInfo 6), so the pool and the
 // heap block are the Switch 2's, not the Switch 1's 0xCD500000 and 4 GiB. The heap is committed as the game asks
 // (SetHeapSize), and Windows commit charge only grows with it.
+#ifdef __APPLE__
+// macOS maps nothing between 63 GiB and 448 GiB (a kernel guard region), so the stack and heap block, the alias
+// region and the module window all share the 64 GiB from 448 GiB to 2^39, in whatever holes libmalloc has left. The
+// block still holds the 768 MiB of stack and heap offset plus the 12 GiB heap cap, so it is 13 GiB here; the alias
+// region is ALIAS_SIZE at most, since the 64 GiB of the other hosts fit in no hole of this window.
+#define LOW_SIZE (13 * GiB)
+// The alias region is where the game maps its pools, so it has to hold a pool-sized alias: ALIAS_MIN leaves room for
+// the offsets those aliases are mapped at, ALIAS_SIZE is what a window with room gives, and mem_init steps down to
+// the largest that fits, logging when it does.
+#define ALIAS_SIZE (16 * GiB)
+#define ALIAS_MIN (10 * GiB)
+#else
 #define LOW_SIZE (16 * GiB)
+#define ALIAS_SIZE (64 * GiB)
+#endif
 #define STACK_OFF 0x10000000ull
 #define STACK_SIZE 0x10000000ull
 #define HEAP_OFF (STACK_OFF + STACK_SIZE + 0x10000000ull)
 #define HEAP_CAP (12 * GiB)
-#define ALIAS_SIZE (64 * GiB)
+#ifdef __APPLE__
+// The window above the modules is fragmented by libmalloc's own reservations, and a 4 GiB alignment would give back
+// up to 4 GiB of every hole: the alias region needs only the 2 MiB of the module bases.
+#define ALIAS_ALIGN (2u << 20)
+#else
 #define ALIAS_ALIGN (4 * GiB)
+#endif
 #define ALIAS_PAGES (ALIAS_SIZE / PAGE)
+static uint64_t alias_page_count = ALIAS_PAGES;   // pages of the alias region actually reserved (macOS may take fewer)
 // Application pool: Switch 2 games are said to get about 9 GiB of the 12 (not measured on hardware; TOTK_APP_POOL
 // overrides). TotK's retail Switch 1 pool was 0xCD500000.
 #define DEFAULT_POOL (9 * GiB)
@@ -84,7 +104,7 @@ static volatile int64_t frz_count[4];   // freezes; thaws by a write fault, by m
 static int watched(uint64_t addr, uint64_t size) {
     const RtGuestLayout *g = &L;
     return (addr >= g->aslr.base && size <= LOW_SIZE && addr - g->aslr.base <= LOW_SIZE - size) ||
-           (addr >= g->alias.base && size <= ALIAS_SIZE && addr - g->alias.base <= ALIAS_SIZE - size);
+           (addr >= g->alias.base && size <= g->alias.size && addr - g->alias.base <= g->alias.size - size);
 }
 
 // frz_lock held exclusively. why: 1 a write fault, 2 mem_thaw (holds the region thawed), 3 a mapping change here.
@@ -215,6 +235,9 @@ static void reexec_or_fail(const char *what) {
 
 void mem_init(void) {
     if (L.pool) return;
+    const char *ran = cfg_get("TOTK_REEXEC");
+    if (ran && *ran && atoi(ran)) rt_log("mem: re-ran the process %d time%s for a free address space", atoi(ran),
+                                          atoi(ran) == 1 ? "" : "s");
     // Fixed window: modules, kernel region, host-function addresses.
     mods_lo = MOD_MAIN_BASE;
     mods_hi = align_up(rt_layout[rt_layout_count - 1].base + rt_layout[rt_layout_count - 1].size, 0x10000);
@@ -225,16 +248,33 @@ void mem_init(void) {
     if (!reserve_at(RT_HOSTFN_BASE, RT_HOSTFN_SIZE, 0)) reexec_or_fail("the host-function window");
 
     // Stack and heap block, then the alias region above it, both searched below the module window.
-    uint64_t low = 0, alias = 0;
+    uint64_t low = 0, alias = 0, asize = ALIAS_SIZE;
+#ifdef __APPLE__
+    // Nothing below the module window is mappable on macOS, so both regions go into the holes above the host-function
+    // window: plat_mem_reserve_in walks the region list and skips whatever the system and libmalloc already hold
+    // there, and a fresh process (reexec_or_fail) gets a fresh layout when this one's holes are too small. The block
+    // goes first: it is the fixed size the heap cap needs, and the alias region fits above it more often than below.
+    if (!plat_mem_reserve_in(RT_HOSTFN_BASE + RT_HOSTFN_SIZE, RT_ADDRESS_LIMIT, LOW_SIZE, GiB, 1, &low))
+        reexec_or_fail("a 13 GiB stack and heap block above the modules");
+    asize = 0;
+    for (uint64_t s = ALIAS_SIZE; s >= ALIAS_MIN && !asize; s -= 2 * GiB)
+        if (plat_mem_reserve_in(RT_HOSTFN_BASE + RT_HOSTFN_SIZE, RT_ADDRESS_LIMIT, s, ALIAS_ALIGN, 1, &alias)) asize = s;
+    if (!asize) reexec_or_fail("a 10 GiB alias region above the modules");
+    if (asize != ALIAS_SIZE)
+        rt_log("mem: alias region %llu MiB: the holes above the modules hold no %llu MiB one",
+               (unsigned long long)(asize >> 20), (unsigned long long)(ALIAS_SIZE >> 20));
+    alias_page_count = asize / PAGE;
+#else
     for (uint64_t at = LOW_SEARCH_FROM; at + LOW_SIZE <= mods_lo && !low; at += GiB)
         if (reserve_at(at, LOW_SIZE, 1)) low = at;
     if (!low) reexec_or_fail("a 6 GiB stack and heap block below 2^39");
     for (uint64_t at = align_up(low + LOW_SIZE, ALIAS_ALIGN); at + ALIAS_SIZE <= mods_lo && !alias; at += ALIAS_ALIGN)
         if (reserve_at(at, ALIAS_SIZE, 1)) alias = at;
     if (!alias) reexec_or_fail("a 64 GiB alias region below 2^39");
+#endif
 
     plat_mem_fault_hook(thaw_fault);   // before the crash handler
-    alias_pages = calloc(ALIAS_PAGES, 1);
+    alias_pages = calloc(alias_page_count, 1);
     if (!alias_pages) rt_fatal("memory: cannot allocate the alias page map");
     // totk.ini is read here, once the address space is claimed and before the first setting: the pool size below
     // depends on TOTK_APP_POOL and on the resolution settings (resolution.c decides them once, on this first call).
@@ -244,7 +284,7 @@ void mem_init(void) {
         .aslr = {low, RT_ADDRESS_LIMIT - low},
         .stack = {low + STACK_OFF, STACK_SIZE},
         .heap = {low + HEAP_OFF, HEAP_CAP},
-        .alias = {alias, ALIAS_SIZE},
+        .alias = {alias, asize},
         .kernel = {RT_KERNEL_BASE, RT_KERNEL_SIZE},
         .hostfn = {RT_HOSTFN_BASE, RT_HOSTFN_SIZE},
         .pool = pool ? strtoull(pool, NULL, 0) : DEFAULT_POOL + res_heap_extra_bytes(),   // resolution.c
@@ -521,25 +561,6 @@ uint32_t mem_query(uint64_t a, RtMemoryInfo *out) {
         r.base = RT_ADDRESS_LIMIT;
         r.size = 0 - RT_ADDRESS_LIMIT;
         r.state = ST_INACCESSIBLE;
-    } else if (a < low) {
-        r.base = 0;
-        r.size = low;
-        r.state = ST_FREE;
-    } else if (a < low + LOW_SIZE) {
-        uint64_t heap = L.heap.base;
-        if (a >= heap && a < heap + heap_size) {
-            r = (RtMemoryInfo){.base = heap, .size = heap_size, .state = ST_NORMAL, .perm = PERM_RW};
-        } else if (a < heap) {
-            r = (RtMemoryInfo){.base = low, .size = heap - low, .state = ST_FREE};
-        } else {
-            r = (RtMemoryInfo){.base = heap + heap_size, .size = low + LOW_SIZE - heap - heap_size, .state = ST_FREE};
-        }
-    } else if (a - L.alias.base < L.alias.size) {
-        uint64_t p = (a - L.alias.base) / PAGE;
-        uint8_t v = alias_pages[p];
-        uint64_t s = run_start(alias_pages, p, v), e = run_end(alias_pages, p, ALIAS_PAGES, v);
-        r = (RtMemoryInfo){.base = L.alias.base + s * PAGE, .size = (e - s) * PAGE, .state = v ? ST_NORMAL : ST_FREE,
-                           .perm = v ? PERM_RW : PERM_NONE};
     } else if ((mi = module_index(a)) >= 0) {
         const RtLoaded *m = ldr_module(mi);
         uint64_t off = (a - m->base) & ~(PAGE - 1), lo = off, hi = off + PAGE;
@@ -554,6 +575,26 @@ uint32_t mem_query(uint64_t a, RtMemoryInfo *out) {
         r = (RtMemoryInfo){.base = L.kernel.base, .size = L.kernel.size, .state = ST_THREADLOCAL, .perm = PERM_RW};
     } else if (a - L.hostfn.base < L.hostfn.size) {
         r = (RtMemoryInfo){.base = L.hostfn.base, .size = L.hostfn.size, .state = ST_INACCESSIBLE};
+    } else if (a - L.alias.base < L.alias.size) {
+        // Before the block: macOS has no room below the modules and can put the alias region under it.
+        uint64_t p = (a - L.alias.base) / PAGE;
+        uint8_t v = alias_pages[p];
+        uint64_t s = run_start(alias_pages, p, v), e = run_end(alias_pages, p, alias_page_count, v);
+        r = (RtMemoryInfo){.base = L.alias.base + s * PAGE, .size = (e - s) * PAGE, .state = v ? ST_NORMAL : ST_FREE,
+                           .perm = v ? PERM_RW : PERM_NONE};
+    } else if (a < low) {
+        r.base = 0;
+        r.size = low;
+        r.state = ST_FREE;
+    } else if (a < low + LOW_SIZE) {
+        uint64_t heap = L.heap.base;
+        if (a >= heap && a < heap + heap_size) {
+            r = (RtMemoryInfo){.base = heap, .size = heap_size, .state = ST_NORMAL, .perm = PERM_RW};
+        } else if (a < heap) {
+            r = (RtMemoryInfo){.base = low, .size = heap - low, .state = ST_FREE};
+        } else {
+            r = (RtMemoryInfo){.base = heap + heap_size, .size = low + LOW_SIZE - heap - heap_size, .state = ST_FREE};
+        }
     } else {
         taken_gap(a, &r.base, &r.size);
         r.state = ST_CODE;
@@ -605,7 +646,7 @@ int mem_info(uint32_t id, uint64_t *out) {
     case 14: v = L.stack.base; break;
     case 15: v = L.stack.size; break;
     case 16: v = SYSTEM_RESOURCE_BUDGET; break;
-    case 17: v = sizeof stack_maps + ALIAS_PAGES; break;   // system resource in use: our bookkeeping
+    case 17: v = sizeof stack_maps + alias_page_count; break;   // system resource in use: our bookkeeping
     case 28: v = 0; break;   // AliasRegionExtraSize: no kernel-owned extension
     default: return 0;
     }

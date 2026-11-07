@@ -12,7 +12,8 @@
 // Required (device choice fails without them): Vulkan 1.3; VK_KHR_swapchain, VK_KHR_push_descriptor,
 // VK_EXT_depth_clip_control, VK_EXT_external_memory_host; features timelineSemaphore, dynamicRendering,
 // synchronization2, shaderStorageImageWriteWithoutFormat, depthClipControl, shaderInt64, samplerAnisotropy,
-// independentBlend, geometryShader, textureCompressionBC.
+// independentBlend, textureCompressionBC, and geometryShader where the driver is not a portability implementation
+// (Metal has no geometry stage: vk_device.c accepts the device and the pipelines that need one are skipped).
 // Optional (flag set in VkCtx when enabled): the has_* members.
 typedef struct VkCtx {
     VkInstance instance;
@@ -30,6 +31,7 @@ typedef struct VkCtx {
     VkDebugUtilsMessengerEXT messenger;
     volatile int32_t validation_errors;        // errors seen by the messenger (TOTK_VK_VALIDATION=1)
     int validation;                         // layer active
+    int no_geometry;                        // no geometry stage on the device (Metal via MoltenVK): logged once
     int has_custom_border_color, has_eds, has_eds2, has_eds3, has_vertex_input_dynamic_state,
         has_conditional_rendering, has_transform_feedback, has_provoking_vertex, has_device_fault, has_memory_budget,
         has_robustness2, has_buffer_device_address, has_fragment_shader_interlock, has_buffer_marker,

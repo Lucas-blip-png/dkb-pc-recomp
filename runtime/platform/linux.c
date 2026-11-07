@@ -851,6 +851,20 @@ int plat_mem_reserve(uint64_t addr, uint64_t n, int watch) {
     return ok;
 }
 
+// A linear scan from lo: an address is free when the fixed reservation there succeeds, so a candidate the system or
+// another thread holds costs one failed mmap and the scan moves past it.
+int plat_mem_reserve_in(uint64_t lo, uint64_t hi, uint64_t n, uint64_t align, int watch, uint64_t *at) {
+    if (!n || hi <= lo || n > hi - lo) return 0;
+    if (!align) align = PG;
+    if (align & (align - 1)) return 0;
+    for (uint64_t a = (lo + align - 1) & ~(align - 1); a <= hi - n; a += align)
+        if (plat_mem_reserve(a, n, watch)) {
+            *at = a;
+            return 1;
+        }
+    return 0;
+}
+
 void *plat_mem_alloc(size_t n) {
     void *p = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     return p == MAP_FAILED ? NULL : p;

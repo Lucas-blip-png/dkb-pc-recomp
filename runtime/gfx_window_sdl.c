@@ -14,6 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__APPLE__)
+#include <pthread.h>   // pthread_main_np: SDL's video calls belong on the process's main thread
+#endif
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -30,7 +33,7 @@
 static SDL_Window *g_win;
 static uint32_t g_ev_base;               // SDL_RegisterEvents: the user events below
 enum { EV_RUN, EV_SETTINGS, EV_CLOSE, EV_COUNT };
-static PlatEvent g_video_ready;          // manual-reset: SDL video is up (or failed)
+static PlatEvent g_video_ready = {.m = PLAT_MUTEX_INIT, .c = PLAT_COND_INIT, .manual = 1};   // SDL video is up
 static int g_video_ok;
 static PlatOnce g_thread_once = PLAT_ONCE_INIT;
 static uint32_t g_window_tid;            // the window thread, which runs the video calls
@@ -191,8 +194,8 @@ static void handle(const SDL_Event *e) {
     }
 }
 
-static void window_main(void *arg) {
-    (void)arg;
+// SDL video, on the thread that also runs the event loop below. Sets g_video_ready either way.
+static void video_init(void) {
     g_window_tid = plat_thread_id();
     SDL_SetHint(SDL_HINT_APP_ID, "totk-recomp");   // Wayland's app id: the desktop file and the taskbar match it
     SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "0");
@@ -209,6 +212,11 @@ static void window_main(void *arg) {
                SDL_VERSIONNUM_MINOR(SDL_GetVersion()), SDL_VERSIONNUM_MICRO(SDL_GetVersion()), SDL_GetCurrentVideoDriver());
     }
     plat_event_set(&g_video_ready);
+}
+
+// The event loop of the window thread. A window close request does not end it: the guest is told (gfx_window_closed)
+// and the process ends from whichever thread reaches the end of the game.
+static void window_loop(void) {
     if (!g_video_ok) return;
     for (;;) {
         SDL_Event e;
@@ -217,11 +225,42 @@ static void window_main(void *arg) {
     }
 }
 
+#if !defined(__APPLE__)
+static void window_main(void *arg) {
+    (void)arg;
+    video_init();
+    window_loop();
+}
+#endif
+
+#ifdef __APPLE__
+// macOS runs AppKit, and with it SDL's video, on the process's main thread only; SDL's Cocoa driver fails to start on
+// any other. So the main thread initialises video and runs the event loop, and the game runs on a thread of its own
+// (boot.c rt_boot). This is called on the main thread and does not return while the process lives.
+void gfx_window_main_thread(void) {
+    video_init();
+    window_loop();
+    // No video (a headless run with TOTK_GPU=null, or a session without a display): the game thread ends the process.
+    for (;;) plat_sleep_ms(1000);
+}
+
+static int on_main_thread(void) { return pthread_main_np() != 0; }
+#endif
+
 static void video_start(void *arg) {
     (void)arg;
-    plat_event_init(&g_video_ready, 1, 0);
+#ifdef __APPLE__
+    // A probe runs on the main thread and initialises video itself, without an event loop (it drives events through
+    // wsys_probe_*). The game thread has no such right and waits for gfx_window_main_thread.
+    if (on_main_thread()) {
+        video_init();
+        return;
+    }
+    plat_event_wait(&g_video_ready);
+#else
     if (!plat_thread_spawn(window_main, NULL, "window", 0)) rt_fatal("gfx: cannot start the window thread");
     plat_event_wait(&g_video_ready);
+#endif
 }
 
 static int video_up(void) {
@@ -291,12 +330,39 @@ VkSurfaceKHR wsys_surface(VkInstance inst) {
     return r.surface;
 }
 
-void wsys_client_size(int *w, int *h) {
-    *w = *h = 0;
-    if (g_win) SDL_GetWindowSizeInPixels(g_win, w, h);
+typedef struct { int w, h; } ClientSize;
+
+static void query_client_size(void *arg) {
+    ClientSize *s = arg;
+    SDL_GetWindowSizeInPixels(g_win, &s->w, &s->h);
 }
 
-int wsys_minimized(void) { return g_win && (SDL_GetWindowFlags(g_win) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)); }
+void wsys_client_size(int *w, int *h) {
+    *w = *h = 0;
+    if (!g_win) return;
+#ifdef __APPLE__
+    // SDL's Cocoa window calls belong on the thread that initialises video (the process's main thread here), and the
+    // present path runs on the game thread: ask the window thread, which is that one.
+    ClientSize s = {0, 0};
+    run_on_window(query_client_size, &s);
+    *w = s.w, *h = s.h;
+#else
+    SDL_GetWindowSizeInPixels(g_win, w, h);
+#endif
+}
+
+static void query_minimized(void *arg) { *(int *)arg = (SDL_GetWindowFlags(g_win) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)) != 0; }
+
+int wsys_minimized(void) {
+    if (!g_win) return 0;
+#ifdef __APPLE__
+    int min = 0;
+    run_on_window(query_minimized, &min);
+    return min;
+#else
+    return (SDL_GetWindowFlags(g_win) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)) != 0;
+#endif
+}
 
 static void resize_window(void *arg) {
     const int *wh = arg;

@@ -55,10 +55,23 @@ static void mesa_cache_beside_exe(void) {
     plat_setenv("MESA_SHADER_CACHE_DIR", dir);
 }
 
+// An instance extension the loader offers. Enabling one it does not offer fails vkCreateInstance outright, so the two
+// portability extensions below are checked first: they exist on Windows and Linux loaders too, without a driver that
+// uses them.
+static int instance_ext_present(const char *name) {
+    uint32_t n = 0;
+    vkEnumerateInstanceExtensionProperties(NULL, &n, NULL);
+    VkExtensionProperties *e = calloc(n ? n : 1, sizeof *e);
+    vkEnumerateInstanceExtensionProperties(NULL, &n, e);
+    int found = has_ext(e, n, name);
+    free(e);
+    return found;
+}
+
 static int create_instance(void) {
     mesa_cache_beside_exe();
-    const char *ext[8];
-    uint32_t n_ext = (uint32_t)gfx_window_vk_extensions(ext, 7);
+    const char *ext[12];
+    uint32_t n_ext = (uint32_t)gfx_window_vk_extensions(ext, 8);
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     int validate = cfg_bool("TOTK_VK_VALIDATION");
     if (validate && !layer_present(layers[0])) {
@@ -80,9 +93,17 @@ static int create_instance(void) {
     }
     if (utils) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     g_vk.debug_utils = utils;
+    // MoltenVK is a portability implementation: the loader only lists it for an instance that asks for the portability
+    // enumeration extension, and the logical device then enables VK_KHR_portability_subset (create_device).
+    VkInstanceCreateFlags flags = 0;
+    if (n_ext < 12 && instance_ext_present(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
+        ext[n_ext++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+        flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "TotK Recomp",
                              .pEngineName = "TotK Recomp", .apiVersion = VK_API_VERSION_1_3};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
+                               .flags = flags,
                                .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext,
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};
     rdoc_init();
@@ -106,6 +127,10 @@ static int create_instance(void) {
 static const char *const k_required_ext[] = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME,
     VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME};
+
+// VK_KHR_portability_subset is in <vulkan/vulkan_beta.h>, which only the VK_ENABLE_BETA_EXTENSIONS define pulls in;
+// the subset itself is final and MoltenVK requires it on every device it exposes.
+#define VK_KHR_PORTABILITY_SUBSET_NAME "VK_KHR_portability_subset"
 
 // Name of the first missing required extension, or NULL.
 static const char *missing_required(VkPhysicalDevice pd) {
@@ -229,6 +254,10 @@ static int create_device(void) {
     const char *ext[28];
     uint32_t n_ext = 0;
     for (size_t i = 0; i < sizeof k_required_ext / sizeof *k_required_ext; i++) ext[n_ext++] = k_required_ext[i];
+    // A portability implementation (MoltenVK) requires this one on every device it exposes; no feature of it is needed
+    // here, so its feature struct is left out and both sides stay at the defaults.
+    int portable = has_ext(ep, ne, VK_KHR_PORTABILITY_SUBSET_NAME);
+    if (portable) ext[n_ext++] = VK_KHR_PORTABILITY_SUBSET_NAME;
 
     FeatureChain *c = calloc(1, sizeof *c);
     void **tail = &c->f2.pNext;
@@ -315,9 +344,15 @@ static int create_device(void) {
     else if (!h->shaderInt64) miss = "shaderInt64";
     else if (!h->samplerAnisotropy) miss = "samplerAnisotropy";
     else if (!h->independentBlend) miss = "independentBlend";
-    else if (!h->geometryShader) miss = "geometryShader";
+    // Metal has no geometry stage, so MoltenVK reports no geometryShader. Only the pipelines that use one are lost
+    // (with a log line when they are created), which is better than refusing every device on a portability driver.
+    else if (!h->geometryShader && !portable) miss = "geometryShader";
     else if (!h->textureCompressionBC) miss = "textureCompressionBC";
     if (miss) { rt_log("vk: required feature missing on %s: %s", g_vk.props.deviceName, miss); free(c); return 0; }
+    if (!h->geometryShader) {
+        g_vk.no_geometry = 1;
+        rt_log("vk: %s has no geometry stage (portability subset): draws that need one are skipped", g_vk.props.deviceName);
+    }
     if (!c->fault.deviceFault) g_vk.has_device_fault = 0;   // vkGetDeviceFaultInfoEXT needs the feature, not just the extension
     if (g_vk.has_address_binding_report && !c->abr.reportAddressBinding) g_vk.has_address_binding_report = 0;
     if (g_vk.has_pipeline_exec_info && !c->pei.pipelineExecutableInfo) g_vk.has_pipeline_exec_info = 0;

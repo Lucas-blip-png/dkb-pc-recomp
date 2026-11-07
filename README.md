@@ -131,6 +131,10 @@ builds it from their own dump; the installer does this for you ([docs/installer.
 
 **Linux?** TotK Recomp's toolchain supports Linux, so it is possible; nobody has tried with Bananza yet.
 
+**macOS?** Builds and boots on Apple Silicon with MoltenVK: the game reaches the mode select
+([docs/building.md](docs/building.md), "macOS"). It is not playable there yet, and the destructible terrain is missing
+until the geometry stages have a vertex-stage replacement.
+
 **Why GPL?** The shader lowering comes from Eglantine (Eden Emulator Project), which is GPL. Files that came from TotK
 Recomp keep their MIT terms.
 
