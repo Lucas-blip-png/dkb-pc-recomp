@@ -11,8 +11,8 @@
   repeat only: the completed first-visit bundle folder to reuse.
 
 .PARAMETER Exe
-  dkb.exe to run, relative to the repo root. Its folder's runtime files (exe, DLLs, *.bin, totk.ini) are copied into
-  the bundle's bin\ folder and the copy runs, so the game's logs land in bin\logs\totk.log and the source folder is
+  dkb.exe to run, relative to the repo root. Its folder's runtime files (exe, DLLs, *.bin, dkb.ini or totk.ini) are copied into
+  the bundle's bin\ folder and the copy runs, so the game's logs land in bin\logs\dkb.log (bin\logs\totk.log for a TotK build) and the source folder is
   not written to.
 
 .PARAMETER Seconds
@@ -128,9 +128,9 @@ if ($Visit -eq 'first') {
 
 # The runtime copy. The game writes its log beside the exe unless its stderr is a disk file (runtime/main.c log_open),
 # and the harness used to redirect stderr to a file, which turned the log off. Running a copy keeps stderr on the
-# console and the log in bin\logs\totk.log, and leaves the source folder (its logs, caches, totk.ini) untouched.
+# console and the log in bin\logs\dkb.log, and leaves the source folder (its logs, caches, dkb.ini) untouched.
 New-Item -ItemType Directory -Path $binDir | Out-Null
-$runtimeFiles = Get-ChildItem -LiteralPath $srcFolder -File | Where-Object { $_.Name -eq 'dkb.exe' -or $_.Extension -in '.dll', '.bin' -or $_.Name -eq 'totk.ini' }
+$runtimeFiles = Get-ChildItem -LiteralPath $srcFolder -File | Where-Object { $_.Name -eq 'dkb.exe' -or $_.Extension -in '.dll', '.bin' -or $_.Name -in 'dkb.ini', 'totk.ini' }
 foreach ($f in $runtimeFiles) { Copy-Item -LiteralPath $f.FullName -Destination $binDir }
 $exePath = Join-Path $binDir 'dkb.exe'
 $exeFolder = $binDir
@@ -145,7 +145,7 @@ New-Script $Script $ticks | Set-Content -LiteralPath $inputPath -Encoding ascii
 $settings = [ordered]@{
     TOTK_ASSUME_FOCUS       = '1'                  # keep the game running when the window is not focused
     TOTK_WINDOW_SIZE        = '1920x1080'
-    TOTK_FULLSCREEN         = '0'                  # overrides a totk.ini [display] fullscreen = 1 (a6 has one)
+    TOTK_FULLSCREEN         = '0'                  # overrides a dkb.ini [display] fullscreen = 1 (a6 has one)
     TOTK_OUTPUT_RES         = '1920x1080'
     TOTK_RENDER_SCALE       = '100'
     TOTK_FPS_LIMIT          = '60'
@@ -190,7 +190,8 @@ $os = Get-CimInstance Win32_OperatingSystem
 $ramGb = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
 $gitHead = ''
 try { $gitHead = (git -C $repo rev-parse --short HEAD 2>$null) } catch {}
-$iniPath = Join-Path $binDir 'totk.ini'
+$iniPath = Join-Path $binDir 'dkb.ini'
+if (-not (Test-Path -LiteralPath $iniPath)) { $iniPath = Join-Path $binDir 'totk.ini' }   # a TotK build reads totk.ini
 $iniInfo = if (Test-Path -LiteralPath $iniPath) { [ordered]@{ present = $true; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $iniPath).Hash; text = (Get-Content -LiteralPath $iniPath -Raw) } } else { [ordered]@{ present = $false } }
 
 $run = [ordered]@{
@@ -206,7 +207,7 @@ $run = [ordered]@{
     repo_head         = $gitHead
     exe               = [ordered]@{ source = $exeSrc; run_copy = $exePath; sha256 = $hash; bytes = $exeItem.Length; modified = $exeItem.LastWriteTime.ToString('o') }
     runtime_copied    = $copied
-    totk_ini          = $iniInfo
+    settings_ini      = $iniInfo
     exefs             = $exefs
     romfs             = $romfs
     settings          = $settings

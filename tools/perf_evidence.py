@@ -1,5 +1,5 @@
 """Summarise an evidence bundle written by tools/perf_run.ps1: frame times, compile stalls, GPU and process samples,
-and one verdict per acceptance threshold (gates 10-14 of notes/NATIVE_WINDOWS_PORT_PLAN.md section 6).
+and one verdict per acceptance threshold (gates 10-14 of the native-port acceptance plan).
 
     python tools/perf_evidence.py build/agent-perf/<stamp>-<visit> [--warm-after 60]
 
@@ -8,7 +8,7 @@ Writes evidence.txt and evidence.json into the bundle and prints evidence.txt. S
 Frame times: measure=flight runs read flight/*/frames.tsv, one row per present (interval_ms, and the render thread's
 blocked time per kind). Dumps overlap at their edges; a frame number seen twice keeps its first row. Frames after the
 last dump are not in any dump (no dump fires at exit), so the coverage line compares the row count with the game's
-own frame count from logs/totk.log.
+own frame count from logs/dkb.log (logs/totk.log for a TotK build).
 
 measure=summary runs have no flight rows; their frame statistics come from the game's frametime lines in the log
 (always on, one per 60 s and one at exit: mean, 1% low, counts over 25/50/100 ms, the five worst frames). Those are
@@ -245,9 +245,10 @@ def build(bundle, warm_after):
     settings = run.get('settings', {})
     measure = run.get('measure', 'flight')
     frames, dumps, skipped = read_flight(bundle) if measure == 'flight' else ({}, [], 0)
-    # The game writes its log lines to stderr (runtime/main.c log_open puts totk.log beside the stderr file only when a
+    # The game writes its log lines to stderr (runtime/main.c log_open puts the log beside the stderr file only when a
     # log file is opened); the stderr file is the complete record, so it is the fallback.
-    log_path = next((p for p in (bundle / 'bin' / 'logs' / 'totk.log', bundle / 'logs' / 'totk.log', bundle / 'stderr.txt')
+    log_path = next((p for p in (bundle / 'bin' / 'logs' / 'dkb.log', bundle / 'bin' / 'logs' / 'totk.log',
+                                  bundle / 'logs' / 'dkb.log', bundle / 'logs' / 'totk.log', bundle / 'stderr.txt')
                      if p.exists()), bundle / 'stderr.txt')
     log = parse_log(log_path)
     res_log_source = str(log_path.relative_to(bundle))

@@ -25,7 +25,7 @@ Summarise any bundle again: `.venv\Scripts\python.exe -I tools\perf_evidence.py 
 - `-Visit first|repeat`. `first`: a fresh, empty profile and an empty shader cache. `repeat` (needs `-From`): copies the
   profile and shader cache of a completed first-visit bundle. A bundle is reusable only with `complete: true`.
 - `-Exe` (default `build\native-port-playtest\dkb.exe`). The runner copies the exe folder's `dkb.exe`, `*.dll`,
-  `*.bin` and `totk.ini` into `<bundle>\bin\` and runs the copy. The source folder is not written to.
+  `*.bin` and `dkb.ini` (or `totk.ini` for a TotK build) into `<bundle>\bin\` and runs the copy. The source folder is not written to.
 - `-Script walk|idle`. `idle`: the menu presses that reach the cave scene, then nothing. `walk` (default): the same
   presses, then from tick 3000 a 600-tick cycle of forward walk (5 s), diagonal walk (2 s), camera turn right (1.5 s)
   and walk back (1.5 s), until the run ends. Ticks are 60 Hz from the first present. Stick values are +-32767.
@@ -54,11 +54,11 @@ Summarise any bundle again: `.venv\Scripts\python.exe -I tools\perf_evidence.py 
 
 | File | Content |
 |---|---|
-| `run.json` | Status, script, measure mode, exe source and run-copy paths, SHA-256, copied files, `totk.ini` text and hash, settings, cleared variables, machine, stop reason, exit code. |
+| `run.json` | Status, script, measure mode, exe source and run-copy paths, SHA-256, copied files, `dkb.ini` text and hash, settings, cleared variables, machine, stop reason, exit code. |
 | `samples.csv` | Every 5 s: AC line, GPU temp, power, SM and memory clock, utilisation, VRAM, throttle mask (`nvidia-smi`), process working set, commit, peak, handles, threads. |
 | `flight/<dump>/frames.tsv` | Per-frame records (flight mode): interval and render-thread waits (pace, fence, drain, pipe, xlate, tex, astc) and counts. |
 | `flight/<dump>/f*.png` | Thumbnails (only with `-Thumbs`). |
-| `bin/logs/totk.log` | The game log. Written here because the runner runs the copy with stderr on the console (see below). |
+| `bin/logs/dkb.log` | The game log (`bin/logs/totk.log` for a TotK build). Written here because the runner runs the copy with stderr on the console (see below). |
 | `input-<script>.txt` | The scripted input that was used. |
 | `visit.json` | `visit`, `complete`, `stop`, `exit_code`. |
 | `evidence.txt` / `evidence.json` | Statistics, anatomy of slow frames, and verdicts. |
@@ -66,13 +66,12 @@ Summarise any bundle again: `.venv\Scripts\python.exe -I tools\perf_evidence.py 
 
 ## Log location
 
-`runtime/main.c` `log_open` writes `logs\totk.log` next to the exe only when stderr is not a file (its comment: a run
-"whose stderr is not a file already ... also writes its log to logs\totk.log next to totk.exe"; "`2> file` keep their
-own file"). So a run with stderr redirected to a file keeps its log in that file, as designed. An earlier note called
+`runtime/main.c` `log_open` writes `logs\dkb.log` next to the exe only when stderr is not a file (its comment:
+a run whose stderr is not a file "also writes its log" next to the exe; `2> file` keeps its own file). So a run with stderr redirected to a file keeps its log in that file, as designed. An earlier note called
 this a bug; that was wrong. The harness does not redirect stderr, and it runs a copy of the exe folder, so the log is
-at `<bundle>\bin\logs\totk.log`. The log text is also available from the stderr file in older bundles.
+at `<bundle>\bin\logs\dkb.log`. The log text is also available from the stderr file in older bundles.
 
-## Verdicts (gates 10 to 14, notes/NATIVE_WINDOWS_PORT_PLAN.md section 6)
+## Verdicts (gates 10 to 14 of the native-port acceptance plan)
 
 | Gate | Threshold used | Source |
 |---|---|---|
