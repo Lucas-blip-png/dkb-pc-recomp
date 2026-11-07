@@ -2,6 +2,7 @@
 // lowering (runtime/third_party/eglantine, GPL-3.0-or-later) rewrites the Ampere code as Maxwell, laid out as TotK's
 // translator reads it, and a synthetic control block carries the fields the host reads.
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -29,6 +30,7 @@ std::map<uint64_t, Lowered *> cache;
 // Lowered code buffer -> its key, for nvn2_origin: the draw path asks it on every draw (vk_exec_draw.c
 // light_quad_fault_skip), and a scan of the cache there cost most of the render thread in heavy scenes.
 std::unordered_map<const uint8_t *, uint64_t> origins;
+thread_local char last_error[160];
 
 void put32(std::vector<uint8_t> &c, size_t at, uint32_t v) { std::memcpy(c.data() + at, &v, 4); }
 
@@ -38,7 +40,8 @@ Lowered *lower(const uint8_t *control, const uint8_t *code) {
     const bool gfx = ((w0 & 31) == 1 || (w0 & 31) == 2) && ((w0 >> 5) & 31) == 4;   // SPH v4
     const uint32_t hdr = gfx ? 0x80 : 0;
     if (code_len <= hdr) {
-        rt_log("nvn2: stage with %#x bytes of code (header %#x, word 0 %#x): nothing to lower", code_len, hdr, w0);
+        std::snprintf(last_error, sizeof last_error, "stage with %#x bytes of code (header %#x)", code_len, hdr);
+        rt_log("nvn2: %s (word 0 %#x): nothing to lower", last_error, w0);
         return nullptr;
     }
 
@@ -53,8 +56,14 @@ Lowered *lower(const uint8_t *control, const uint8_t *code) {
     }
     const auto lowered = Shader::Ampere::LowerToMaxwell(native, "full");
     if (!lowered) {
-        rt_log("nvn2: Ampere lowering failed at +%#x: %.*s", lowered.error_offset, (int)lowered.error.size(),
-               lowered.error.data());
+        if (lowered.has_error_word2) {
+            std::snprintf(last_error, sizeof last_error, "+%#x: %.*s (word2=%08x)",
+                          lowered.error_offset, (int)lowered.error.size(), lowered.error.data(), lowered.error_word2);
+        } else {
+            std::snprintf(last_error, sizeof last_error, "+%#x: %.*s", lowered.error_offset,
+                          (int)lowered.error.size(), lowered.error.data());
+        }
+        rt_log("nvn2: Ampere lowering failed at %s", last_error);
         return nullptr;
     }
 
@@ -144,12 +153,13 @@ Lowered *lower(const uint8_t *control, const uint8_t *code) {
 // 1 and the replacement control and code for an NVN 2 stage, 0 when it does not lower.
 extern "C" int nvn2_lower(const uint8_t *control, const uint8_t *code, const uint8_t **out_control,
                           const uint8_t **out_code) {
+    last_error[0] = 0;
     const uint64_t key = gfx_shader_nvn2_hash(control, code);
     if (!key) {
         uint32_t w[6];
         std::memcpy(w, control + 0x30, sizeof w);
-        rt_log("nvn2: stage with a control block of unexpected sizes (+0x30 %#x +0x38 %#x +0x44 %#x, code %p): not "
-               "lowered", w[0], w[2], w[5], (const void *)code);
+        std::snprintf(last_error, sizeof last_error, "invalid control sizes +0x30=%#x +0x38=%#x +0x44=%#x", w[0], w[2], w[5]);
+        rt_log("nvn2: %s: not lowered", last_error);
         return 0;
     }
     std::lock_guard<std::mutex> g(lock);
@@ -163,6 +173,8 @@ extern "C" int nvn2_lower(const uint8_t *control, const uint8_t *code, const uin
     *out_code = reinterpret_cast<const uint8_t *>(it->second->code.data());
     return 1;
 }
+
+extern "C" const char *nvn2_lower_error(void) { return last_error; }
 
 // The dump name (gfx_shader_nvn2_hash) of the NVN 2 stage a lowered code buffer came from, or 0. Lowered buffers live
 // for the process, so their addresses never name another stage.
