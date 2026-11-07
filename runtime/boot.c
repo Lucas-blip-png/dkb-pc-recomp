@@ -349,7 +349,8 @@ static void prewarm_main(void *arg) {
     return;
 }
 
-void rt_boot(void) {
+static void boot_main(void *arg) {
+    (void)arg;
     check_npdm();
     if (!rt_config()->shot) vk_pipeline_async_enable();   // a --shot image must not depend on build timing
     // Shaders and pipelines recorded in earlier runs are made ready while the modules load; the guest waits for them.
@@ -372,4 +373,16 @@ void rt_boot(void) {
     rt_guest_start_ns = kern_now_ns();
     kern_run_on_guest_main(guest_main);
     rt_fatal("boot: the guest main thread ended");
+}
+
+void rt_boot(void) {
+#ifdef __APPLE__
+    // macOS runs AppKit, and with it SDL's video and window events, on the process's main thread only: the guest boot
+    // moves to a thread of its own and the caller runs the window's event loop until the guest ends the process.
+    if (!plat_thread_spawn(boot_main, NULL, "game", 0)) rt_fatal("boot: cannot start the game thread");
+    gfx_window_main_thread();
+    return;   // not reached: the main thread only leaves with the process
+#else
+    boot_main(NULL);
+#endif
 }

@@ -19,6 +19,11 @@ const OvNvState *ov_nv_state(void);                        // ov_gfx.c
 
 // ---- window, vsync, focus (gfx_present.c and the window back end, gfx_wsys.h; vk_device.c). Host threads only; never run guest code.
 void gfx_window_start(void);                               // window thread, Vulkan device, swapchain; idempotent
+#ifdef __APPLE__
+// macOS runs SDL's video calls (and AppKit's) on the process's main thread, so that thread runs the window's event
+// loop and the game boots on a thread of its own (boot.c rt_boot). Called on the main thread; does not return.
+void gfx_window_main_thread(void);
+#endif
 void gfx_vsync_bind(uint64_t system_event);                // nn::vi vsync event; signalled at 60 Hz
 uint64_t gfx_vsync_ticks(void);                            // ticks since start
 uint64_t gfx_vsync_time_ns(uint64_t tick);                 // kern_now_ns() time of a tick (pacing)
