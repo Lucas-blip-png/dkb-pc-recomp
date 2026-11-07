@@ -841,8 +841,9 @@ static void answers_for(VkExec *ex, int st, const uint8_t *ctl, uint32_t mask, G
 // (runtime/cfg.c): without it the destructible terrain draws black; DKB_NATIVE_GS=0 turns it off.
 // Eglantine takes the varyings from the hardware skip mask (Maxwell register 0x1240, translate_program.cpp,
 // LowerGeometryPassthrough); the host does not have that mask for NVN 2 programs, so this infers it: what the vertex
-// stage writes and the fragment stage reads. That is enough for a fragment stage that reads nothing, as the terrain's
-// does; a stage whose real mask differs would forward the wrong set.
+// stage writes and the fragment stage reads. On AMD's RDNA 1/2 Windows driver the mine voxel stage is the known
+// exception: its captured hardware mask forwards locations 0 and 19 across both its depth and colour variants. RADV
+// and the other drivers keep the reflected mask.
 static int native_gs_on(void) {
     static int on = -1;
     if (on < 0) on = cfg_bool("TOTK_NATIVE_GS");
@@ -858,7 +859,9 @@ static const uint8_t *native_gs_control(const uint8_t *ctl, const uint8_t *code,
     static size_t count, capacity;
     GfxShaderIo io[32];
     const uint32_t fs_in = gfx_shader_inputs(native_gs_fs, io), vs_out = gfx_shader_outputs(native_gs_vs, io);
-    const uint32_t mask = fs_in & vs_out;
+    uint32_t mask = fs_in & vs_out;
+    if (vk_caps.amd_sc && nvn2_origin(code) == UINT64_C(0x3dbaaf649cb5f927))
+        mask |= (UINT32_C(1) << 0) | (UINT32_C(1) << 19);
     for (size_t i = 0; i < count; i++)
         if (made[i].ctl == ctl && made[i].mask == mask) return made[i].copy;
     uint32_t skip[8];

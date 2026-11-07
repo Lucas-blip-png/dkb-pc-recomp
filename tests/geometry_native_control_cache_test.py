@@ -35,6 +35,8 @@ def fixture(source):
 struct GfxShader { uint32_t locations; };
 static struct GfxShader vertex,fragment;
 static const GfxShader *native_gs_vs=&vertex,*native_gs_fs=&fragment;
+static uint64_t shader_origin=17;
+static struct { int amd_sc; } vk_caps={1};
 uint32_t gfx_shader_inputs(const GfxShader *s,GfxShaderIo io[32]) {
     if(s!=&fragment)abort();memset(io,0,32*sizeof *io);return s->locations;
 }
@@ -42,7 +44,7 @@ uint32_t gfx_shader_outputs(const GfxShader *s,GfxShaderIo io[32]) {
     if(s!=&vertex)abort();memset(io,0,32*sizeof *io);return s->locations;
 }
 void rt_log(const char *format,...) { (void)format; }
-uint64_t nvn2_origin(const uint8_t *code) { return code?17:0; }
+uint64_t nvn2_origin(const uint8_t *code) { return code?shader_origin:0; }
 enum { MAX_BLOCKS=1024,CONTROL_BYTES=0x880,CODE_BYTES=0x100,CONTEXTS=257 };
 static struct { void *pointer; size_t bytes; } blocks[MAX_BLOCKS];
 static unsigned malloc_calls,realloc_calls,free_calls,successful_copies,live_blocks;
@@ -161,12 +163,26 @@ static void packing_failure(const char *name) {
     const uint8_t *valid=native_gs_control(controls[1],code,CODE_BYTES);
     verify(valid,1,0x80000015u,name);CHECK(successful_copies==2&&free_calls==1);
 }
+static void voxel_mask(const char *name) {
+    shader_origin=UINT64_C(0x3dbaaf649cb5f927);
+    vertex.locations=UINT32_C(0x00080001);fragment.locations=0;
+    const uint8_t *copy=native_gs_control(controls[0],code,CODE_BYTES);
+    verify(copy,0,UINT32_C(0x00080001),name);
+    CHECK(successful_copies==1&&free_calls==0&&live_blocks==2);
+    CHECK(native_gs_control(controls[0],code,CODE_BYTES)==copy);
+    vk_caps.amd_sc=0;
+    const uint8_t *other=native_gs_control(controls[0],code,CODE_BYTES);
+    verify(other,0,0,name);CHECK(other!=copy);
+    CHECK(successful_copies==2&&free_calls==0&&live_blocks==3);
+    CHECK(native_gs_control(controls[0],code,CODE_BYTES)==other);
+}
 int main(int argc,char **argv) {
     if(argc!=2)return 2;const char *name=argv[1];setup();(void)spy_realloc;
     if(!strcmp(name,"memo"))memo(name);
     else if(!strcmp(name,"copy-failure")||!strcmp(name,"initial-growth-failure")||!strcmp(name,"growth-failure"))
         allocation_failure(name,!strcmp(name,"growth-failure"));
-    else if(!strcmp(name,"packing-failure"))packing_failure(name);else return 2;
+    else if(!strcmp(name,"packing-failure"))packing_failure(name);
+    else if(!strcmp(name,"voxel-mask"))voxel_mask(name);else return 2;
     printf("%s: %u checks, %u failures; malloc=%u realloc=%u free=%u live=%u\n",name,checks,failures,
            malloc_calls,realloc_calls,free_calls,live_blocks);
     // Production retains these controls until process exit. Only this fixture owns teardown.
@@ -195,7 +211,7 @@ def main():
     (out / 'compile.log').write_text(compiled.stdout+compiled.stderr)
     if compiled.returncode:raise RuntimeError(compiled.stderr)
     rows=[]
-    for case in ('memo', 'copy-failure', 'initial-growth-failure', 'growth-failure', 'packing-failure'):
+    for case in ('memo', 'copy-failure', 'initial-growth-failure', 'growth-failure', 'packing-failure', 'voxel-mask'):
         result=subprocess.run([str(exe),case],env=dict(os.environ,PYTHONDONTWRITEBYTECODE='1'),
                               capture_output=True,text=True,timeout=30)
         (out/f'{case}.log').write_text(result.stdout+result.stderr)
@@ -211,7 +227,7 @@ def main():
                          'origin/log metadata only; no native lowering, shader translation or execution'],
             'limits':['same replay-thread serialization as production; no concurrent-call claim',
                       'normal malloc/realloc failures tested, SIZE_MAX overflow branches reviewed but not executed',
-                      'admission/reflection/native semantics unchanged; no Vulkan/GPU or title/SDK inputs']}
+                      'no Vulkan/GPU or title/SDK inputs']}
     (out/'handoff.json').write_text(json.dumps(report,indent=2)+'\n')
     return int(any(r['exit'] for r in rows))
 
