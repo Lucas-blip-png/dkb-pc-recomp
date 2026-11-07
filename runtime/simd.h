@@ -10,8 +10,11 @@
 // correctly rounded (build x86 with -mfma).
 #pragma once
 #include <fenv.h>
-#include <immintrin.h>
 #include <math.h>
+
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 
 #include "cpu.h"
 
@@ -211,6 +214,15 @@ SI int simd_fe_mode(uint64_t fpcr) {
     return m[(fpcr >> 22) & 3];
 }
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+// On AArch64 the host FPCR is the guest FPCR (cpu.h rt_fpcr_sync is a no-op), so host FP already rounds, flushes and
+// saturates the way the instruction it lowers does: there is nothing to switch around one operation and no directed
+// rounding to take a slow path for. simd_rm_* stay as no-ops so the shared lowering compiles unchanged.
+SI unsigned simd_rm_enter(uint64_t fpcr) { (void)fpcr; return 0; }
+SI void simd_rm_rz(void) {}
+SI void simd_rm_leave(unsigned old) { (void)old; }
+SI int simd_directed(const Cpu *c) { (void)c; return 0; }
+#else
 // MXCSR rounding control (bits 13-14) without fesetround's x87 + SSE double write; ldmxcsr only on change.
 #define SIMD_RC_MASK 0x6000u
 SI unsigned simd_rm_set_rc(unsigned cur, unsigned rc) {
@@ -233,6 +245,7 @@ SI void simd_rm_leave(unsigned old) {
 // The thread's MXCSR mirrors the guest FPCR.FZ with RC = nearest whenever guest code runs (cpu.h rt_fpcr_sync), so
 // plain host FP gives the ARM result unless FPCR.RMode asks for directed rounding, which the slow paths handle.
 SI int simd_directed(const Cpu *c) { return __builtin_expect((c->fpcr & FPCR_RM) != 0, 0); }
+#endif
 
 #define F s
 #define T float

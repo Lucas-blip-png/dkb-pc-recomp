@@ -10,6 +10,8 @@
 #if defined(__x86_64__) || defined(_M_X64)
 #include "fp_x86.h"
 #include <immintrin.h>
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include "fp_arm.h"
 #endif
 
 // ---- threads
@@ -74,6 +76,8 @@ void plat_yield(void);                    // gives the rest of the time slice to
 static inline void plat_pause(void) {     // spin-wait hint
 #if defined(__x86_64__) || defined(_M_X64)
     _mm_pause();
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    __asm__ volatile("yield");
 #endif
 }
 
@@ -182,6 +186,10 @@ enum { PLAT_MEM_FREE = -2, PLAT_MEM_RESERVED = -1 };   // plat_mem_state besides
 // Reserves [addr, addr + n) inaccessible, exactly there: 0 when any of it is taken. watch: writes to its pages are
 // tracked for plat_mem_written.
 int plat_mem_reserve(uint64_t addr, uint64_t n, int watch);
+// The lowest range of n bytes at an align boundary inside [lo, hi) that nothing maps yet, reserved at that address
+// (watch as above), *at set to it; 0 when none fits. For a host whose fixed addresses near the guest layout are taken
+// by the system's own mappings, where a reservation at a guessed address would keep failing.
+int plat_mem_reserve_in(uint64_t lo, uint64_t hi, uint64_t n, uint64_t align, int watch, uint64_t *at);
 // n bytes of read-write memory anywhere, zero, backed only as pages are first written (plat_mem_protect may seal them);
 // NULL on failure. Kept until exit.
 void *plat_mem_alloc(size_t n);

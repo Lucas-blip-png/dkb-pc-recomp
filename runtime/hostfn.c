@@ -20,6 +20,17 @@ __attribute__((section(".ovr$a"), used)) static const RtHostEntry ovr_start[1];
 __attribute__((section(".ovr$z"), used)) static const RtHostEntry ovr_stop[1];
 __attribute__((section(".obs$a"), used)) static const RtHostEntry obs_start[1];
 __attribute__((section(".obs$z"), used)) static const RtHostEntry obs_stop[1];
+#elif defined(__APPLE__)
+// Mach-O: ld64 defines section$start$<segment>$<section> and section$end$<segment>$<section> around a section that
+// at least one object file fills. Weak, so a build without observers has NULL bounds on both ends.
+extern const RtHostEntry mach_ovr_start[] __asm__("section$start$__DATA$__totk_ovr") __attribute__((weak));
+extern const RtHostEntry mach_ovr_stop[] __asm__("section$end$__DATA$__totk_ovr") __attribute__((weak));
+extern const RtHostEntry mach_obs_start[] __asm__("section$start$__DATA$__totk_obs") __attribute__((weak));
+extern const RtHostEntry mach_obs_stop[] __asm__("section$end$__DATA$__totk_obs") __attribute__((weak));
+#define ovr_start mach_ovr_start
+#define ovr_stop mach_ovr_stop
+#define obs_start mach_obs_start
+#define obs_stop mach_obs_stop
 #else
 // ELF: the linker defines __start_<section> and __stop_<section> around a section named like a C identifier. Weak: a
 // build without observers has no such section, and both bounds are then NULL.

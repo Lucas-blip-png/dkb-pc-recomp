@@ -268,10 +268,15 @@ static volatile int host_probe_hits;
 static void host_probe(Cpu *c) { host_probe_hits++; c->x[0] = 42; }
 
 static void check_cpu(void) {
+#ifdef __aarch64__
+    // The portable FP/SIMD lowering (simd.h) runs on every AArch64 CPU: NEON is part of the base architecture there.
+    printf("cpu: AArch64 (portable FP/SIMD lowering)\n");
+#else
     __builtin_cpu_init();
     int ok = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2");
     printf("cpu: x86-64-v3 (AVX2, FMA, BMI2) %s\n", ok ? "present" : "MISSING");
     CHECK(ok, "the lifted code is built for x86-64-v3");
+#endif
 }
 
 // Layout: ascending, no overlap, below 2^39, and inside the window mem_init reserved.
@@ -298,8 +303,23 @@ static void check_layout(void) {
            (unsigned long long)g->aslr.base, (unsigned long long)g->aslr.size, (unsigned long long)g->stack.base,
            (unsigned long long)g->heap.base, (unsigned long long)g->alias.base, (unsigned long long)g->alias.size,
            (unsigned long long)g->kernel.base, (unsigned long long)g->hostfn.base);
-    CHECK(g->alias.base + g->alias.size <= lay[0].base && g->heap.base + g->heap.size <= g->alias.base,
-          "guest regions overlap");
+    // No overlap whatever the order: Windows and Linux put the stack and heap block below the modules and the alias
+    // block above it, macOS has nothing mappable below the modules and puts both above the host functions.
+    struct { const char *name; uint64_t base, size; } r[] = {
+        {"stack", g->stack.base, g->stack.size},
+        {"heap", g->heap.base, g->heap.size},
+        {"alias", g->alias.base, g->alias.size},
+        {"kernel", g->kernel.base, g->kernel.size},
+        {"host functions", g->hostfn.base, g->hostfn.size},
+        {"modules", lay[0].base, lay[n - 1].base + lay[n - 1].size - lay[0].base},
+    };
+    for (int i = 0; i < (int)(sizeof r / sizeof *r); i++) {
+        CHECK(r[i].base < RT_ADDRESS_LIMIT && r[i].size <= RT_ADDRESS_LIMIT - r[i].base,
+              "%s is not below 2^39", r[i].name);
+        for (int j = i + 1; j < (int)(sizeof r / sizeof *r); j++)
+            if (r[i].base < r[j].base + r[j].size && r[j].base < r[i].base + r[i].size)
+                CHECK(0, "%s and %s overlap", r[i].name, r[j].name);
+    }
 }
 
 // Every function start dispatches to its own function. The word after a start (unless that is a start too), a
@@ -392,7 +412,10 @@ static void check_memory(void) {
     mem_query(RT_HOSTFN_BASE + 0x40, &q);
     CHECK(q.state == 0x10 && q.base == RT_HOSTFN_BASE, "QueryMemory on the host-function window");
     mem_query(g->alias.base + g->alias.size + 0x1000, &q);
-    CHECK(q.state == 3 && q.base == g->alias.base + g->alias.size, "QueryMemory on host memory");
+    // The alias region can end exactly at 2^39 (macOS has no room to put it lower), and then that address is past the
+    // guest address space: inaccessible rather than the host's, both of which mean the guest may not use it.
+    CHECK((q.state == 3 && q.base == g->alias.base + g->alias.size) ||
+          (q.state == 0x10 && q.base == RT_ADDRESS_LIMIT), "QueryMemory on host memory");
     CHECK(mem_set_heap_size(0, &heap) == 0, "SetHeapSize 0");
     printf("memory: heap, physical memory, stack move, QueryMemory, GetInfo: %s\n", failures > before ? "FAIL" : "ok");
 }

@@ -504,6 +504,20 @@ int plat_mem_reserve(uint64_t addr, uint64_t n, int watch) {
     return p != NULL;
 }
 
+// A linear scan from lo: an address is free when the fixed reservation there succeeds, so a candidate another thread
+// holds costs one failed VirtualAlloc and the scan moves past it.
+int plat_mem_reserve_in(uint64_t lo, uint64_t hi, uint64_t n, uint64_t align, int watch, uint64_t *at) {
+    if (!n || hi <= lo || n > hi - lo) return 0;
+    if (!align) align = 4096;
+    if (align & (align - 1)) return 0;
+    for (uint64_t a = (lo + align - 1) & ~(align - 1); a <= hi - n; a += align)
+        if (plat_mem_reserve(a, n, watch)) {
+            *at = a;
+            return 1;
+        }
+    return 0;
+}
+
 void *plat_mem_alloc(size_t n) { return VirtualAlloc(NULL, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); }
 
 int plat_mem_commit(uint64_t addr, size_t n) {
