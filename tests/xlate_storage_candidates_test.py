@@ -6,6 +6,7 @@ the separate functional GPU check: descriptor resolution belongs to the host.
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import struct
 import subprocess
@@ -23,6 +24,18 @@ def encoded(ops):
         batch = ops[i:i + 3]
         words += [original.SCHED] + batch + [0] * (3 - len(batch))
     return struct.pack('<' + 'Q' * len(words), *words)
+
+
+def suatom_1d_add(dst, addr, value):
+    # SUATOM (not the B form): Dest 0-7, SrcA 8-15, SrcB 20-27, pred PT, TidB 36-48 = 0 (handle 0), Dim 33-35 = 0 (_1d),
+    # Op 29-32 = 0 (Add), Size 51-53 = 0 (U32).
+    return 0xEA00000000000000 | dst | (addr << 8) | (value << 20) | original.PT
+
+
+def sust_1d(data, addr):
+    # SUST (immediate handle 0): Dest = first data register 0-7, SrcA 8-15, Rgba 20-23 = 0xF, Dim 33-35 = 0 (_1d),
+    # pred PT.
+    return 0xEB28000000000000 | data | (addr << 8) | (0xF << 20) | original.PT
 
 
 def packet(key, code, **changes):
@@ -326,7 +339,23 @@ class CandidateTest(unittest.TestCase):
             if op >> 51 == 0xEED8000000000000 >> 51:
                 ops[i] = (op & ~(7 << 48)) | (2 << 48)   # size field 2: LsSize2.U16
         self.translate([packet('crossing_store16', encoded(ops), storage_candidates_version=1)])
-        self.assertGreaterEqual(self._compare_exchange_sites('crossing_store16'), 3)
+        # Exactly three compare-exchange sites on this build: the guarded word path plus the two compare-exchanges
+        # of the crossing path in patch 0022 (low byte to the first word, high byte to the next).
+        self.assertEqual(self._compare_exchange_sites('crossing_store16'), 3)
+
+    def test_1d_store_and_atomic_declare_one_image_dimension(self):
+        # A 1D image written by SUST and updated by SUATOM must be declared 1D in both places (patch 0021 covers the
+        # SUATOM path; EmitSust must not turn it into a 2D image).
+        ops = [original.movi(0, 3), original.movi(1, 0x3f800000), original.movi(2, 1),
+               sust_1d(1, 0), suatom_1d_add(3, 0, 2), original.EXIT]
+        self.translate([packet('image_1d', encoded(ops))])   # reply 'ok <key>' and spirv-val --target-env vulkan1.3 passes
+        disasm = args.spirv_val.with_name(args.spirv_val.name.replace('spirv-val', 'spirv-dis'))
+        dis = subprocess.run([str(disasm), str(args.out / 'image_1d.spv')], capture_output=True, text=True, timeout=30)
+        self.assertEqual(dis.returncode, 0, dis.stderr)
+        dims = re.findall(r'OpTypeImage %\S+ (\w+)', dis.stdout)
+        self.assertTrue(dims, 'the module must declare the image')
+        self.assertEqual(set(dims), {'1D'}, 'every declaration of the 1D image must be 1D:\n' + '\n'.join(
+            line for line in dis.stdout.splitlines() if 'OpTypeImage' in line))
 
     def test_original_wide_register_values_and_canaries(self):
         for bits in (64, 128):
