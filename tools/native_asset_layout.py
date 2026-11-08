@@ -47,7 +47,7 @@ DIMENSIONS = {1: "1d", 2: "2d", 3: "3d"}
 SURFACE_DIM_OFFSET = 0x5c
 SURFACE_DIM_NAMES = {0: "1d", 1: "2d", 2: "3d", 3: "cube", 4: "1d-array", 5: "2d-array",
                      6: "2d-msaa", 7: "2d-msaa-array", 8: "cube-array"}
-# Values confirmed against real records in the verified RomFS (see notes/native-port/handoffs/h5c-assets.md):
+# Values confirmed against real records in a verified RomFS of the game (checked, not included here):
 # 1 = 36 single-layer 2D records, 5 = 2D arrays with 2, 3 and 4 layers, 3 = the seven six-layer 0x0f05 records.
 SURFACE_DIM_VALIDATED = {1, 3, 5}
 # Value 2 (3D) is not confirmed. A cube claim is made only when the 3D value is also confirmed on a real record.
