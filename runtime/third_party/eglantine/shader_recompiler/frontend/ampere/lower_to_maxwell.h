@@ -1550,12 +1550,14 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             if (dimension != 0 && dimension != 1 && !array && !volume)
                 return fail(index, "native texel fetch dimension");
             if (swizzle == ~0U) return fail(index, "native texel fetch channel mask");
-            // Mesa NAK src/nouveau/compiler/nak/sm70_encode.rs, SM70Op::encode for OpTld, stores AddOffI in bit 76;
-            // src/nouveau/compiler/nak/sm50.rs, SM50Op::encode for OpTld, carries it in Maxwell bit 35.
+            // Ampere bit 76 is the address-offset flag (AOFFI). The TLDS word emitted below has no offset flag:
+            // its bits 28..35 are the second destination register (Ryujinx InstTlds.Dest2), so bit 35 is the top bit
+            // of that register, not an offset. Reject the offset form instead of mis-encoding it.
+            if (insn.Bits(76, 1)) return fail(index, "native texel fetch address offset");
             if (insn.Bits(77, 1)) return fail(index, "native texel fetch cache mode");
             const bool multisample = insn.Bits(78, 1);
             // TLDS target 6 takes x/y from Ra:Ra+1 and the sample index from Rb.
-            if (multisample && (dimension != 1 || insn.Bits(76, 1) ||
+            if (multisample && (dimension != 1 ||
                                 (source_a & 1) || source_a + 1 >= 246 || source_b >= 246 ||
                                 insn.Bits(79, 1) || insn.Bits(91, 1)))
                 return fail(index, "native texel fetch multisample mode");
@@ -1586,8 +1588,7 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             emit((0xda00000000000000ULL ^ (u64{insn.Bits(79, 1)} << 59)) | predicate | dest | (u64{source_a} << 8) |
                  (u64{source_b} << 20) | (u64{insn.Bits(64, 8)} << 28) |
                  (u64{insn.Bits(40, 14)} << 36) | (u64{insn.Bits(90, 1)} << 49) |
-                 (u64{swizzle} << 50) | (u64{multisample ? 6U : array ? 8U : volume ? 7U : dimension == 0 ? 0U : 2U} << 53) |
-                 (u64{insn.Bits(76, 1)} << 35));
+                 (u64{swizzle} << 50) | (u64{multisample ? 6U : array ? 8U : volume ? 7U : dimension == 0 ? 0U : 2U} << 53));
             break;
         }
         case 0x91a: // DEPBAR.LE SB5, 1: scoreboard wait, represented by IR data dependencies.

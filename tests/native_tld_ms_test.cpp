@@ -20,6 +20,18 @@ int main() {
         CHECK((x & 255) == 18); CHECK(((x >> 28) & 255) == 22);
     } else CHECK(false);
     op.words[2] |= 1u << 12; CHECK(!lower(op)); // offset
+    op.words[2] &= ~(1u << 12);
+    // Plain (non-multisample) 2D fetch with a split second destination: bit 35 of the TLDS word is the top bit of the
+    // second destination register (Dest2, bits 28..35), so it must be 0 here (second destination R22).
+    auto plain = op; plain.words[2] &= ~(1u << 14);
+    const auto plain_result = lower(plain);
+    CHECK(bool(plain_result));
+    if (plain_result && !plain_result.instructions.empty()) {
+        const u64 x = plain_result.instructions[0];
+        CHECK(((x >> 28) & 255) == 22); CHECK(((x >> 35) & 1) == 0); CHECK(((x >> 53) & 15) == 2);
+    } else CHECK(false);
+    // The address-offset flag (bit 76) has no place in a TLDS word and must be rejected, not folded into bit 35.
+    plain.words[2] |= 1u << 12; CHECK(!lower(plain));
     op.words[2] &= ~(1u << 12); op.words[0] |= 1u << 24; CHECK(!lower(op)); // odd pair
     op.words[0] &= ~(1u << 24); op.words[1] = (op.words[1] & ~(7u << 29)) | (5u << 29);
     CHECK(!lower(op)); // array multisample not implemented
