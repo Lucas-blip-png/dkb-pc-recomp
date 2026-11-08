@@ -1547,10 +1547,11 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             if (dimension != 0 && dimension != 1 && !array && !volume)
                 return fail(index, "native texel fetch dimension");
             if (swizzle == ~0U) return fail(index, "native texel fetch channel mask");
-            // Ampere bit 76 is the address-offset flag (AOFFI). The TLDS word emitted below has no offset flag:
-            // its bits 28..35 are the second destination register (Ryujinx InstTlds.Dest2), so bit 35 is the top bit
-            // of that register, not an offset. Reject the offset form instead of mis-encoding it.
-            if (insn.Bits(76, 1)) return fail(index, "native texel fetch address offset");
+            // Ampere bit 76 is the address-offset flag (AOFFI). A 2D fetch with it takes its x/y from the register
+            // pair Ra:Ra+1 and a packed offset from Rb (x in bits 0..3, y in bits 4..7, signed), which is TLDS target 4
+            // (Texture2DLodZeroOffset). The twelve compute stages of the game that use the flag all fetch 2D with an even Ra.
+            // Bit 35 of the TLDS word is not an offset flag (it is the top bit of Dest2), so the flag is not copied.
+            const bool offset = insn.Bits(76, 1);
             if (insn.Bits(77, 1)) return fail(index, "native texel fetch cache mode");
             const bool multisample = insn.Bits(78, 1);
             // TLDS target 6 takes x/y from Ra:Ra+1 and the sample index from Rb.
@@ -1558,6 +1559,13 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
                                 (source_a & 1) || source_a + 1 >= 246 || source_b >= 246 ||
                                 insn.Bits(79, 1) || insn.Bits(91, 1)))
                 return fail(index, "native texel fetch multisample mode");
+            if (offset && (multisample || dimension != 1 || (source_a & 1) || source_a + 1 >= 246 ||
+                           (source_b >= 246 && source_b != 255))) {
+                // Dimension 5 is the 2D array: TLDS target 8 has the layer but no offset flag, target 4 has the offset but no
+                // layer, so the pair cannot be expressed in one TLDS word and the form stays rejected.
+                if (dimension == 5 && !multisample) return fail(index, "native texel fetch address offset on a 2D array");
+                return fail(index, "native texel fetch address offset");
+            }
             if (insn.Bits(80, 1)) return fail(index, "native texel fetch half mode");
             if (insn.Bits(81, 3) != 7) return fail(index, "native texel fetch eviction priority");
             if (insn.Bits(87, 3) != 1) return fail(index, "native texel fetch LOD mode");
@@ -1585,7 +1593,8 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             emit((0xda00000000000000ULL ^ (u64{insn.Bits(79, 1)} << 59)) | predicate | dest | (u64{source_a} << 8) |
                  (u64{source_b} << 20) | (u64{insn.Bits(64, 8)} << 28) |
                  (u64{insn.Bits(40, 14)} << 36) | (u64{insn.Bits(90, 1)} << 49) |
-                 (u64{swizzle} << 50) | (u64{multisample ? 6U : array ? 8U : volume ? 7U : dimension == 0 ? 0U : 2U} << 53));
+                 (u64{swizzle} << 50) |
+                 (u64{offset ? 4U : multisample ? 6U : array ? 8U : volume ? 7U : dimension == 0 ? 0U : 2U} << 53));
             break;
         }
         case 0x91a: // DEPBAR.LE SB5, 1: scoreboard wait, represented by IR data dependencies.

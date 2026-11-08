@@ -30,8 +30,9 @@ int main() {
         const u64 x = plain_result.instructions[0];
         CHECK(((x >> 28) & 255) == 22); CHECK(((x >> 35) & 1) == 0); CHECK(((x >> 53) & 15) == 2);
     } else CHECK(false);
-    // The address-offset flag (bit 76) has no place in a TLDS word and must be rejected, not folded into bit 35.
-    plain.words[2] |= 1u << 12; CHECK(!lower(plain));
+    // The address-offset flag (bit 76) on a 2D fetch lowers to TLDS target 4 with the offset in Rb (native_tld_offset_test).
+    plain.words[2] |= 1u << 12; CHECK(lower(plain));
+    if (lower(plain)) CHECK(((lower(plain).instructions[0] >> 53) & 15) == 4);
     op.words[2] &= ~(1u << 12); op.words[0] |= 1u << 24; CHECK(!lower(op)); // odd pair
     op.words[0] &= ~(1u << 24); op.words[1] = (op.words[1] & ~(7u << 29)) | (5u << 29);
     CHECK(!lower(op)); // array multisample not implemented
