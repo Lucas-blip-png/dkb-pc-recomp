@@ -1,11 +1,11 @@
 """Where the slow frames spend their CPU: the TOTK_PROFILE_SLOW dumps of a perf_run profiled bundle, against the whole run.
 
-    python tools/perf_slow_profile.py build/agent-perf/<bundle>/prof/profile.txt build/native-port-a6/totk.map [--slow-ms 100]
+    python tools/perf_slow_profile.py build/agent-perf/<bundle>/prof/profile.txt <link map of the same exe> [--slow-ms 100]
 
 Inputs: profile.txt (the whole-run profile: base, module ranges, rip counts) and profile.txt.f<frame> dumps, one per
 slow present (TOTK_PROFILE_SLOW=<ms>): `frame N interval_ms X` and `tstack <tid> <ms into the window> <rip>...` lines.
 Each sample's leaf Rip (the first address of the chain) is mapped to the nearest map symbol in the exe (the map is the
-link map of the same exe: build/native-port-a6/totk.map). Outside-exe leaves are grouped by module.
+link map of the same exe). Outside-exe leaves are grouped by module.
 
 Output: for the dumps with interval >= --slow-ms, the leaf functions and the inclusive functions (any frame of the chain),
 each with its share of the slow samples and its share of the whole-run samples (from the rip counts of profile.txt, which
@@ -74,7 +74,7 @@ def main():
 
     dumps = dump_frames(a.profile)
     slow = {f: v for f, v in dumps.items() if v[0] is not None and v[0] >= a.slow_ms}
-    print(f'profile {a.profile}: base {base:#x}, exe {exe[1]:#x} bytes, {len(dumps)} dumps, {len(slow)} with interval >= {a.slow_ms} ms')
+    print(f'profile {a.profile}: base {base:#x}, exe ' + (f'{exe[1]:#x} bytes' if exe else 'module not in the profile') + f', {len(dumps)} dumps, {len(slow)} with interval >= {a.slow_ms} ms')
     if not slow:
         print('no slow dumps: nothing to attribute')
         return

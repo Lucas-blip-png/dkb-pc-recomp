@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
   Controlled dkb.exe performance run that writes an evidence bundle under build\agent-perf\<stamp>-<visit>\.
@@ -11,9 +12,15 @@
   repeat only: the completed first-visit bundle folder to reuse.
 
 .PARAMETER Exe
-  dkb.exe to run, relative to the repo root. Its folder's runtime files (exe, DLLs, *.bin, dkb.ini or totk.ini) are copied into
+  dkb.exe to run, relative to the repo root (default build\dkb100\dkb.exe, where docs/dkb-testing.md builds it). Its folder's runtime files (exe, DLLs, *.bin, dkb.ini or totk.ini) are copied into
   the bundle's bin\ folder and the copy runs, so the game's logs land in bin\logs\dkb.log (bin\logs\totk.log for a TotK build) and the source folder is
   not written to.
+
+.PARAMETER Exefs
+  The extracted ExeFS folder (main, sdk), relative to the repo root or absolute (default build\extracted\dkb100\exefs, the layout of docs/building.md).
+
+.PARAMETER Romfs
+  The extracted RomFS folder (romfs.bin, index.json), relative to the repo root or absolute (default build\extracted\dkb100\romfs).
 
 .PARAMETER Seconds
   Wall-clock length of the run before the game window is closed (default 180).
@@ -32,7 +39,8 @@
   idle: the menu presses only (the earlier harness script, kept for comparison).
 
 .PARAMETER Realtime
-  Value of TOTK_REALTIME (default 1). Builds without the realtime patch set ignore it (the log says so).
+  Value of TOTK_REALTIME. Unset by default, so the run uses the game's own default (runtime/cfg.c). Pass 0 or 1 to force it;
+  builds without the realtime patch set ignore it (the log says so).
 
 .PARAMETER Thumbs
   Verification only: flight thumbnails (320x180) of the frames around each dump, to look at the scene. The thumbnail
@@ -45,13 +53,15 @@
 param(
     [ValidateSet('first', 'repeat')] [string]$Visit = 'first',
     [string]$From = '',
-    [string]$Exe = 'build\native-port-playtest\dkb.exe',
+    [string]$Exe = 'build\dkb100\dkb.exe',
+    [string]$Exefs = 'build\extracted\dkb100\exefs',
+    [string]$Romfs = 'build\extracted\dkb100\romfs',
     [int]$Seconds = 180,
     [int]$SampleSeconds = 5,
     [int]$WarmAfter = 60,
     [ValidateSet('flight', 'summary')] [string]$Measure = 'flight',
     [ValidateSet('walk', 'idle')] [string]$Script = 'walk',
-    [string]$Realtime = '1',
+    [string]$Realtime = '',
     [string]$ExtraEnv = '',   # NAME=VALUE pairs separated by ';' (an array does not survive pwsh -File quoting)
     [switch]$Thumbs,
     [string]$Label = '',
@@ -63,6 +73,8 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
 function Full([string]$p) { if ([IO.Path]::IsPathRooted($p)) { $p } else { Join-Path $repo $p } }
 function Say([string]$m) { Write-Host ("[perf_run {0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) }
+# Numbers in the samples CSV must not depend on the user's culture (pt-BR writes "1911,0" and splits the row).
+function Inv([string]$format, [object[]]$values) { [string]::Format([Globalization.CultureInfo]::InvariantCulture, $format, $values) }
 function Write-Json([object]$obj, [string]$path) { $obj | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path -Encoding utf8 }
 
 # The menu presses that reached the cave scene in build\native-port-integrate\menu-to-scene.txt (60 Hz ticks).
@@ -95,10 +107,10 @@ if ($others.Count -gt 0) {
 # ---------------------------------------------------------------- 2. inputs
 $exeSrc = Full $Exe
 $srcFolder = Split-Path -Parent $exeSrc
-$exefs = Full 'build\extracted\dkb100-dump\exefs'
-$romfs = Full 'build\extracted\dkb100\romfs'
+$exefs = Full $Exefs
+$romfs = Full $Romfs
 foreach ($req in @($exeSrc, (Join-Path $exefs 'main'), (Join-Path $exefs 'sdk'), (Join-Path $romfs 'romfs.bin'), (Join-Path $romfs 'index.json'))) {
-    if (-not (Test-Path -LiteralPath $req)) { throw "Missing input: $req" }
+    if (-not (Test-Path -LiteralPath $req)) { throw "Missing input: $req (pass -Exe, -Exefs and -Romfs for your build)" }
 }
 
 $fromFull = ''
@@ -115,14 +127,14 @@ if ($Visit -eq 'repeat') {
 # ---------------------------------------------------------------- 3. bundle, isolated profile and cache, runtime copy
 $bundle = Join-Path $repo ('build\agent-perf\{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $Visit)
 New-Item -ItemType Directory -Path $bundle | Out-Null
-$profile = Join-Path $bundle 'profile'
+$gameProfile = Join-Path $bundle 'profile'
 $cache = Join-Path $bundle 'shader-cache'
 $flightDir = Join-Path $bundle 'flight'
 $binDir = Join-Path $bundle 'bin'
 if ($Visit -eq 'first') {
-    New-Item -ItemType Directory -Path $profile, $cache | Out-Null
+    New-Item -ItemType Directory -Path $gameProfile, $cache | Out-Null
 } else {
-    Copy-Item -LiteralPath (Join-Path $fromFull 'profile') -Destination $profile -Recurse
+    Copy-Item -LiteralPath (Join-Path $fromFull 'profile') -Destination $gameProfile -Recurse
     Copy-Item -LiteralPath (Join-Path $fromFull 'shader-cache') -Destination $cache -Recurse
 }
 
@@ -149,12 +161,12 @@ $settings = [ordered]@{
     TOTK_OUTPUT_RES         = '1920x1080'
     TOTK_RENDER_SCALE       = '100'
     TOTK_FPS_LIMIT          = '60'
-    TOTK_REALTIME           = $Realtime
     TOTK_VK_PRESENT         = 'mailbox'            # the default, pinned so the run does not depend on it
     TOTK_PERF_OVERLAY       = 'off'
     TOTK_INPUT_SCRIPT       = $inputPath
     TOTK_SHADER_CACHE       = $cache
 }
+if ($Realtime -ne '') { $settings['TOTK_REALTIME'] = $Realtime }
 if ($Measure -eq 'flight') {
     # Per-frame record: the flight recorder, one dump per 1200 presents (the dumps tile the run).
     $settings['TOTK_FLIGHT'] = '1'
@@ -173,15 +185,17 @@ if ($Thumbs) {
     $settings['TOTK_FLIGHT_DIR'] = $flightDir
     $settings['TOTK_FLIGHT_AT'] = ((0..14 | ForEach-Object { 2900 + $_ * 240 }) -join ',')
 }
-# Diagnostics that stay off: no TOTK_TRACE, TOTK_PROFILE, validation, branch telemetry, input recording or live input.
+# Diagnostics that stay off: no TOTK_TRACE, TOTK_PROFILE, validation, input recording or live input.
 $diagnosticsOff = @('TOTK_TRACE', 'TOTK_PROFILE', 'TOTK_PROFILE_RENDER', 'TOTK_PROFILE_CHAINS', 'TOTK_SPEED_PROBE',
-    'TOTK_VK_VALIDATION', 'TOTK_CPU_BRANCH_EVIDENCE', 'TOTK_INPUT_RECORD', 'TOTK_CRIT', 'DKB_LIVE_INPUT')
+    'TOTK_VK_VALIDATION', 'TOTK_INPUT_RECORD', 'TOTK_CRIT', 'DKB_LIVE_INPUT')
 if ($Measure -eq 'summary') { $diagnosticsOff += @('TOTK_FLIGHT', 'TOTK_FLIGHT_*') }
 
 # ---------------------------------------------------------------- 6. machine and build metadata
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exeSrc).Hash
 $exeItem = Get-Item -LiteralPath $exeSrc
-$gpu = (& nvidia-smi --query-gpu=name,driver_version,vbios_version --format=csv,noheader 2>$null) -split ','
+# nvidia-smi exists only with an NVIDIA driver; with $ErrorActionPreference = 'Stop' a missing command would end the script.
+$hasSmi = [bool](Get-Command nvidia-smi -ErrorAction SilentlyContinue)
+$gpu = if ($hasSmi) { (& nvidia-smi --query-gpu=name,driver_version,vbios_version --format=csv,noheader 2>$null) -split ',' } else { @('n/a (no nvidia-smi)') }
 $plan = (powercfg /getactivescheme 2>$null) -join ' '
 Add-Type -AssemblyName System.Windows.Forms
 $ps0 = [System.Windows.Forms.SystemInformation]::PowerStatus
@@ -250,7 +264,7 @@ $game = $null; $shell = $null; $stop = 'duration'; $forced = $false
 try {
     # ------------------------------------------------------------ 8. launch: stdout to a file, stderr stays on the (hidden) console
     $stdout = Join-Path $bundle 'stdout.txt'
-    $argLine = '/d /c ""{0}" --exefs "{1}" --romfs "{2}" --profile "{3}" >"{4}""' -f $exePath, $exefs, $romfs, $profile, $stdout
+    $argLine = '/d /c ""{0}" --exefs "{1}" --romfs "{2}" --profile "{3}" >"{4}""' -f $exePath, $exefs, $romfs, $gameProfile, $stdout
     $shell = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList $argLine `
         -WorkingDirectory $exeFolder -WindowStyle Hidden -PassThru
     for ($i = 0; $i -lt 150 -and -not $game; $i++) {
@@ -272,13 +286,13 @@ try {
         $t = $sw.Elapsed.TotalSeconds
         if ($t -ge $nextSample) {
             $nextSample += $SampleSeconds
-            $g = (& nvidia-smi --query-gpu=temperature.gpu,power.draw,clocks.sm,clocks.max.sm,clocks.mem,utilization.gpu,memory.used,clocks_throttle_reasons.active --format=csv,noheader,nounits 2>$null)
+            $g = if (-not $hasSmi) { $null } else { (& nvidia-smi --query-gpu=temperature.gpu,power.draw,clocks.sm,clocks.max.sm,clocks.mem,utilization.gpu,memory.used,clocks_throttle_reasons.active --format=csv,noheader,nounits 2>$null) }
             $g = if ($g) { ($g -replace '\s', '') } else { 'n/a,n/a,n/a,n/a,n/a,n/a,n/a,n/a' }
             $p = Get-Process -Id $game.Id -ErrorAction SilentlyContinue
-            # F1 (invariant, no thousands separator): N1 wrote "1,911.0" and split the CSV row.
-            $pv = if ($p) { '{0:F1},{1:F1},{2:F1},{3},{4}' -f ($p.WorkingSet64 / 1MB), ($p.PrivateMemorySize64 / 1MB), ($p.PeakWorkingSet64 / 1MB), $p.HandleCount, $p.Threads.Count } else { 'n/a,n/a,n/a,n/a,n/a' }
+            # F1 with the invariant culture: no thousands separator and always a '.', whatever the user's culture is.
+            $pv = if ($p) { Inv '{0:F1},{1:F1},{2:F1},{3},{4}' @(($p.WorkingSet64 / 1MB), ($p.PrivateMemorySize64 / 1MB), ($p.PeakWorkingSet64 / 1MB), $p.HandleCount, $p.Threads.Count) } else { 'n/a,n/a,n/a,n/a,n/a' }
             $ac = [System.Windows.Forms.SystemInformation]::PowerStatus.PowerLineStatus
-            Add-Content -LiteralPath $csv -Encoding ascii -Value ('{0:N1},{1},{2},{3}' -f $t, $ac, $g, $pv)
+            Add-Content -LiteralPath $csv -Encoding ascii -Value (Inv '{0:F1},{1},{2},{3}' @($t, $ac, $g, $pv))
         }
         if ($game.HasExited) { $stop = 'game exited on its own'; break }
         if ($t -ge $Seconds) { break }

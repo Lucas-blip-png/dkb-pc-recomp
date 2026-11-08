@@ -16,7 +16,7 @@ no other `dkb.exe` running: the script refuses to start while one runs, and it n
 | Idle script (old comparison) | `-Visit first -Script idle -Seconds 180` | Harness test. |
 | Verification with thumbnails | `-Visit first -Script walk -Thumbs -Seconds 150` | Not a perf run: thumbnails cost frame time. Use to look at the scene. |
 | Diagnostics off (gate 14 method) | `-Visit repeat -From <first bundle> -Measure summary -Script walk -Seconds 600` | Diagnostics-off measurement; see "Measure modes". |
-| Realtime build | add `-Exe build\native-port-a6\dkb.exe -Realtime 1` | Timing patch set on; check the log for "real-time timing enabled". |
+| Force the real-time timing path | add `-Realtime 1` (or `-Realtime 0`) | Unset by default, so the run keeps the game's own default (runtime/cfg.c). Builds without the real-time patch set ignore it (the log says so). |
 
 Summarise any bundle again: `.venv\Scripts\python.exe -I tools\perf_evidence.py build\agent-perf\<bundle> --warm-after 60`.
 
@@ -24,8 +24,12 @@ Summarise any bundle again: `.venv\Scripts\python.exe -I tools\perf_evidence.py 
 
 - `-Visit first|repeat`. `first`: a fresh, empty profile and an empty shader cache. `repeat` (needs `-From`): copies the
   profile and shader cache of a completed first-visit bundle. A bundle is reusable only with `complete: true`.
-- `-Exe` (default `build\native-port-playtest\dkb.exe`). The runner copies the exe folder's `dkb.exe`, `*.dll`,
-  `*.bin` and `dkb.ini` (or `totk.ini` for a TotK build) into `<bundle>\bin\` and runs the copy. The source folder is not written to.
+- `-Exe` (default `build\dkb100\dkb.exe`), `-Exefs` (default `build\extracted\dkb100\exefs`) and `-Romfs` (default
+  `build\extracted\dkb100\romfs`): relative to the repo root or absolute. The runner copies the exe folder's `dkb.exe`,
+  `*.dll`, `*.bin` and `dkb.ini` (or `totk.ini` for a TotK build) into `<bundle>\bin\` and runs the copy, so every bundle holds
+  a full copy of `dkb.exe` (about 190 MB). The source folder is not written to.
+- Requires PowerShell 7 (`#Requires -Version 7.0`). GPU and process sampling use `nvidia-smi`; on a machine without it the
+  GPU columns of `samples.csv` read `n/a` and the run goes on.
 - `-Script walk|idle`. `idle`: the menu presses that reach the cave scene, then nothing. `walk` (default): the same
   presses, then from tick 3000 a 600-tick cycle of forward walk (5 s), diagonal walk (2 s), camera turn right (1.5 s)
   and walk back (1.5 s), until the run ends. Ticks are 60 Hz from the first present. Stick values are +-32767.
@@ -38,7 +42,8 @@ Summarise any bundle again: `.venv\Scripts\python.exe -I tools\perf_evidence.py 
 ## Measure modes
 
 - **flight** (default): per-frame records from the flight recorder: one dump per 1200 presents, plus one per frame over
-  50 ms. `cfg.c` files `TOTK_FLIGHT` under "diagnostics", so these runs are NOT diagnostics-off (gate 14 FAIL).
+  50 ms. The dump schedule covers the first 15 x 1200 presents (about 300 s at 60 fps); frames after the last dump are not
+  recorded, so use `-Measure summary` for longer runs. `cfg.c` files `TOTK_FLIGHT` under "diagnostics", so these runs are NOT diagnostics-off (gate 14 FAIL).
 - **summary**: no flight recorder. Frame stats come from the game's frametime lines (every 60 s and at exit): mean, 1%
   low, counts over 25/50/100 ms, and the five worst frames with their compile waits. Coarser: per-period.
 
@@ -71,7 +76,7 @@ a run whose stderr is not a file "also writes its log" next to the exe; `2> file
 this a bug; that was wrong. The harness does not redirect stderr, and it runs a copy of the exe folder, so the log is
 at `<bundle>\bin\logs\dkb.log`. The log text is also available from the stderr file in older bundles.
 
-## Verdicts (gates 10 to 14 of the native-port acceptance plan)
+## Verdicts (the project's performance acceptance thresholds, numbered 10 to 14)
 
 | Gate | Threshold used | Source |
 |---|---|---|
