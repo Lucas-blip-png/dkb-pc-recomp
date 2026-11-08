@@ -34,8 +34,6 @@ struct LoweredProgram {
     u32 source_size{};
     u32 required_texture_buffer = ~0U;
     u32 error_offset{};
-    u32 error_word2{};
-    bool has_error_word2{};
     std::string_view error;
 
     explicit operator bool() const { return error.empty(); }
@@ -840,11 +838,8 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             // Mesa NAK src/nouveau/compiler/nak/sm70_encode.rs, SM70Op::encode for OpTxd, places this mask in bits
             // 72..75; src/nouveau/compiler/nak/sm50.rs, SM50Op::encode for OpTxd, places it in Maxwell bits 31..34.
             // Bit 90 (word 2 bit 26) is the sign of the LOD the emit below already copies.
-            if ((insn.words[2] & ~0x04000fffU) != 0x001e0000) {
-                result.error_word2 = insn.words[2];
-                result.has_error_word2 = true;
+            if ((insn.words[2] & ~0x04000fffU) != 0x001e0000)
                 return fail(index, "native gradient texture control bits");
-            }
             if (insn.Bits(59, 2)) return fail(index, "native gradient texture type bits");
             if (dimension != 1 && dimension != 5) return fail(index, "native gradient texture dimension");
             if (binding >= 18) return fail(index, "native gradient texture binding");
@@ -1982,11 +1977,8 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             // the value and memory semantics without carrying the hint through.
             const u32 control = insn.words[2] & ~0xffU;
             const bool last_use_load = !store && control == (expected_word2 | 0x00200000U);
-            if (control != expected_word2 && !last_use_load) {
-                result.error_word2 = insn.words[2];
-                result.has_error_word2 = true;
+            if (control != expected_word2 && !last_use_load)
                 return fail(index, "native local spill control bits");
-            }
             emit((store ? 0xef50000000000000ULL : 0xef40000000000000ULL) | predicate | reg |
                  (u64{address} << 8) | (u64{offset} << 20) | (u64{mem_type} << 48));
             break;

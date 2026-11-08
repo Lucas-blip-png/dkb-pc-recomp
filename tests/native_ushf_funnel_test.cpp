@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
@@ -9,7 +10,7 @@ static unsigned checks, failures;
 
 static Instruction captured_funnel() {
     Instruction op{};
-    op.words = {0x04067899, 0x00000010, 0x08010604, 0x000fe200};
+    op.words = {0x04067899, 0x00000010, 0x08010605, 0x000fe200};
     return op;
 }
 
@@ -24,9 +25,10 @@ static LoweredProgram lower(Instruction op) {
 int main() {
     auto result = lower(captured_funnel());
     CHECK(bool(result));
-    // The captured destination is UR6, which maps to R222 (UR0 is R216); UR4 maps to R220.
+    // Destination UR6 maps to R222 (UR0 is R216), the low word UR4 to R220 and the high word UR5 to R221, so swapping
+    // the two source words changes the expected word.
     const std::uint64_t expected = 0x36f8000000000000ULL | (7ULL << 16) | std::uint64_t{222} |
-        (std::uint64_t{220} << 8) | (std::uint64_t{16} << 20) | (std::uint64_t{220} << 39);
+        (std::uint64_t{220} << 8) | (std::uint64_t{16} << 20) | (std::uint64_t{221} << 39);
     CHECK(std::find(result.instructions.begin(), result.instructions.end(), expected) != result.instructions.end());
 
     auto unsupported = captured_funnel();
