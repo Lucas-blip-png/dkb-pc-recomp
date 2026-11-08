@@ -24,3 +24,5 @@ uint32_t aoc_read(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uint6
 uint32_t aoc_size(int64_t *out, uint64_t h);
 void aoc_close(uint64_t h);
 uint32_t aoc_entry_type(int *out, const char *path);
+
+int probe_aoc(void);   // aoc_probe.c: --probe-aoc mounts the real pack and reads it back

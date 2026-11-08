@@ -21,7 +21,6 @@
 
 #include "aoc_romfs.h"
 #include "cfg.h"
-#include "fs.h"
 #include "host.h"
 #include "ov.h"
 #include "platform/platform.h"
@@ -361,8 +360,6 @@ static void ov_aoc_list(Cpu *c) {
         for (uint32_t i = 0; i < n; i++) out[i] = (int32_t)ids[i];
     ret_x(c, n);
 }
-// int CountAddOnContent()
-static void ov_aoc_count(Cpu *c) { ret_x(c, 0); }
 static void ov_err_context(Cpu *c) { (void)c; rt_log("err: error contexts stay local"); }
 static void ov_pctl_initialize(Cpu *c) { (void)c; rt_log("pctl: no parental controls"); }
 static void ov_abort_observer(Cpu *c) { (void)c; rt_log("diag: the host crash reporter observes aborts"); }
