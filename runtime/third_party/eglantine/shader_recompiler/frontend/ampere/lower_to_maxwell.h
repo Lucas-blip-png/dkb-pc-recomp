@@ -2137,13 +2137,14 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             break;
         }
         case 0x419: { // SHF.L.W.U32.HI Rd, RZ, Rb, imm (high word of imm:0 << Rb) = imm << (Rb & 31)
-            // Mesa NAK src/nouveau/compiler/nak/sm70_encode.rs, SM70Op::encode for OpShf, stores .W wrap in bit 75;
-            // src/nouveau/compiler/nak/sm50.rs, SM50Op::encode for OpShf, stores it in Maxwell bit 50.
+            // Ampere bit 75 is the .W (wrap) flag. The Maxwell SHL emitted below takes its wrap flag from bit 39
+            // (Ryujinx InstShlR.M: set masks the shift amount with 31, clear gives 0 for a shift of 32 or more).
+            // Bit 50 means nothing to SHL, so the flag goes to bit 39 and nowhere else.
             if (insn.Bits(24, 8) != 255 || (insn.words[2] & ~0x8ffU) != 0x00010600)
                 return fail(index, "native funnel shift immediate mode");
             mov_imm(250, insn.words[1]);
             emit(base(0x5c48000000000000ULL) | (u64{250} << 8) | (u64{insn.Bits(64, 8)} << 20) |
-                 (u64{1} << 39) | (u64{insn.Bits(75, 1)} << 50));
+                 (u64{insn.Bits(75, 1)} << 39));
             break;
         }
         case 0x805: { // CS2R SRZ
