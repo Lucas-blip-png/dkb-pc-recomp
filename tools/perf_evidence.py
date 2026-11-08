@@ -1,5 +1,5 @@
 """Summarise an evidence bundle written by tools/perf_run.ps1: frame times, compile stalls, GPU and process samples,
-and one verdict per acceptance threshold (gates 10-14 of the native-port acceptance plan).
+and one verdict per performance acceptance threshold (numbered 10-14).
 
     python tools/perf_evidence.py build/agent-perf/<stamp>-<visit> [--warm-after 60]
 
@@ -240,8 +240,34 @@ def verdict(gate, status, detail):
     return {'gate': gate, 'verdict': status, 'detail': detail}
 
 
+DIAGNOSTIC_SWITCHES = ('FLIGHT', 'TRACE', 'PROFILE', 'PROFILE_SLOW', 'PROFILE_RENDER', 'PROFILE_CHAINS',
+                       'VK_VALIDATION')
+OFF_VALUES = ('', '0', 'off', 'false', 'no')
+
+
+def ini_diagnostics(text):
+    """The diagnostic switches a copied dkb.ini or totk.ini would turn on, as runtime/cfg.c reads it: "key = value"
+    lines, a line starting with '#' or ';' is a comment and '[...]' only groups, the key is the variable name without
+    TOTK_ or DKB_ (case-insensitive), the value is the rest of the line, trimmed, optionally in double quotes."""
+    found = []
+    for line in (text or '').splitlines():
+        line = line.strip()
+        if not line or line[0] in '#;[' or '=' not in line:
+            continue
+        key, value = (part.strip() for part in line.split('=', 1))
+        key = key.upper()
+        for prefix in ('TOTK_', 'DKB_'):
+            if key.startswith(prefix):
+                key = key[len(prefix):]
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1]
+        if key in DIAGNOSTIC_SWITCHES and value.strip().lower() not in OFF_VALUES:
+            found.append(key)
+    return found
+
+
 def build(bundle, warm_after):
-    run = json.loads((bundle / 'run.json').read_text(encoding='utf-8'))
+    run = json.loads((bundle / 'run.json').read_text(encoding='utf-8-sig'))
     settings = run.get('settings', {})
     measure = run.get('measure', 'flight')
     frames, dumps, skipped = read_flight(bundle) if measure == 'flight' else ({}, [], 0)
@@ -338,7 +364,13 @@ def build(bundle, warm_after):
         v.append(verdict('12 no multi-second compile freeze entering content', 'NOT-MEASURED', 'no frame records'))
 
     on = [k for k in ('TOTK_FLIGHT', 'TOTK_TRACE', 'TOTK_PROFILE', 'TOTK_PROFILE_SLOW', 'TOTK_PROFILE_RENDER',
-                      'TOTK_PROFILE_CHAINS', 'TOTK_VK_VALIDATION', 'TOTK_CPU_BRANCH_EVIDENCE') if settings.get(k) not in (None, '', '0')]
+                      'TOTK_PROFILE_CHAINS', 'TOTK_VK_VALIDATION') if settings.get(k) not in (None, '', '0')]
+    # The run's environment is cleared of TOTK_/DKB_ variables, but the settings file copied next to the exe is still
+    # read by the game: a switch it turns on counts unless the run's own settings override it.
+    ini = run.get('settings_ini') or {}
+    for key in ini_diagnostics(ini.get('text', '') if ini.get('present') else ''):
+        if f'TOTK_{key}' not in settings:
+            on.append(f'{key} (in the copied settings file)')
     v.append(verdict('14 controlled settings, detailed diagnostic logging off',
                      'FAIL' if on else 'PASS',
                      (f"diagnostics on: {', '.join(on)} (cfg.c files these under 'diagnostics'); an acceptance-style run "
