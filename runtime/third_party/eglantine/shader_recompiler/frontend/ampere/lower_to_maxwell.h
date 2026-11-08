@@ -1951,8 +1951,8 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             break;
         }
         case 0x387: case 0x983: { // Local load/store with an immediate byte offset.
-            // Mesa NAK src/nouveau/compiler/nak/sm70_encode.rs, SM70Op::encode for OpLd/OpSt, encodes local
-            // space in bits 84..86 and MemType in bits 73..75. Its SM50 OpLd/OpSt encoders keep the same
+            // Mesa NAK src/nouveau/compiler/nak/sm70_encode.rs, SM70Op::encode for OpLd/OpSt, encodes the
+            // eviction priority in bits 84..86 and MemType in bits 73..75. Its SM50 OpLd/OpSt encoders keep the same
             // MemType values in Maxwell bits 48..50.
             const bool store = opcode == 0x387;
             const u32 data = insn.Bits(32, 8), offset = insn.Bits(40, 24), mem_type = insn.Bits(73, 3);
