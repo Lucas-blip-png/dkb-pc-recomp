@@ -1,4 +1,4 @@
-"""Bananza base 1.0.0 folder installs. No container extraction, keys or Python 3.14 dependencies.
+"""Validated Bananza folder installs. No container extraction, keys or Python 3.14 dependencies.
 
 The existing runner owns step events and atomic checkpoints. Game-derived temporary files stay in a separately
 marked task directory; only verified files enter the portable destination. No prebuilt TotK runtime is reused.
@@ -25,6 +25,7 @@ STATE = 'dkb-install.json'
 OWNER = '.dkb-setup-owner.json'
 DEST_OWNER = '.dkb-install-owner.json'
 GAME = 'dkb100'
+TARGETS = (GAME, 'dkb458752')
 EXE = '.exe' if os.name == 'nt' else ''
 CHUNK = 8 << 20
 
@@ -135,8 +136,8 @@ def pack_manifest(folder):
         raise InstallError('dkb.pack_invalid', path=str(folder), detail=str(e)) from None
 
 
-def expected_exefs(layout, exefs):
-    expected = json.loads((layout.tools / 'data' / 'expected-dkb100.json').read_text(encoding='utf-8'))
+def expected_exefs(layout, exefs, game=GAME):
+    expected = json.loads((layout.tools / 'data' / f'expected-{game}.json').read_text(encoding='utf-8'))
     hashes = expected['exefs_sha256']
     for name, value in hashes.items():
         p = exefs / name
@@ -146,6 +147,20 @@ def expected_exefs(layout, exefs):
     if any(exefs.glob('subsdk*')):
         raise InstallError('dkb.update_unsupported')
     return hashes
+
+
+def select_target(layout, exefs):
+    main = exefs / 'main'
+    ensure_plain(main)
+    if main.is_file():
+        value = sha256(main)
+        for game in TARGETS:
+            path = layout.tools / 'data' / f'expected-{game}.json'
+            if path.is_file():
+                expected = json.loads(path.read_text(encoding='utf-8'))
+                if expected['exefs_sha256']['main'] == value:
+                    return game
+    raise InstallError('dkb.exefs_invalid', path=str(main))
 
 
 def tool_layout(layout, options):
@@ -193,7 +208,7 @@ def preflight(layout, options, dest, temp, rep):
         raise InstallError('ui.need_lang')
     ensure_plain(dest / STATE)
     old = statefile.load(dest, STATE)
-    if old is not None and (old.get('game') != GAME or old.get('destination') != str(dest)):
+    if old is not None and (old.get('game') not in TARGETS or old.get('destination') != str(dest)):
         raise InstallError('dkb.dest_unrelated', path=str(dest))
     exefs_arg = options.exefs or (Path(old['sources']['exefs']) if old else None)
     romfs_arg = options.romfs or (Path(old['sources']['romfs']) if old else None)
@@ -204,6 +219,9 @@ def preflight(layout, options, dest, temp, rep):
     exefs, romfs = exefs_arg.resolve(), romfs_arg.resolve()
     if not exefs.is_dir() or not romfs.is_dir():
         raise InstallError('dkb.need_folders')
+    game = select_target(layout, exefs)
+    if old is not None and old['game'] != game:
+        raise InstallError('dkb.dest_unrelated', path=str(dest))
     if dest.exists() and not dest.is_dir():
         raise InstallError('dkb.dest_unrelated', path=str(dest))
     for a, b in ((dest, temp), (dest, exefs), (dest, romfs), (temp, exefs), (temp, romfs)):
@@ -213,13 +231,13 @@ def preflight(layout, options, dest, temp, rep):
         try:
             ensure_plain(dest / DEST_OWNER)
             partial = json.loads((dest / DEST_OWNER).read_text(encoding='utf-8'))
-            ours = partial == {'game': GAME, 'destination': str(dest)}
+            ours = partial == {'game': game, 'destination': str(dest)}
             ours &= {p.name for p in dest.iterdir()} <= {DEST_OWNER, '.dkb-setup.lock'}
         except (OSError, ValueError):
             ours = False
         if not ours:
             raise InstallError('dkb.dest_unrelated', path=str(dest))
-    owner = {'game': GAME, 'destination': str(dest), 'temporary': str(temp)}
+    owner = {'game': game, 'destination': str(dest), 'temporary': str(temp)}
     for p in (temp / OWNER, dest / STATE, dest / (STATE + '.tmp'), dest / DEST_OWNER):
         ensure_plain(p)
     if temp.exists() and any(temp.iterdir()):
@@ -231,9 +249,9 @@ def preflight(layout, options, dest, temp, rep):
             raise InstallError('dkb.temp_unrelated', path=str(temp))
     plain_tree(temp)
     plain_destination(dest, layout.dlls)
-    # Hash the supported base before creating logs, state, destination or temporary directories.
+    # Reject mixed-version inputs before any writer can replace a checkpoint or installed file.
     rep.progress('check', 'dkb_base')
-    hashes = expected_exefs(layout, exefs)
+    hashes = expected_exefs(layout, exefs, game)
     packed = (romfs / 'index.json').is_file() and (romfs / 'romfs.bin').is_file()
     if packed:
         ensure_plain(romfs / 'index.json')
@@ -247,9 +265,9 @@ def preflight(layout, options, dest, temp, rep):
         romfs_id = digest(files)
         romfs_size = sum(e['size'] + 15 for e in files)
     missing = [p for p in (layout.clang, layout.ninja, layout.recomp / 'gen.py',
-                           layout.recomp / 'patches-dkb100.txt', layout.tools / 'dkb_pack_romfs.py',
+                           layout.recomp / f'patches-{game}.txt', layout.tools / 'dkb_pack_romfs.py',
                            layout.tools / 'dkb_shader_census.py',
-                           layout.runtime / 'nvn2_lower.cpp', layout.tools / 'data' / 'expected-dkb100.json')
+                           layout.runtime / 'nvn2_lower.cpp', layout.tools / 'data' / f'expected-{game}.json')
                if not p.is_file()]
     if layout.deps:
         missing += [p for p in (layout.deps / 'include', layout.deps / 'lib') if not p.is_dir()]
@@ -276,7 +294,7 @@ def preflight(layout, options, dest, temp, rep):
         proc = subprocess.run([str(dotnet), '--list-sdks'], capture_output=True, text=True) if dotnet.is_file() else None
         if proc is None or proc.returncode or not any(line.startswith('10.') for line in proc.stdout.splitlines()):
             raise InstallError('dkb.dotnet_missing')
-    return dict(old=old, sources={'exefs': str(exefs), 'romfs': str(romfs)}, hashes=hashes, files=files,
+    return dict(old=old, game=game, sources={'exefs': str(exefs), 'romfs': str(romfs)}, hashes=hashes, files=files,
                 romfs_id=romfs_id, romfs_size=romfs_size, owner=owner, translator=translator, identity=identity,
                 dotnet=dotnet, packed=packed,
                 pipeline=digest(*(sha256(Path(__file__).with_name(n)) for n in ('bananza.py', 'runner.py', 'state.py'))))
@@ -411,7 +429,7 @@ class Data(Step):
 
     def current(self, ctx, record):
         try:
-            expected_exefs(ctx.layout, ctx.dest / 'exefs')
+            expected_exefs(ctx.layout, ctx.dest / 'exefs', ctx.info['game'])
             image = ctx.dest / 'romfs' / 'romfs.bin'
             return (image.stat().st_size == record['size'] and image.stat().st_mtime_ns == record['mtime_ns'] and
                     sha256(ctx.dest / 'romfs' / 'index.json') == record['index_sha256'])
@@ -430,7 +448,7 @@ class Data(Step):
         exefs = Path(ctx.info['sources']['exefs'])
         for name in ctx.info['hashes']:
             copy_file(exefs / name, stage / 'exefs' / name)
-        expected_exefs(ctx.layout, stage / 'exefs')
+        expected_exefs(ctx.layout, stage / 'exefs', ctx.info['game'])
         romfs = Path(ctx.info['sources']['romfs'])
         if ctx.info['packed']:
             for name in ('romfs.bin', 'index.json'):
@@ -519,7 +537,8 @@ class Lift(Step):
                 m = json.loads((gen / name / 'manifest.json').read_text(encoding='utf-8'))
                 if not m['chunks'] or not all((gen / name / chunk).is_file() for chunk in m['chunks']):
                     return False
-            return (gen / 'layout.json').is_file() and (gen / 'patches.h').is_file()
+            return ((gen / 'layout.json').is_file() and (gen / 'patches.h').is_file() and
+                    record.get('outputs') == tree_key(gen))
         except (OSError, KeyError, ValueError):
             return False
 
@@ -529,10 +548,11 @@ class Lift(Step):
         gen.mkdir(parents=True, exist_ok=True)
         run_tool(ctx, self.id, [ctx.layout.python, ctx.layout.recomp / 'gen.py', '--exefs', ctx.dest / 'exefs',
                                  '--out', gen, '--modules', 'main,sdk', '--jobs', ctx.options.jobs,
-                                 '--patches', ctx.layout.recomp / 'patches-dkb100.txt'])
+                                 '--patches', ctx.layout.recomp / f"patches-{ctx.info['game']}.txt"])
         manifest = json.loads((gen / 'main' / 'manifest.json').read_text(encoding='utf-8'))
-        if manifest.get('stats', {}).get('patched_sites', 0) < 1:
+        if ctx.info['game'] == GAME and manifest.get('stats', {}).get('patched_sites', 0) < 1:
             raise InstallError('dkb.patches_missing')
+        return {'outputs': tree_key(gen)}
 
 
 class Compile(Step):
@@ -556,8 +576,9 @@ class Compile(Step):
 
     def run(self, ctx):
         out = ctx.temp / 'build'
-        args = [ctx.layout.python, ctx.layout.tools / 'build_game.py', '--version', GAME, '--expected',
-                ctx.layout.tools / 'data' / 'expected-dkb100.json', '--gen', ctx.temp / 'gen', '--out', out,
+        game = ctx.info['game']
+        args = [ctx.layout.python, ctx.layout.tools / 'build_game.py', '--version', game, '--expected',
+                ctx.layout.tools / 'data' / f'expected-{game}.json', '--gen', ctx.temp / 'gen', '--out', out,
                 '--modules', 'main,sdk', '--exefs', ctx.dest / 'exefs', '--romfs', ctx.dest / 'romfs',
                 '--profile', ctx.dest / 'profile', '--runtime', ctx.layout.runtime, '--toolchain', ctx.layout.llvm,
                 '--ninja', ctx.layout.ninja, '--jobs', ctx.options.jobs, '--full-build']
@@ -587,7 +608,7 @@ class Shaders(Step):
 
     def run(self, ctx):
         pack = ctx.dest / 'seed-nvn2.bin'
-        run_tool(ctx, self.id, [ctx.layout.python, ctx.layout.tools / 'dkb_shader_census.py', '--version', GAME,
+        run_tool(ctx, self.id, [ctx.layout.python, ctx.layout.tools / 'dkb_shader_census.py', '--version', ctx.info['game'],
                                 '--romfs', ctx.dest / 'romfs', '--out', ctx.dest], name=f'{self.id}-census')
         try:
             run_tool(ctx, self.id, [ctx.dest / ('dkb' + EXE), '--translate-shaders'], cwd=ctx.dest)
@@ -631,7 +652,7 @@ class Cleanup(Step):
     id, always = 'cleanup', True
 
     def run(self, ctx):
-        for name in ('data', 'gen', 'build', 'xlate', 'dotnet-home', 'nuget'):
+        for name in ('data', 'xlate', 'dotnet-home', 'nuget'):
             p = ctx.temp / name
             if p.exists():
                 owned_dir(ctx, p)
@@ -669,7 +690,7 @@ def main(options):
         ensure_plain(dest / STATE)
         previous = statefile.load(dest, STATE)
         options = copy.copy(options)
-        if previous and previous.get('game') == GAME and previous.get('destination') == str(dest):
+        if previous and previous.get('game') in TARGETS and previous.get('destination') == str(dest):
             for name, value in previous.get('build_tools', {}).items():
                 if name in ('toolchain', 'deps', 'ninja', 'dll_dir', 'dotnet') and getattr(options, name) is None and value:
                     setattr(options, name, Path(value))
@@ -685,7 +706,7 @@ def main(options):
         write_owner(temp / OWNER, info['owner'])
         locks.append(lock_temp(temp))
         dest.mkdir(parents=True, exist_ok=True)
-        write_owner(dest / DEST_OWNER, {'game': GAME, 'destination': str(dest)})
+        write_owner(dest / DEST_OWNER, {'game': info['game'], 'destination': str(dest)})
         locks.append(lock_temp(dest))
         plain_tree(temp)
         plain_destination(dest, layout.dlls)
@@ -696,7 +717,7 @@ def main(options):
         rep.log_path = log
         ctx = BananzaContext(layout, dest, temp, rep, options, state=info['old'], verify=options.verify)
         ctx.info = info
-        ctx.state.update(game=GAME, destination=str(dest), sources=info['sources'])
+        ctx.state.update(game=info['game'], destination=str(dest), sources=info['sources'])
         ctx.state['build_tools'] = {'toolchain': str(layout.llvm), 'deps': str(layout.deps) if layout.deps else None,
                                     'ninja': str(layout.ninja),
                                     'dll_dir': str(layout.dlls[0].parent) if layout.dlls else None,
@@ -704,7 +725,7 @@ def main(options):
         ctx.state['lang'] = ini.canonical_language(options.lang or ctx.state.get('lang') or 'en-US')
         steps = all_steps()
         rep.emit('start', release=layout.release, mode=ctx.mode, dev=layout.dev, dest=str(dest), log=str(log),
-                 game=GAME, game_exe='dkb' + EXE, steps=[s.id for s in steps])
+                 game=info['game'], game_exe='dkb' + EXE, steps=[s.id for s in steps])
         result = run_steps(steps, ctx)
     except InstallError as e:
         rep.error(e.id, e.params)

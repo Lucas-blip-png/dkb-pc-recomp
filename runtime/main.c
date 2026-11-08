@@ -126,7 +126,7 @@ static void log_open(int game) {
     plat_append_write(g_log_file, g_log_early, n);
     g_log_bytes = n;
     __atomic_store_n(&g_log_state, LOG_FILE, __ATOMIC_RELEASE);
-    rt_log("version: %s (%s)", rt_port_version, rt_game_version ? "TotK" : "Bananza 1.0.0");
+    rt_log("version: %s (%s %s)", rt_port_version, rt_game_version ? "TotK" : "Bananza", rt_game_display);
     rt_log("log: %s", g_log_path);
 }
 
@@ -218,8 +218,6 @@ static uint64_t lifted_function(uintptr_t rip) {
     return lo ? fn_rev[lo - 1].guest : 0;
 }
 
-static int readable(uint64_t a, uint64_t n) { return plat_mem_readable(a, n); }
-
 static void crash_handler(const PlatCrash *x) {
     static volatile int32_t busy;
     if (plat_xchg32(&busy, 1)) plat_exit(71);
@@ -239,21 +237,8 @@ static void crash_handler(const PlatCrash *x) {
         rt_log_raw("\n", 1);
     }
     Cpu *c = kern_cpu();
-    if (c) {
-        for (int i = 0; i < 31; i++)
-            rt_logf("  x%-2d %016llx%s", i, (unsigned long long)c->x[i], i % 4 == 3 ? "\n" : "");
-        rt_logf("  sp  %016llx\n  pc  %016llx  lr %s\n", (unsigned long long)c->sp, (unsigned long long)c->pc,
-                ldr_describe(c->x[30], d, sizeof d));
-        uint64_t fp = c->x[29];
-        for (int n = 0; n < 32 && fp && !(fp & 7) && readable(fp, 16); n++) {
-            uint64_t next = LD64(fp), lr = LD64(fp + 8);
-            rt_logf("  guest frame %2d: %s\n", n, ldr_describe(lr, d, sizeof d));
-            if (next <= fp || next - fp > (64u << 20)) break;
-            fp = next;
-        }
-    } else {
-        rt_logf("  not on a guest thread\n");
-    }
+    if (c) rt_guest_dump(c);
+    else rt_logf("  not on a guest thread\n");
     fflush(stderr);
     plat_exit(71);
 }
@@ -535,8 +520,8 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--version")) {
             // The port version (VERSION, plus the commit of a checkout) and the game it was built for, so a report says
             // which build it came from.
-            printf("%s %s (%s)\n", rt_game_version ? "totk" : "dkb", rt_port_version,
-                   rt_game_version ? "Tears of the Kingdom" : "Donkey Kong Bananza 1.0.0");
+            printf("%s %s (%s %s)\n", rt_game_version ? "totk" : "dkb", rt_port_version,
+                   rt_game_version ? "Tears of the Kingdom" : "Donkey Kong Bananza", rt_game_display);
             return 0;
         } else if (!strcmp(argv[i], "--shot")) {
             if (++i == argc) return usage(argv[0]);

@@ -40,13 +40,30 @@ static uint64_t g_table_bytes, g_functions;
 static struct { uint64_t addr; GuestFn fn; } g_host[HOST_CAP];
 static uint64_t g_nhost;
 
-void rt_fatal(const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
+// Registers and guest frames at a fatal error. A message alone says which address failed but not which call reached
+// it, and the frame chain is the only trail that survives a null call through a function pointer.
+void rt_guest_dump(Cpu *c) {
+    char d[160];
+    for (int i = 0; i < 31; i++)
+        rt_logf("  x%-2d %016llx%s", i, (unsigned long long)c->x[i], i % 4 == 3 ? "\n" : "");
+    rt_logf("  sp  %016llx\n  pc  %016llx  lr %s\n", (unsigned long long)c->sp, (unsigned long long)c->pc,
+            ldr_describe(c->x[30], d, sizeof d));
+    uint64_t fp = c->x[29];
+    for (int n = 0; n < 32 && fp && !(fp & 7) && plat_mem_readable(fp, 16); n++) {
+        uint64_t next = LD64(fp), lr = LD64(fp + 8);
+        rt_logf("  guest frame %2d: %s\n", n, ldr_describe(lr, d, sizeof d));
+        if (next <= fp || next - fp > (64u << 20)) break;
+        fp = next;
+    }
+}
+
+static void fatal_v(Cpu *c, const char *fmt, va_list ap) {
     rt_log_raw("FATAL: ", 7);
     rt_vlogf(fmt, ap);
     rt_log_raw("\n", 1);
-    va_end(ap);
+    if (c) rt_guest_dump(c);
+    // Otherwise only the orderly exit in boot.c prints this, and a fatal never gets there.
+    if (rt_trace & RT_TRACE_HOSTCALL) hostfn_report();
     // A failed allocation (malloc, realloc, VirtualAlloc) means the commit limit was reached: this line tells a leak of
     // ours (process private bytes near the limit) from a machine short of page file.
     double proc, used, limit;
@@ -55,6 +72,18 @@ void rt_fatal(const char *fmt, ...) {
     fflush(stdout);
     fflush(stderr);
     _Exit(70);
+}
+
+void rt_fatal(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fatal_v(NULL, fmt, ap);
+}
+
+void rt_fatal_guest(Cpu *c, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fatal_v(c, fmt, ap);
 }
 
 static const RtModule *module_at(uint64_t pc) {
@@ -183,8 +212,8 @@ __attribute__((noinline, noreturn, cold)) static void dispatch_fail(Cpu *c) {
     const char *why = (pc & 3) ? "misaligned address"
                     : module_at(pc) ? "not a function start"
                     : "outside every module, no host function registered";
-    rt_fatal("rt_dispatch: no function at guest pc %s: %s (lr %s)", rt_guest_name(pc, at, sizeof at), why,
-             rt_guest_name(c->x[30], lr, sizeof lr));
+    rt_fatal_guest(c, "rt_dispatch: no function at guest pc %s: %s (lr %s)", rt_guest_name(pc, at, sizeof at), why,
+                   rt_guest_name(c->x[30], lr, sizeof lr));
 }
 
 // Host functions, and the fatal error. A separate tail call keeps the fast path below free of a stack frame.

@@ -51,3 +51,6 @@ RtDispatchStats rt_dispatch_stats(void);
 
 // Runtime fatal error: message to stderr, then exit. Used by the dispatcher and the stubs.
 void rt_fatal(const char *fmt, ...) __attribute__((noreturn, format(printf, 1, 2)));
+// The same, for a failure inside guest code: the message, then the registers and guest frames behind it.
+void rt_fatal_guest(Cpu *c, const char *fmt, ...) __attribute__((noreturn, format(printf, 2, 3)));
+void rt_guest_dump(Cpu *c);            // registers, sp/pc/lr and the frame chain (dispatch.c, main.c's crash handler)

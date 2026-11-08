@@ -172,6 +172,23 @@ DEPS = None            # the deps directory of an llvm-mingw build
 # tools/data/expected-<display version>.json for each build version name.
 DISPLAY_VERSIONS = {'v0': '1.0.0', 'v111': '1.1.1', 'v112': '1.1.2', 'v121': '1.2.1', 'v143': '1.4.3'}
 
+
+def display_version(version, expected):
+    """The game version the settings menu and --version name, from the identity the build was validated against.
+
+    TotK versions carry their display name in DISPLAY_VERSIONS. Donkey Kong Bananza's do not exist there, and the
+    update's own release version is unverified (tools/data/expected-dkb458752.json states only its title version), so
+    it reads as the base release plus the title version. With no metadata at all the target name is the only true
+    thing left to say: never 0.0.0, which is what the TotK numeric version decays to for this game."""
+    if version in DISPLAY_VERSIONS:
+        return DISPLAY_VERSIONS[version]
+    expected = expected or {}
+    base = expected.get('display_version')
+    if not base:
+        return version
+    title_version = expected.get('title_version')
+    return f'{base}+{title_version}' if title_version else base
+
 GiB = 1 << 30
 # Peak commit of one compile, 1.2.1 at -O1 (2026-10-20): 120-180 MiB per ~3 MiB chunk, 568 MiB for main_table.c
 # (295k-entry tables). 768 MiB leaves headroom for the largest file.
@@ -295,9 +312,10 @@ def runtime_object(out, src):
     return out / 'obj' / 'runtime' / rel.with_suffix('.o')
 
 
-def module_glue(layout, linked, hashes, paths, version):
+def module_glue(layout, linked, hashes, paths, version, expected=None):
     """C for build/<version>/modules.c: the layout table, the linked modules' function tables (dispatch.h), the
-    expected ExeFS hashes, the game version and the default game paths (host.h)."""
+    expected ExeFS hashes, the game version and its display name, and the default game paths (host.h). expected is the
+    validated tools/data/expected-<version>.json, whose display_version and title_version name the build."""
     out = [f'// Module glue written by tools/build_game.py; do not edit. {GENERATED_MARKER}',
            '#include "dispatch.h"', '#include "host.h"', '#include "layout.h"', '']
     for name, base, size in layout:
@@ -322,7 +340,9 @@ def module_glue(layout, linked, hashes, paths, version):
     for name in ('exefs', 'romfs', 'profile'):
         out.append(f'const char rt_default_{name}[] = {c_string(paths[name].as_posix())};')
     number = int(DISPLAY_VERSIONS[version].replace('.', '')) if version in DISPLAY_VERSIONS else 0   # 1.4.3 -> 143
-    out += [f'const int rt_game_version = {number};', f'const char rt_port_version[] = {c_string(port_version())};', '']
+    out += [f'const int rt_game_version = {number};', f'const char rt_game_target[] = {c_string(version)};',
+            f'const char rt_game_display[] = {c_string(display_version(version, expected))};',
+            f'const char rt_port_version[] = {c_string(port_version())};', '']
     return '\n'.join(out)
 
 
@@ -810,7 +830,8 @@ def main():
         if args.version not in DISPLAY_VERSIONS:
             sys.exit(f'no expected hashes known for {args.version}; pass --expected')
         expected = ROOT / 'tools' / 'data' / f'expected-v{DISPLAY_VERSIONS[args.version]}.json'
-    hashes = json.loads(Path(expected).read_text())['exefs_sha256']
+    expected_data = json.loads(Path(expected).read_text())
+    hashes = expected_data['exefs_sha256']
     global CLANG, AR, WINDRES, NINJA, TOOLCHAIN_BIN, DEPS
     if args.ninja:
         NINJA = args.ninja.resolve()
@@ -859,7 +880,7 @@ def main():
     missing = [n for n in names if n not in hashes]
     if missing:
         sys.exit(f'{expected}: no exefs_sha256 for {missing}')
-    write_if_changed(out / 'modules.c', module_glue(layout, linked, hashes, paths, args.version))
+    write_if_changed(out / 'modules.c', module_glue(layout, linked, hashes, paths, args.version, expected_data))
     if (paths['romfs'] / 'index.json').is_file():
         count, size, dt = romfs_index.write(paths['romfs'], out)
         print(f'romfs index: {count} files, {mib(size)}, {dt:.1f} s')

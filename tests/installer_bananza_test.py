@@ -64,6 +64,8 @@ assert a[a.index('--version')+1]=='dkb100' and '--runtime-lib' not in a
 assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='expected-dkb100.json'
 (out/('dkb.exe' if sys.platform=='win32' else 'dkb')).write_bytes(b'synthetic executable')
 (out/'romfs-index.bin').write_bytes(b'synthetic index')
+(out/'obj').mkdir(exist_ok=True)
+(out/'obj/guest.o').write_bytes(b'synthetic object')
 ''')
         for name in ('clang' + b.EXE, 'ninja' + b.EXE):
             (self.root / ('llvm/bin' if name.startswith('clang') else 'bin') / name).write_bytes(b'synthetic tool')
@@ -373,6 +375,95 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
         (self.root/'runtime/nvn2_lower.cpp').write_text('// changed synthetic runtime')
         self.assertEqual(self.run_install()[0], 0)
         self.assertEqual((self.dest/'profile/save.bin').read_bytes(), b'synthetic user save')
+
+    def test_success_retains_generated_code_and_objects(self):
+        self.assertEqual(self.run_install()[0], 0)
+        workspace = next(self.temp.glob('dkb-*'))
+        self.assertTrue((workspace/'gen/main/main_0000.c').is_file())
+        self.assertEqual((workspace/'build/obj/guest.o').read_bytes(), b'synthetic object')
+        self.assertFalse((workspace/'data').exists())
+
+    def test_runtime_change_reuses_generated_code_and_assets(self):
+        self.assertEqual(self.run_install()[0], 0)
+        workspace = next(self.temp.glob('dkb-*'))
+        generated = workspace/'gen/main/main_0000.c'
+        timestamp = generated.stat().st_mtime_ns
+        (self.root/'runtime/nvn2_lower.cpp').write_text('// changed synthetic runtime')
+        self.calls.clear()
+        code, events = self.run_install()
+        self.assertEqual(code, 0, events)
+        self.assertEqual([step for step, _ in self.calls],
+                         ['compile', 'dkb_shaders', 'dkb_shaders', 'dkb_shaders', 'dkb_verify'])
+        self.assertEqual(generated.stat().st_mtime_ns, timestamp)
+
+    def update_fixture(self):
+        hashes = {}
+        for p in self.exefs.iterdir():
+            p.write_bytes(b'updated ' + p.read_bytes())
+            hashes[p.name] = b.sha256(p)
+        (self.root / 'tools/data/expected-dkb458752.json').write_text(json.dumps({'exefs_sha256': hashes}))
+        (self.root / 'recomp/patches-dkb458752.txt').write_text('# no controller proxy in this version')
+        for relative in ('recomp/gen.py', 'tools/build_game.py'):
+            p = self.root / relative
+            text = p.read_text().replace('dkb100', 'dkb458752')
+            if relative == 'recomp/gen.py':
+                text = text.replace("'patched_sites':1", "'patched_sites':0")
+            p.write_text(text)
+
+    def test_update_has_separate_identity_and_no_base_patch_requirement(self):
+        self.update_fixture()
+        code, events = self.run_install()
+        self.assertEqual(code, 0, events)
+        self.assertEqual(b.statefile.load(self.dest, b.STATE)['game'], 'dkb458752')
+        self.assertEqual(json.loads((self.dest / b.DEST_OWNER).read_text())['game'], 'dkb458752')
+        self.calls.clear()
+        self.options.exefs = self.options.romfs = None
+        self.assertEqual(self.run_install()[0], 0)
+        self.assertEqual(self.calls, [])
+
+    def test_target_switch_cannot_overwrite_existing_base_install(self):
+        self.assertEqual(self.run_install()[0], 0)
+        receipt = (self.dest / b.STATE).read_bytes()
+        self.update_fixture()
+        self.calls.clear()
+        self.assertEqual(self.run_install()[0], 1)
+        self.assertEqual(self.calls, [])
+        self.assertEqual((self.dest / b.STATE).read_bytes(), receipt)
+
+    def test_base_still_requires_controller_patch(self):
+        p = self.root / 'recomp/gen.py'
+        p.write_text(p.read_text().replace("'patched_sites':1", "'patched_sites':0"))
+        code, events = self.run_install()
+        self.assertEqual(code, 1)
+        self.assertEqual(next(e['id'] for e in events if e['type'] == 'error'), 'dkb.patches_missing')
+
+    def test_mixed_update_exefs_is_rejected_before_writers(self):
+        original_sdk = (self.exefs / 'sdk').read_bytes()
+        self.update_fixture()
+        (self.exefs / 'sdk').write_bytes(original_sdk)
+        self.assertEqual(self.run_install()[0], 1)
+        self.assertFalse(self.dest.exists())
+        self.assertFalse(self.temp.exists())
+
+    def test_missing_generated_output_is_regenerated_when_rebuilding(self):
+        self.assertEqual(self.run_install()[0], 0)
+        workspace = next(self.temp.glob('dkb-*'))
+        (workspace/'gen/main/main_0000.c').unlink()
+        (self.root/'runtime/nvn2_lower.cpp').write_text('// changed synthetic runtime')
+        self.calls.clear()
+        self.assertEqual(self.run_install()[0], 0)
+        self.assertEqual([step for step, _ in self.calls],
+                         ['lift', 'compile', 'dkb_shaders', 'dkb_shaders', 'dkb_shaders', 'dkb_verify'])
+
+    def test_corrupt_generated_output_is_regenerated_when_rebuilding(self):
+        self.assertEqual(self.run_install()[0], 0)
+        workspace = next(self.temp.glob('dkb-*'))
+        (workspace/'gen/main/main_0000.c').write_bytes(b'corrupt')
+        (self.root/'runtime/nvn2_lower.cpp').write_text('// changed synthetic runtime')
+        self.calls.clear()
+        self.assertEqual(self.run_install()[0], 0)
+        self.assertEqual([step for step, _ in self.calls],
+                         ['lift', 'compile', 'dkb_shaders', 'dkb_shaders', 'dkb_shaders', 'dkb_verify'])
 
     def test_already_packed_input_is_verified_and_copied(self):
         packed = self.root / 'packed input'

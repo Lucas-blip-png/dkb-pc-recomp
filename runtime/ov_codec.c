@@ -9,7 +9,8 @@
 // - it acquires an output buffer before it submits input (its wrapper aborts on any failure there): Acquire reserves
 //   the buffer the next shown picture goes to and returns a fence (NativeSyncHandle, which the caller zeroed; the
 //   host writes a token in its first word); the player waits for it through nn::syncpt::sdk::RequestSyncPointEvent,
-//   signalled when SubmitVp9DecoderInputBuffer has decoded a picture into that buffer (at once if it already has);
+//   signalled when SubmitVp9DecoderInputBuffer has decoded a picture into that buffer (at once if it already has), or
+//   polls it through nn::syncpt::sdk::TryWaitSyncPoint, answered from the same buffer state;
 // - a submission with no reserved buffer to decode into answers "not ready" (the wrapper's retry code 0x76);
 // - the picture is read with ReadDecoderOutputImageNv12 (Y plane, then interleaved UV, each with the caller's pitch).
 //   GetDecoderImagePoolNativeImageHandle (the player's GPU path) has no image yet and returns 0.
@@ -182,6 +183,7 @@ static void vp9_init(Cpu *c, uint64_t key, unsigned w, unsigned h) {
 static void ov_vp9_init(Cpu *c) { vp9_init(c, arg_x(c, 0), arg_x(c, 4) & 0xffff, arg_x(c, 5) & 0xffff); }
 // Result InitializeVp9Decoder(Vp9DecoderType *, size_t, size_t, u16 w, u16 h, u32, input, output fmt)
 static void ov_vp9_init_nowork(Cpu *c) { vp9_init(c, arg_x(c, 0), arg_x(c, 3) & 0xffff, arg_x(c, 4) & 0xffff); }
+static void ov_vp9_init_nowork_update(Cpu *c) { vp9_init(c, arg_x(c, 0), arg_x(c, 2) & 0xffff, arg_x(c, 3) & 0xffff); }
 
 // Result FinalizeVp9Decoder(Vp9DecoderType *)
 static void ov_vp9_fini(Cpu *c) {
@@ -198,14 +200,13 @@ static void ov_vp9_fini(Cpu *c) {
     ret_x(c, 0);
 }
 
-// Result FlushVp9Decoder(Vp9DecoderType *): outputs not handed over yet are dropped
+// Result FlushVp9Decoder(Vp9DecoderType *): packets not decoded yet are dropped. A picture already decoded into a
+// reserved buffer stays: the player was told its fence is signalled (RequestSyncPointEvent), and withdrawing it would
+// leave that fence unsatisfiable, as the picture is gone and no packet is left to decode another one.
 static void ov_vp9_flush(Cpu *c) {
     plat_mutex_lock(&lock);
     Dec *d = dec_of(arg_x(c, 0));
-    if (d)
-        for (int i = 0; i < SLOTS; i++)
-            if (d->slot[i].state == S_FILLED) d->slot[i].state = S_WAIT;   // still reserved; its picture is dropped
-    if (d) queue_drop(d);   // and so are the packets not decoded yet
+    if (d) queue_drop(d);   // the packets not decoded yet
     plat_mutex_unlock(&lock);
     TRACE("flush");
     ret_x(c, 0);
@@ -365,12 +366,9 @@ static void ov_vp9_release(Cpu *c) {
     ret_x(c, 0);
 }
 
-// Result GetVp9DecoderOutputBufferProperties(u16 *w, u16 *h, u16 *, u16 *, nn::movie::ColorSpace *, TimeSpan *pts,
-// bool *end, Vp9DecoderType *, u32 index). The two unnamed u16 get the picture size too (aligned or display size).
-static void ov_vp9_props(Cpu *c) {
-    uint32_t i = (uint32_t)arg_x(c, 8);
+static void vp9_props(Cpu *c, uint64_t key, uint32_t i, int64_t *pts, uint8_t *end) {
     plat_mutex_lock(&lock);
-    Dec *d = dec_of(arg_x(c, 7));
+    Dec *d = dec_of(key);
     Slot s = d && i < SLOTS ? d->slot[i] : (Slot){0};
     plat_mutex_unlock(&lock);
     for (int k = 0; k < 4; k++) {
@@ -378,10 +376,19 @@ static void ov_vp9_props(Cpu *c) {
         if (p) *p = k & 1 ? s.h : s.w;
     }
     LOG_FIRST("codec: output properties: %ux%u", s.w, s.h);
-    if (arg_p(c, 4)) *(uint32_t *)arg_p(c, 4) = 0;
-    if (arg_p(c, 5)) *(int64_t *)arg_p(c, 5) = s.pts;
-    if (arg_p(c, 6)) *(uint8_t *)arg_p(c, 6) = (uint8_t)s.eos;
+    if (pts) *pts = s.pts;
+    if (end) *end = (uint8_t)s.eos;
     ret_x(c, d ? 0 : R_NOT_READY);
+}
+
+static void ov_vp9_props(Cpu *c) {
+    if (arg_p(c, 4)) *(uint32_t *)arg_p(c, 4) = 0;
+    vp9_props(c, arg_x(c, 7), (uint32_t)arg_x(c, 8), arg_p(c, 5), arg_p(c, 6));
+}
+
+// The newer ABI omits ColorSpace, moving the decoder and index back into x6/x7 instead of x7/the stack.
+static void ov_vp9_props_update(Cpu *c) {
+    vp9_props(c, arg_x(c, 6), (uint32_t)arg_x(c, 7), arg_p(c, 4), arg_p(c, 5));
 }
 
 // Result ReadDecoderOutputImageNv12(const VideoDecoderImagePoolType *, u32 image, u16 x, u16 y, u16 w, u16 h,
@@ -475,6 +482,22 @@ static void ov_sp_request(Cpu *c) {
     TRACE("sync point request %#x: %s", tok, now ? "signalled at once" : "waits for its picture");
     if (now) kern_signal_system_event(ev);
 }
+// bool TryWaitSyncPoint(const SyncPointHandle &): the poll form of the request above, which the guide-movie player
+// reaches through nn::gs::TryWaitNativeSync when it advances its queue of shown pictures. The pinned Eglantine notes
+// (build/reference/NX2_NOTES.md, 148) have a NativeSyncHandle carry the sync point and the value its frame is finished
+// at; the host has no sync point, so a decoder fence answers from its own buffer and anything else at once.
+static void ov_sp_trywait_point(Cpu *c) {
+    const uint32_t *h = arg_p(c, 0);
+    uint32_t tok = h ? *h : 0;
+    int now = 1;
+    if ((tok & 0xffff0000u) == FENCE_TAG && (tok >> 8 & 0xff) < DECODERS && (tok & 0xff) < SLOTS) {
+        plat_mutex_lock(&lock);
+        now = decs[tok >> 8 & 0xff].slot[tok & 0xff].state == S_FILLED;
+        plat_mutex_unlock(&lock);
+    }
+    TRACE("sync point try wait %#x: %s", tok, now ? "signalled" : "waits for its picture");
+    ret_x(c, now);
+}
 // void CancelSyncPointEvent(SyncPointEventType *): the request is dropped and the event cleared
 static void ov_sp_cancel(Cpu *c) {
     uint64_t ev = event_for(c, arg_x(c, 0));
@@ -495,6 +518,8 @@ HOST_OVERRIDE("_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEPvmmttjN
               "24VideoDecoderOutputFormatE", ov_vp9_init);
 HOST_OVERRIDE("_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_"
               "24VideoDecoderOutputFormatE", ov_vp9_init_nowork);
+HOST_OVERRIDE("_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_"
+              "24VideoDecoderOutputFormatE", ov_vp9_init_nowork_update);
 HOST_OVERRIDE("_ZN2nn5codec18FinalizeVp9DecoderEPNS0_14Vp9DecoderTypeE", ov_vp9_fini);
 HOST_OVERRIDE("_ZN2nn5codec15StartVp9DecoderEPNS0_14Vp9DecoderTypeE", ov_ok);
 HOST_OVERRIDE("_ZN2nn5codec14StopVp9DecoderEPNS0_14Vp9DecoderTypeE", ov_ok);
@@ -515,12 +540,15 @@ HOST_OVERRIDE("_ZN2nn5codec29ReleaseVp9DecoderOutputBufferEPNS0_14Vp9DecoderType
               ov_vp9_release);
 HOST_OVERRIDE("_ZN2nn5codec35GetVp9DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_"
               "14Vp9DecoderTypeEj", ov_vp9_props);
+HOST_OVERRIDE("_ZN2nn5codec35GetVp9DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_14Vp9DecoderTypeEj",
+              ov_vp9_props_update);
 HOST_OVERRIDE("_ZN2nn5codec26ReadDecoderOutputImageNv12EPKNS0_25VideoDecoderImagePoolTypeEjttttPvmmS4_mm", ov_read_nv12);
 HOST_OVERRIDE("_ZN2nn5codec36GetDecoderImagePoolNativeImageHandleEPKNS0_25VideoDecoderImagePoolTypeEj", ov_pool_image);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk20CreateSyncPointEventEPNS1_18SyncPointEventTypeE", ov_sp_create);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk25InitializeMultiWaitHolderEPNS_2os19MultiWaitHolderTypeEPNS1_18SyncPointEventTypeE",
               ov_sp_holder);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk21TryWaitSyncPointEventEPKNS1_18SyncPointEventTypeE", ov_sp_trywait);
+HOST_OVERRIDE("_ZN2nn6syncpt3sdk16TryWaitSyncPointERKNS1_15SyncPointHandleE", ov_sp_trywait_point);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk21RequestSyncPointEventEPNS1_18SyncPointEventTypeERKNS1_15SyncPointHandleE",
               ov_sp_request);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk20CancelSyncPointEventEPNS1_18SyncPointEventTypeE", ov_sp_cancel);

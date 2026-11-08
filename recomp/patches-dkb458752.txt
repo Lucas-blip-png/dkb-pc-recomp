@@ -1,0 +1,3 @@
+# Bananza title version 458752: no base-version code patches are carried forward.
+# The controller constructor at main+0x7585f0 calls InitializeNpad directly (main+0x758650),
+# without the base version's CreateHidServerProxy wrapper. The host overrides InitializeNpad.

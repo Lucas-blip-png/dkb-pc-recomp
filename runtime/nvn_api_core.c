@@ -167,8 +167,7 @@ static int pool_gpu_visible(const pool_t *o) { return !(o->flags & NVN_MEMORY_PO
 
 // ---------- Device
 static const int devinfo[] = {   // Tegra X1 values (nnheaders nvn_DeviceConstantsNX.h, measured on SMO)
-    // ABI: Donkey Kong Bananza (NVN 2) requires major 231 and minor >= 16 (main+0x5b29a4, the check before the sead
-    // graphics set-up); TotK required 55 and >= 15. The rest are still the Tegra X1 values.
+    // Base Bananza requires 231.16 (main+0x5b29a4); the update's gate is handled below. The other limits remain Tegra X1 values.
     [0x00] = 231, [0x01] = 16,
     [0x02] = 14, [0x03] = 65536, [0x04] = 256, [0x05] = 8, [0x06] = 16, [0x07] = 4, [0x08] = 16, [0x09] = 32,
     [0x0A] = 16, [0x0B] = 4, [0x0C] = 4, [0x0D] = 4, [0x0E] = 16, [0x0F] = 32, [0x10] = 32, [0x11] = 256, [0x12] = 256,
@@ -205,7 +204,8 @@ NVN_API(nvnDeviceGetInteger) {
     unsigned w = (unsigned)arg_x(c, 1);
     int *out = arg_p(c, 2);
     if (w >= sizeof devinfo / sizeof *devinfo) rt_fatal("nvn: unsupported NVN device property %#x", w);
-    *out = devinfo[w];
+    // Update 458752's graphics initializer (main+0x5c61ac) rejects the base ABI before creating its device singleton.
+    *out = w == NVN_DEVICE_INFO_API_MINOR_VERSION && !strcmp(rt_game_target, "dkb458752") ? 30 : devinfo[w];
     NVN_LOG("DeviceGetInteger %#x -> %d", w, *out);
 }
 // NVNboolean nvnDeviceRegisterFastClearColor{,i,ui}(NVNdevice *d, const T *color, NVNformat format), ...Depth(d, float):

@@ -624,6 +624,19 @@ static uint32_t mount_add(const char *name, int kind, const char *root) {
     return 0;
 }
 
+static int is_mounted(const char *name) {
+    if (!name || !*name || strlen(name) >= 32 || strchr(name, ':') || strchr(name, '/')) return 0;
+    char path[40];
+    snprintf(path, sizeof path, "%s:", name);
+    if (romfs_owns(path)) return 1;
+    int found = 0;
+    plat_mutex_lock_shared(&lock);
+    for (int i = 0; i < NMOUNTS; i++)
+        if (mounts[i].kind && !strcmp(mounts[i].name, name)) found = 1;
+    plat_mutex_unlock_shared(&lock);
+    return found;
+}
+
 // A path component every host stores under exactly this name: not empty, ".", "..", no reserved character, no trailing
 // dot or space (Windows strips those, which would alias two names).
 static int component_ok(const char *c, size_t n) {
@@ -1111,6 +1124,7 @@ static void ov_ensure_save(Cpu *c) {
 }
 static void ov_mount_temp(Cpu *c) { ret_x(c, mount_temp(arg_p(c, 0))); }
 static void ov_unmount(Cpu *c) { unmount(arg_p(c, 0)); }
+static void ov_is_mounted(Cpu *c) { ret_x(c, is_mounted(arg_p(c, 0))); }
 static void ov_commit(Cpu *c) { ret_x(c, commit(arg_p(c, 0))); }
 static void ov_create_cache(Cpu *c) { ret_x(c, create_cache(I32(0), I64(1), I64(2))); }
 static void ov_delete_cache(Cpu *c) { ret_x(c, delete_cache(I32(0))); }
@@ -1154,6 +1168,7 @@ static void ov_set_priority(Cpu *c) { (void)c; }
 #define S_READ_CACHE_LIST "_ZN2nn2fs20ReadCacheStorageListEPiPNS0_16CacheStorageInfoENS0_22CacheStorageListHandleEi"
 #define S_CLOSE_CACHE_LIST "_ZN2nn2fs21CloseCacheStorageListENS0_22CacheStorageListHandleE"
 #define S_SET_PRIORITY "_ZN2nn2fs26SetPriorityOnCurrentThreadENS0_8PriorityE"
+#define S_IS_MOUNTED "_ZN2nn2fs9IsMountedEPKc"
 // romfs.c
 #define S_MOUNT_ROM "_ZN2nn2fs8MountRomEPKcPvm"
 #define S_QUERY_CACHE "_ZN2nn2fs22QueryMountRomCacheSizeEPm"
@@ -1191,6 +1206,7 @@ HOST_OVERRIDE(S_OPEN_CACHE_LIST, ov_open_cache_list);
 HOST_OVERRIDE(S_READ_CACHE_LIST, ov_read_cache_list);
 HOST_OVERRIDE(S_CLOSE_CACHE_LIST, ov_close_cache_list);
 HOST_OVERRIDE(S_SET_PRIORITY, ov_set_priority);
+HOST_OVERRIDE(S_IS_MOUNTED, ov_is_mounted);
 
 // ---- --probe-fs
 // Every check calls the overrides the way guest code does: by synthetic address through rt_call, with AAPCS64
@@ -1200,7 +1216,7 @@ static const char *const probe_symbols[] = {
     S_SET_FILE_SIZE, S_FLUSH_FILE, S_CREATE_FILE, S_DELETE_FILE, S_RENAME_FILE, S_CREATE_DIRECTORY, S_DELETE_RECURSIVE,
     S_OPEN_DIRECTORY, S_READ_DIRECTORY, S_CLOSE_DIRECTORY, S_MOUNT_SAVE, S_MOUNT_SAVE_RO, S_SAVE_EXISTS, S_MOUNT_TEMP,
     S_UNMOUNT, S_COMMIT, S_CREATE_CACHE, S_DELETE_CACHE, S_MOUNT_CACHE, S_OPEN_CACHE_LIST, S_READ_CACHE_LIST,
-    S_CLOSE_CACHE_LIST, S_SET_PRIORITY, S_MOUNT_ROM, S_QUERY_CACHE, S_INITIALIZE};
+    S_CLOSE_CACHE_LIST, S_SET_PRIORITY, S_MOUNT_ROM, S_QUERY_CACHE, S_INITIALIZE, S_IS_MOUNTED};
 #define NPROBE ((int)(sizeof probe_symbols / sizeof *probe_symbols))
 #define SAMPLES 64
 #define HEAD_BYTES (8u << 20)      // a sampled file is compared whole up to this size, else head and tail
@@ -1279,8 +1295,11 @@ static void probe_paths(void) {
 
 static uint64_t probe_romfs(void) {
     uint64_t count = romfs_file_count(), cache = ~0ull;
+    CHECK(!CALL(S_IS_MOUNTED, U("rom")) && !CALL(S_IS_MOUNTED, 0) &&
+          !CALL(S_IS_MOUNTED, U("rom:")), "IsMounted rejects absent/invalid names");
     CHECK(RES(S_QUERY_CACHE, U(&cache)) == 0 && cache == 0, "QueryMountRomCacheSize");
     CHECK(RES(S_MOUNT_ROM, U("rom"), 0, 0) == 0, "MountRom(\"rom\")");
+    CHECK(CALL(S_IS_MOUNTED, U("rom")) == 1 && !CALL(S_IS_MOUNTED, U("romx")), "IsMounted RomFS exact name");
     CHECK(RES(S_MOUNT_ROM, U("rom"), 0, 0) == 0, "MountRom(\"rom\") again");
     CHECK(RES(S_MOUNT_ROM, U("../x"), 0, 0) == FS_R_INVALID, "MountRom with a bad name");
     probe_paths();
@@ -1713,7 +1732,9 @@ static void probe_storage(void) {
     CALL(S_CLOSE_CACHE_LIST, l);
     CALL(S_SET_PRIORITY, 1);
     CALL(S_UNMOUNT, U("cache"));
+    CHECK(CALL(S_IS_MOUNTED, U("temp")) == 1 && !CALL(S_IS_MOUNTED, U("cache")), "IsMounted host mounts");
     CALL(S_UNMOUNT, U("temp"));
+    CHECK(!CALL(S_IS_MOUNTED, U("temp")), "IsMounted after unmount");
     CHECK(RES(S_DELETE_CACHE, 3) == 0, "DeleteCacheStorage");
     CALL(S_UNMOUNT, U("save"));
 

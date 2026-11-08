@@ -131,6 +131,16 @@ static void ov_initialize_mouse(Cpu *c) {
     plat_mutex_unlock(&lock);
 }
 
+static void ov_jcms_idle(Cpu *c) {
+    // The host exposes a full-key pad, not a Joy-Con mouse; no IPC or guest work buffer is needed.
+    (void)c;
+}
+
+static void ov_jcms_states(Cpu *c) {
+    // An absent peripheral has no samples, so the caller's state buffer is untouched.
+    ret_x(c, 0);
+}
+
 static void ov_initialize_keyboard(Cpu *c) {
     (void)c;
     plat_mutex_lock(&lock);
@@ -531,6 +541,11 @@ HOST_OVERRIDE("_ZN2nn3hid14DisconnectNpadERKj", ov_disconnect);
 HOST_OVERRIDE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE",
               ov_controller_support);
 HOST_OVERRIDE("_ZN2nn3hid15InitializeMouseEv", ov_initialize_mouse);
+HOST_OVERRIDE("_ZN2nn3hid14InitializeJcmsEPvm", ov_jcms_idle);
+HOST_OVERRIDE("_ZN2nn3hid12FinalizeJcmsEv", ov_jcms_idle);
+HOST_OVERRIDE("_ZN2nn3hid9StartJcmsERKNS0_10JcmsHandleE", ov_jcms_idle);
+HOST_OVERRIDE("_ZN2nn3hid8StopJcmsERKNS0_10JcmsHandleE", ov_jcms_idle);
+HOST_OVERRIDE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", ov_jcms_states);
 HOST_OVERRIDE("_ZN2nn3hid18InitializeKeyboardEv", ov_initialize_keyboard);
 HOST_OVERRIDE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", ov_mouse_states);
 HOST_OVERRIDE("_ZN2nn3hid16GetKeyboardStateEPNS0_13KeyboardStateE", ov_keyboard_state);
