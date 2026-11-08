@@ -852,7 +852,9 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             if ((dest & 1) || dest >= 248) return fail(index, "native gradient texture destination pair");
             if (channel_mask != 15 && channel_mask != 7) return fail(index, "native gradient texture channel mask");
             const u32 high_channel_mask = channel_mask & 0xc;
-            if (high_channel_mask) {
+            // With all four channels requested the third and fourth may be discarded (high == RZ), which lowered
+            // before; only the three-channel form needs a real register for the third channel.
+            if (high_channel_mask && !(channel_mask == 15 && high == 255)) {
                 if (high == 255 || high >= 248)
                     return fail(index, "native gradient texture high destination register");
                 if ((high_channel_mask == 0xc && (high & 1)) ||
