@@ -1968,7 +1968,9 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             if (store && insn.Bits(16, 8) != 0) return fail(index, "native local spill store predicate");
             if (!store && data != 0) return fail(index, "native local spill load data");
             if (!store && dest >= 248) return fail(index, "native local spill load destination");
-            if (!reg_is_rz && (reg + register_count > 248 ||
+            // R246 and R247 (and R216 and up when the program also uses the uniform bank) are lowering scratch
+            // registers (lane id, shuffle), so a wide local load or store must not reach them either.
+            if (!reg_is_rz && (reg + register_count > (uses_uniform_bank ? 216U : 246U) ||
                                (register_count > 1 && (reg & (register_count - 1)))))
                 return fail(index, "native local spill register width");
             if (offset & (byte_count - 1)) return fail(index, "native local spill offset alignment");

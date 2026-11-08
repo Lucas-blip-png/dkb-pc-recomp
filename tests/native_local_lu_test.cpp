@@ -32,6 +32,16 @@ int main() {
     CHECK(bool(lower(store)));
     store.words[2] = 0x00300800;
     CHECK(!lower(store));
+    // 128-bit LDL (memory type 6, four registers, 16-byte aligned offset). R240-R243 is fine; R244-R247 would
+    // write the lowering scratch registers R246 and R247 and must be rejected.
+    auto wide = [](unsigned dst) { return Instruction{{0xff007983u | (dst << 16), 0x00001000u, 0x00100c00u, 0x000f2200u}}; };
+    CHECK(bool(lower(wide(240))));
+    CHECK(!lower(wide(244)));
+    CHECK(!lower(wide(246)));
+    // The same bound applies to a wide store from R244.
+    auto wide_store = [](unsigned src) { return Instruction{{0xff007387u, 0x00001000u | src, 0x00100c00u, 0x000f2200u}}; };
+    CHECK(bool(lower(wide_store(240))));
+    CHECK(!lower(wide_store(244)));
     std::printf("native LDL.LU: %u checks, %u failures\n", checks, failures);
     return failures != 0;
 }
