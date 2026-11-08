@@ -11,6 +11,7 @@ import json
 import struct
 from pathlib import Path
 from native_asset_layout import bntx_blob_offsets, parse_bntx
+from native_asset_paths import write_report
 
 
 def checked(data, offset, size):
@@ -187,8 +188,7 @@ def main():
                    help="tex: Tex/ resources only (the original census); all: every indexed .zs (default)")
     a = p.parse_args()
     result = census(a.romfs, a.scope)
-    a.output.parent.mkdir(parents=True, exist_ok=True)
-    a.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_report(a.output, result)
     counts = result["layout_counts"]
     print("native asset census: {} containers, {} records; {} parsed, {} unsupported, {} unresolved; coverage incomplete".format(
         result["texture_container_count"], result["texture_record_count"], counts["parsed"],

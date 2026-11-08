@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from native_asset_convert import FORMATS as CONVERTER_FORMATS, MAGIC, parse_asset
+from native_asset_paths import marked, require_asset_id, require_generated_output, write_report
 from native_asset_convert_bntx import convert_inventory_asset
 
 
@@ -54,7 +55,8 @@ def upgrade_channel_metadata(path, asset):
             any(meta.get(k) != asset.get(k) for k in ("format", "color_space", "width", "height", "mip_levels", "layers"))):
             return False
         meta["channel_mapping"] = mapping
-        header = json.dumps(meta, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        header = json.dumps(marked(meta), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        require_generated_output(path)
         blob = MAGIC + struct.pack("<II", 2, len(header)) + header + payload
         if parse_asset(blob)[1] != payload:
             raise ValueError("metadata upgrade changed the texture payload")
@@ -64,7 +66,7 @@ def upgrade_channel_metadata(path, asset):
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_bytes(blob)
         tmp.replace(path)
-        sidecar.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        write_report(sidecar, report)
         return valid_existing(path, asset)
     except (OSError, json.JSONDecodeError, ValueError, KeyError):
         return False
@@ -77,9 +79,10 @@ def main():
     ap.add_argument("output", type=Path)
     ap.add_argument("--limit", type=int, help="process at most this many eligible records")
     args = ap.parse_args()
-    out = args.output.resolve()
-    if not any(out.is_relative_to((ROOT / base).resolve()) for base in ("build", "generated")):
-        raise SystemExit("output must be under build/ or generated/")
+    try:
+        out = require_generated_output(args.output)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
     out.mkdir(parents=True, exist_ok=True)
     inventory_bytes = args.inventory.read_bytes()
     inventory = json.loads(inventory_bytes)
@@ -98,6 +101,15 @@ def main():
     with ledger.open("a", encoding="utf-8", newline="\n") as log:
         for index, row in enumerate(eligible, 1):
             asset_id = row["asset_id"]
+            try:
+                # An id that is not a SHA-256 hex digest could name a path outside the output folder.
+                require_asset_id(asset_id)
+            except ValueError as exc:
+                log.write(json.dumps(marked({"asset_id": str(asset_id), "conversion_status": "failed", "reason": str(exc)}),
+                                     sort_keys=True) + "\n")
+                log.flush()
+                failed += 1
+                continue
             artifact = out / (asset_id + ".dkntex")
             if valid_existing(artifact, row):
                 skipped += 1
@@ -110,11 +122,12 @@ def main():
                 if not valid_existing(artifact, row):
                     raise ValueError("written artifact failed output-hash or round-trip sidecar verification")
                 result["artifact"] = artifact.name
-                log.write(json.dumps(result, sort_keys=True) + "\n")
+                log.write(json.dumps(marked(result), sort_keys=True) + "\n")
                 log.flush()
                 converted += 1
             except Exception as exc:
-                log.write(json.dumps({"asset_id": asset_id, "conversion_status": "failed", "reason": str(exc)}, sort_keys=True) + "\n")
+                log.write(json.dumps(marked({"asset_id": asset_id, "conversion_status": "failed", "reason": str(exc)}),
+                                     sort_keys=True) + "\n")
                 log.flush()
                 failed += 1
             if index % 100 == 0 or index == len(eligible):
@@ -141,8 +154,7 @@ def main():
         "unsupported_categories": inventory.get("unresolved_categories"),
         "results_ledger": ledger.name,
     }
-    summary_path = out / "coverage-summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_report(out / "coverage-summary.json", summary)
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0 if summary["complete_for_run_scope"] else 1
 

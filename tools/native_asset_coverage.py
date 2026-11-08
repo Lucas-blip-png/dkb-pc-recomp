@@ -4,6 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
+from native_asset_paths import write_report
+
 # Runtime format mappings inspected in runtime/vk_formats.c. Converter support is narrower.
 RUNTIME_FORMATS = ["rgba8", "r16-uint", "b10g11r11-ufloat", "r8", "rg8", "rgba16f", "bc1", "bc2", "bc3", "bc4", "bc5", "bc6h", "bc7", "astc-4x4", "astc-5x4", "astc-5x5", "astc-6x5", "astc-6x6", "astc-8x5", "astc-8x6", "astc-8x8", "astc-10x5", "astc-10x6", "astc-10x8", "astc-10x10", "astc-12x10", "astc-12x12", "depth-stencil"]
 CONVERTER_FORMATS = ["rgba8", "r16-uint", "b10g11r11-ufloat", "rgba16f", "bc1", "bc2", "bc3", "bc4", "bc4-snorm", "bc5", "bc5-snorm",
@@ -44,8 +46,7 @@ def main():
     p.add_argument("output", type=Path)
     a = p.parse_args()
     result = inventory(json.loads(a.records.read_text(encoding="utf-8")))
-    a.output.parent.mkdir(parents=True, exist_ok=True)
-    a.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_report(a.output, result)
 
 
 if __name__ == "__main__": main()

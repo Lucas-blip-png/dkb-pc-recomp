@@ -14,8 +14,8 @@ ASTC_BLOCKS = ((4, 4), (5, 4), (5, 5), (6, 5), (6, 6), (8, 5), (8, 6),
 
 def _build_formats():
     formats = {
-        # Switch Toolbox BNTX SurfaceFormat enum at 4b5f4dc5b71615baee702be9ab5627fba6ebffbf
-        # resolves numeric 0x0A03 to R16_UINT; keep the integer sampling semantics.
+        # Switch Toolbox's BNTX SurfaceFormat enum (Switch_Toolbox.Library, BNTX.cs) resolves numeric 0x0A03 to
+        # R16_UINT; keep the integer sampling semantics.
         0x0B01: ("rgba8", "linear"), 0x0B06: ("rgba8", "srgb"),
         0x0A03: ("r16-uint", "linear"),
         # Switch Toolbox BNTX.GetFormat maps its R11_G11_B10_UINT enum to
@@ -86,20 +86,10 @@ def checked(data, offset, size):
     return data[offset:offset + size]
 
 
-def _section_payload(data, magic):
-    found = []
-    start = 0
-    while True:
-        offset = data.find(magic, start)
-        if offset < 0:
-            break
-        found.append(offset)
-        start = offset + 1
-    if len(found) != 1:
-        raise ValueError("BNTX data section is absent or ambiguous")
-    section = found[0]
-    if section + 0x10 > len(data):
-        raise ValueError("truncated BNTX data section")
+def _section_payload(data, section):
+    """The BRTD payload range, where the NX header (the u64 at 0x30) says the data block is."""
+    if section + 0x10 > len(data) or data[section:section + 4] != b"BRTD":
+        raise ValueError("BNTX data section is absent or misplaced")
     section_size = struct.unpack_from("<I", data, section + 8)[0]
     if section_size < 1:
         raise ValueError("invalid BNTX data section size")
@@ -113,8 +103,14 @@ def parse_bntx(data):
     For known 2D array formats, reconcile the first layer's mip offsets and
     layer stride against the layer-major layout used by nvn_tex.c.
     """
-    if len(data) < 0x30 or data[:4] != b"BNTX":
+    if len(data) < 0x38 or data[:4] != b"BNTX":
         raise ValueError("unsupported BNTX header")
+    # A container (SARC) can hold several BNTX files back to back: cut the data to this file, whose size is the u32 at
+    # 0x1C, so a later file's BRTD magic or pixel bytes can neither be found nor shadow this file's own sections.
+    file_size = struct.unpack_from("<I", data, 0x1C)[0]
+    if file_size < 0x38 or file_size > len(data):
+        raise ValueError("BNTX file size outside the resource")
+    data = data[:file_size]
     platform_tag = data[0x20:0x24]
     # Switch Toolbox's BNTX loader identifies the exact mixed-case "Ounc" tag as
     # Orin (BNTX.cs, BNTX.IsOrin/GetImageData). For this Bananza census, format
@@ -127,7 +123,7 @@ def parse_bntx(data):
     if count > 1_000_000:
         raise ValueError("implausible BNTX texture count")
     checked(data, table, count * 8)
-    payload_start, payload_end = _section_payload(data, b"BRTD")
+    payload_start, payload_end = _section_payload(data, struct.unpack_from("<Q", data, 0x30)[0])
     records = []
     for ordinal in range(count):
         info = struct.unpack_from("<Q", data, table + ordinal * 8)[0]

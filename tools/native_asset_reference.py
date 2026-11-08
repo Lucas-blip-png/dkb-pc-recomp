@@ -6,12 +6,12 @@ sampling results. They do not depend on the converter, the probe or the runtime'
 
 Covered: rgba8, r16-uint (returned as raw integers, not normalised), b10g11r11-ufloat, rgba16f,
 bc1, bc3, bc4, bc4-snorm, bc5, bc5-snorm. Not covered (no independent decoder here yet): bc6h, bc7, and every ASTC
-block size. Those formats are reported as not verified by the sampling probe.
+block size, and bc2. Those formats are reported as not verified by the sampling probe.
 """
 import math
 import struct
 
-NOT_COVERED = ("bc6h-sfloat", "bc6h-ufloat", "bc7")
+NOT_COVERED = ("bc2", "bc6h-sfloat", "bc6h-ufloat", "bc7")
 
 
 def _half(bits):
@@ -72,10 +72,12 @@ def _rgb565(c):
     return ((r * 255 + 15) // 31 / 255.0, (g * 255 + 31) // 63 / 255.0, (b * 255 + 15) // 31 / 255.0)
 
 
-def _bc1_colors(block):
+def _bc1_colors(block, always_four=False):
+    """The four palette entries of a BC1-style colour block. BC1 switches to a 3-colour palette with transparent black
+    when c0 <= c1; the colour half of a BC2 or BC3 block never does (always_four)."""
     c0, c1 = struct.unpack_from("<HH", block, 0)
     p0, p1 = _rgb565(c0), _rgb565(c1)
-    if c0 > c1:
+    if c0 > c1 or always_four:
         p2 = tuple((2 * a + b) / 3.0 for a, b in zip(p0, p1))
         p3 = tuple((a + 2 * b) / 3.0 for a, b in zip(p0, p1))
         return [p0, p1, p2, p3], False
@@ -83,9 +85,9 @@ def _bc1_colors(block):
     return [p0, p1, p2, (0.0, 0.0, 0.0)], True  # index 3 is transparent black in the 3-colour mode
 
 
-def _bc1_block(block):
+def _bc1_block(block, always_four=False):
     """Returns 16 RGBA tuples, row-major inside the 4x4 block."""
-    colors, three = _bc1_colors(block)
+    colors, three = _bc1_colors(block, always_four)
     indices = struct.unpack_from("<I", block, 4)[0]
     px = []
     for i in range(16):
@@ -138,7 +140,7 @@ def decode_bc1(data, width, height):
 def decode_bc3(data, width, height):
     def block(b):
         alpha = _bc4_values(b[0:8], signed=False)
-        color = _bc1_block(b[8:16])
+        color = _bc1_block(b[8:16], always_four=True)  # BC3 colour is always 4-colour, unlike BC1
         return [(r, g, bb, alpha[i]) for i, (r, g, bb, _a) in enumerate(color)]
     return _block_iter(data, width, height, 16, block)
 

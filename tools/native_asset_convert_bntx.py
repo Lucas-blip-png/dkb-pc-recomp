@@ -10,6 +10,7 @@ import zstandard
 from native_asset_convert import FORMATS as CONVERTER_FORMATS, make_asset_subresources, parse_asset
 from native_asset_inventory import sarc_members
 from native_asset_layout import FORMATS as BNTX_FORMATS, bntx_blob_offsets, parse_bntx
+from native_asset_paths import require_asset_id, require_generated_output, write_report
 
 _CONTEXTS = {}
 
@@ -56,19 +57,8 @@ def _read(stream, row):
     return value
 
 
-def _require_generated_output(path):
-    repo = Path(__file__).resolve().parents[1]
-    resolved = path.resolve()
-    for folder in (repo / "build", repo / "generated"):
-        try:
-            resolved.relative_to(folder.resolve())
-            return resolved
-        except ValueError:
-            continue
-    raise ValueError("generated asset output must be under build/ or generated/")
-
-
 def convert_inventory_asset(romfs_dir, inventory_path, asset_id, output_path):
+    require_asset_id(asset_id)
     context = _context(romfs_dir, inventory_path)
     asset = context["assets"].get(asset_id)
     if asset is None:
@@ -104,12 +94,16 @@ def convert_inventory_asset(romfs_dir, inventory_path, asset_id, output_path):
     # have none and mean the first blob, which is what the original census used.
     blobs = bntx_blob_offsets(raw)
     blob_index = asset.get("bntx_index", 0)
+    if type(blob_index) is not int or blob_index < 0:
+        raise ValueError("bntx_index must be a non-negative integer")
     if blob_index >= len(blobs):
         raise ValueError("indexed texture resource no longer contains the recorded BNTX blob")
     bntx_at = blobs[blob_index]
     bntx = raw[bntx_at:]
     records = parse_bntx(bntx)
     ordinal = asset["record_ordinal"]
+    if type(ordinal) is not int or ordinal < 0:
+        raise ValueError("record_ordinal must be a non-negative integer")
     if ordinal >= len(records):
         raise ValueError("texture ordinal is outside the parsed BNTX table")
     record = records[ordinal]
@@ -144,7 +138,7 @@ def convert_inventory_asset(romfs_dir, inventory_path, asset_id, output_path):
     if len(payload) != expected_payload_size or len(meta["subresources"]) != len(record["subresource_ranges"]):
         raise ValueError("native artifact failed exact mip-payload validation")
 
-    output = _require_generated_output(Path(output_path))
+    output = require_generated_output(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(artifact)
     report = {
@@ -162,8 +156,7 @@ def convert_inventory_asset(romfs_dir, inventory_path, asset_id, output_path):
         "source_mip_geometry_verified": True, "round_trip_payload_validation": "pass",
         "coverage_complete": False,
     }
-    output.with_suffix(output.suffix + ".json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
-                                                                  encoding="utf-8")
+    write_report(output.with_suffix(output.suffix + ".json"), report)
     return report
 
 

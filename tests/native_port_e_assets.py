@@ -36,6 +36,7 @@ class AssetConversion(unittest.TestCase):
         struct.pack_into("<QQ", blob, 0x280, 0x310, 0x510)
         blob[0x300:0x304] = b"BRTD"
         struct.pack_into("<I", blob, 0x308, 0x400)
+        struct.pack_into("<I", blob, 0x1C, len(blob)); struct.pack_into("<Q", blob, 0x30, 0x300)
         records = inv.bntx_records(bytes(blob))
         self.assertEqual((records[0]["width"], records[0]["height"], records[0]["layers"], records[0]["mip_levels"]), (8, 4, 1, 2))
         self.assertEqual(records[0]["mip_ranges"], [
@@ -47,6 +48,7 @@ class AssetConversion(unittest.TestCase):
 
         # Two layers, each containing the two 512-byte mips in layer-major order.
         array = bytearray(blob) + bytearray(0x400)
+        struct.pack_into('<I', array, 0x1C, len(array))
         struct.pack_into('<I', array, 0x1B0, 2)  # layers
         struct.pack_into('<I', array, 0x1D0, 0x800)  # image size
         struct.pack_into('<I', array, 0x308, 0x800)  # BRTD payload size
@@ -76,6 +78,7 @@ class AssetConversion(unittest.TestCase):
         struct.pack_into("<H", blob, 0x240, 1); blob[0x242] = 0
         struct.pack_into("<Q", blob, 0x280, 0x310)
         blob[0x300:0x304] = b"BRTD"; struct.pack_into("<I", blob, 0x308, 0x100)
+        struct.pack_into("<I", blob, 0x1C, len(blob)); struct.pack_into("<Q", blob, 0x30, 0x300)
         record = layout.parse_bntx(bytes(blob))[0]
         self.assertIsNone(record["format"])
         self.assertIsNone(record["color_space"])
@@ -315,6 +318,134 @@ class AssetConversion(unittest.TestCase):
             save(row['channel_mapping'])
             self.assertTrue(valid_existing(path, row))
             self.assertFalse(valid_existing(path, {**row, 'descriptor_sha256': 'different'}))
+
+    @staticmethod
+    def _synthetic_bntx(fill=0, brtd_in_pixels=False):
+        """A 0x800-byte BNTX with one 8x4 rgba8 texture of two mips, built field by field (no game data)."""
+        import struct
+        blob = bytearray(0x800)
+        blob[:4] = b"BNTX"
+        blob[0x20:0x24] = b"NX  "
+        struct.pack_into("<IQ", blob, 0x24, 1, 0x100)
+        struct.pack_into("<Q", blob, 0x100, 0x180)
+        blob[0x180:0x184] = b"BRTI"
+        blob[0x180 + 0x11] = 2
+        struct.pack_into("<HHH", blob, 0x180 + 0x12, 1, 0, 2)
+        struct.pack_into("<I", blob, 0x180 + 0x1c, 0x0B01)
+        struct.pack_into("<5I", blob, 0x180 + 0x24, 8, 4, 1, 1, 0)
+        struct.pack_into("<I", blob, 0x180 + 0x50, 0x400)
+        struct.pack_into("<I", blob, 0x180 + 0x54, 0x200)
+        blob[0x180 + 0x58:0x180 + 0x5c] = bytes([4, 3, 2, 1])
+        struct.pack_into("<Q", blob, 0x180 + 0x60, 0x240)
+        struct.pack_into("<Q", blob, 0x180 + 0x70, 0x280)
+        struct.pack_into("<H", blob, 0x240, 4); blob[0x242:0x246] = b"test"
+        struct.pack_into("<QQ", blob, 0x280, 0x310, 0x510)
+        blob[0x300:0x304] = b"BRTD"
+        struct.pack_into("<I", blob, 0x308, 0x400)
+        for i in range(0x310, 0x710):
+            blob[i] = fill
+        if brtd_in_pixels:
+            blob[0x400:0x404] = b"BRTD"   # pixel bytes that look like a data-block magic
+        struct.pack_into("<I", blob, 0x1C, len(blob)); struct.pack_into("<Q", blob, 0x30, 0x300)
+        return bytes(blob)
+
+    def test_every_bntx_in_a_container_is_found_and_brtd_in_pixels_is_harmless(self):
+        inv_spec = importlib.util.spec_from_file_location("native_asset_inventory", Path(__file__).parents[1] / "tools" / "native_asset_inventory.py")
+        inv = importlib.util.module_from_spec(inv_spec); inv_spec.loader.exec_module(inv)
+        layout_spec = importlib.util.spec_from_file_location("native_asset_layout", Path(__file__).parents[1] / "tools" / "native_asset_layout.py")
+        layout = importlib.util.module_from_spec(layout_spec); layout_spec.loader.exec_module(layout)
+        first, second = self._synthetic_bntx(1), self._synthetic_bntx(2, brtd_in_pixels=True)
+        pad = bytes(128)
+        raw = pad + first + bytes(0x40) + second + bytes(0x20)
+        offsets = layout.bntx_blob_offsets(raw)
+        self.assertEqual(offsets, [128, 128 + len(first) + 0x40])
+        # Each blob parses on its own and the first does not see the second's BRTD magic or pixels.
+        for offset in offsets:
+            self.assertEqual(len(layout.parse_bntx(raw[offset:])), 1)
+        # A texture whose pixel data contains "BRTD" is still a record.
+        self.assertEqual(len(inv.bntx_records(second)), 1)
+        # A file size past the end of the resource, or inside the header, is rejected.
+        import struct
+        short = bytearray(first); struct.pack_into("<I", short, 0x1C, len(short) + 1)
+        with self.assertRaises(ValueError): layout.parse_bntx(bytes(short))
+        tiny = bytearray(first); struct.pack_into("<I", tiny, 0x1C, 0x10)
+        with self.assertRaises(ValueError): layout.parse_bntx(bytes(tiny))
+        # The data block must be where the header says it is.
+        moved = bytearray(first); struct.pack_into("<Q", moved, 0x30, 0x320)
+        with self.assertRaises(ValueError): layout.parse_bntx(bytes(moved))
+
+    def test_generated_output_guard_and_asset_ids(self):
+        import os, tempfile
+        import native_asset_paths as paths
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            (repo / "build").mkdir(parents=True); (repo / "generated").mkdir(); (repo / "tools").mkdir()
+            self.assertEqual(paths.require_generated_output(repo / "build" / "a" / "x.json", repo), (repo / "build" / "a" / "x.json").resolve())
+            self.assertEqual(paths.require_generated_output(repo / "generated" / "x.json", repo), (repo / "generated" / "x.json").resolve())
+            for bad in (repo / "tools" / "x.json", repo / "x.json", repo / "build" / ".." / "tools" / "x.json",
+                        Path(td) / "outside.json", repo / "build_extra" / "x.json"):
+                with self.assertRaises(ValueError): paths.require_generated_output(bad, repo)
+            outside = Path(td) / "outside"; outside.mkdir()
+            try:
+                os.symlink(outside, repo / "build" / "link", target_is_directory=True)
+            except (OSError, NotImplementedError):
+                link_made = False
+            else:
+                link_made = True
+            if link_made:   # a symlink inside build/ must not lead out of it
+                with self.assertRaises(ValueError): paths.require_generated_output(repo / "build" / "link" / "x.json", repo)
+            report = paths.write_report(repo / "build" / "r.json", {"a": 1}, repo)
+            self.assertIn(paths.GENERATED_MARKER, report.read_text(encoding="utf-8"))
+            with self.assertRaises(ValueError): paths.write_report(repo / "tools" / "r.json", {"a": 1}, repo)
+        good = "0123456789abcdef" * 4
+        self.assertEqual(paths.require_asset_id(good), good)
+        for bad in ("../" + good[3:], good.upper(), good[:-1], good + "0", "", None, 5, good[:-1] + "/"):
+            with self.assertRaises(ValueError): paths.require_asset_id(bad)
+
+    def test_generated_marker_is_in_the_artifact_and_dkntex_is_blocked(self):
+        import native_asset_paths as paths
+        blob = mod.make_asset(bytes(1024), 8, 4, "rgba8", False, 1)
+        meta, _ = mod.parse_asset(blob)
+        self.assertEqual(meta["generated_marker"], paths.GENERATED_MARKER)
+        cc_spec = importlib.util.spec_from_file_location("check_content", Path(__file__).parents[1] / "tools" / "check_content.py")
+        cc = importlib.util.module_from_spec(cc_spec); cc_spec.loader.exec_module(cc)
+        self.assertIn(".dkntex", cc.BLOCKED_SUFFIXES)
+        self.assertEqual(cc.GENERATED_MARKER, paths.GENERATED_MARKER)
+
+    def test_parse_asset_bounds_the_subresource_counts(self):
+        import json, struct, time
+        base = {"schema": "dk-native-texture", "version": 2, "format": "rgba8", "width": 8, "height": 4,
+                "block_width": 1, "block_height": 1, "bytes_per_block": 4, "color_space": "linear",
+                "layout": "linear-block-rows-subresources", "subresources": []}
+
+        def blob_for(meta):
+            header = json.dumps(meta).encode()
+            return mod.MAGIC + struct.pack("<II", 2, len(header)) + header
+
+        started = time.monotonic()
+        for mips, layers in ((10_000_000, 1), (1, 10_000_000), (33, 1), (1, 65537)):
+            with self.assertRaises(ValueError):
+                mod.parse_asset(blob_for({**base, "mip_levels": mips, "layers": layers}))
+        self.assertLess(time.monotonic() - started, 2.0)   # nothing of that size is built
+        # Deeply nested metadata is a ValueError, not a RecursionError.
+        header = b"[" * 100000 + b"]" * 100000
+        with self.assertRaises(ValueError):
+            mod.parse_asset(mod.MAGIC + struct.pack("<II", 2, len(header)) + header)
+
+    def test_bc3_colour_blocks_are_always_four_colour(self):
+        import struct
+        import native_asset_reference as ref
+        # c0 = pure blue < c1 = pure red: BC1 would use the 3-colour palette; the colour half of BC3 never does.
+        colour = struct.pack("<HHI", 0x001F, 0xF800, 0xAAAAAAAA)   # every texel uses palette index 2
+        alpha = bytes([255, 255]) + bytes(6)
+        pixels = ref.decode_bc3(alpha + colour, 4, 4)
+        r, g, b, a = pixels[0]
+        self.assertAlmostEqual(r, 1 / 3, places=2); self.assertAlmostEqual(g, 0.0, places=2)
+        self.assertAlmostEqual(b, 2 / 3, places=2); self.assertAlmostEqual(a, 1.0, places=2)
+        # The same bytes read as BC1 (c0 <= c1) take the 3-colour palette: the midpoint.
+        r1, _g1, b1, _a1 = ref.decode_bc1(colour, 4, 4)[0]
+        self.assertAlmostEqual(r1, 0.5, places=2); self.assertAlmostEqual(b1, 0.5, places=2)
+        self.assertIn("bc2", ref.NOT_COVERED)
 
 
 if __name__ == "__main__": unittest.main()

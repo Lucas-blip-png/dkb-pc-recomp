@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from native_asset_convert import FORMATS as CONVERTER_FORMATS
 from native_asset_coverage import inventory as build_coverage
+from native_asset_paths import require_generated_output, write_report
 
 
 def sha(data):
@@ -31,9 +32,10 @@ def main():
         raise SystemExit("batch summary does not match this inventory")
     if batch.get("eligible_conversion_complete") is not True:
         raise SystemExit("supported conversion batch is incomplete")
-    out = args.output.resolve()
-    if not any(out.is_relative_to((ROOT / base).resolve()) for base in ("build", "generated")):
-        raise SystemExit("output must be under build/ or generated/")
+    try:
+        out = require_generated_output(args.output)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
 
     records = []
     converted = 0
@@ -81,8 +83,7 @@ def main():
                               and not batch.get("inventory_status_counts", {}).get("unresolved")),
         "coverage_basis": "complete BNTX census reconciled to the batch converter's full output hash scan",
     })
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(coverage, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_report(out, coverage)
     counts = {}
     for row in coverage["observed_assets"]:
         counts[row["status"]] = counts.get(row["status"], 0) + 1

@@ -5,7 +5,13 @@ import json
 import struct
 from pathlib import Path
 
+from native_asset_paths import marked, require_generated_output
+
 MAGIC = b"DKNATEX\0"
+# A real texture has at most 32 mip levels (2**31 texels on a side) and the hardware 2048 array layers; the bound only
+# has to stop a tiny file from claiming millions of subresources.
+MAX_MIP_LEVELS = 32
+MAX_LAYERS = 65536
 VERSION = 1
 ASTC_BLOCKS = ((4, 4), (5, 4), (5, 5), (6, 5), (6, 6), (8, 5), (8, 6),
                (8, 8), (10, 5), (10, 6), (10, 8), (10, 10), (12, 10), (12, 12))
@@ -56,7 +62,7 @@ def make_asset(src, width, height, fmt, srgb, block_height, mip_levels=1, layers
             "format": fmt, "color_space": "srgb" if srgb else "linear", "mip_levels": 1,
             "layers": 1, "block_width": bw, "block_height": bh, "bytes_per_block": bpb,
             "layout": "linear-block-rows", "source_layout": "switch2-block-linear", "source_block_height_gobs": block_height}
-    header = json.dumps(meta, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    header = json.dumps(marked(meta), sort_keys=True, separators=(",", ":")).encode("utf-8")
     return MAGIC + struct.pack("<II", VERSION, len(header)) + header + pixels
 
 
@@ -91,7 +97,7 @@ def make_asset_subresources(subresources, fmt, srgb, channel_mapping=None):
             "subresources": entries}
     if channel_mapping is not None:
         meta["channel_mapping"] = list(channel_mapping)
-    header = json.dumps(meta, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    header = json.dumps(marked(meta), sort_keys=True, separators=(",", ":")).encode("utf-8")
     return MAGIC + struct.pack("<II", 2, len(header)) + header + b"".join(payloads)
 
 
@@ -104,7 +110,7 @@ def parse_asset(blob):
         raise ValueError("unsupported version or truncated metadata")
     try:
         meta = json.loads(blob[16:16 + header_len])
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as e:
         raise ValueError("invalid metadata JSON") from e
     fmt = meta.get("format")
     if meta.get("schema") != "dk-native-texture" or fmt not in FORMATS:
@@ -121,6 +127,9 @@ def parse_asset(blob):
         not isinstance(meta.get("mip_levels"), int) or not isinstance(meta.get("layers"), int) or
         meta["mip_levels"] < 1 or meta["layers"] < 1):
         raise ValueError("inconsistent or unsupported texture metadata")
+    # Bound the counts before anything of that size is built: a 290-byte file can claim 10 million subresources.
+    if meta["mip_levels"] > MAX_MIP_LEVELS or meta["layers"] > MAX_LAYERS:
+        raise ValueError("texture mip level or layer count out of range")
     payload = blob[16 + header_len:]
     if version == 1:
         if meta["mip_levels"] != 1 or meta["layers"] != 1 or meta.get("layout") != "linear-block-rows":
@@ -129,9 +138,10 @@ def parse_asset(blob):
         if len(payload) != expected: raise ValueError(f"payload length {len(payload)} != expected {expected}")
     else:
         entries = meta.get("subresources")
-        expected_keys = [(m, l) for m in range(meta["mip_levels"]) for l in range(meta["layers"])]
-        if meta.get("layout") != "linear-block-rows-subresources" or not isinstance(entries, list) or len(entries) != len(expected_keys):
+        if (meta.get("layout") != "linear-block-rows-subresources" or not isinstance(entries, list) or
+                len(entries) != meta["mip_levels"] * meta["layers"]):
             raise ValueError("unsupported or incomplete v2 subresources")
+        expected_keys = ((m, l) for m in range(meta["mip_levels"]) for l in range(meta["layers"]))
         cursor = 0
         for entry, key in zip(entries, expected_keys):
             m, l = key; w, h = max(1, width >> m), max(1, height >> m)
@@ -153,8 +163,9 @@ def main():
     p.add_argument("--format", choices=FORMATS, required=True); p.add_argument("--color-space", choices=("linear", "srgb"), required=True)
     p.add_argument("--block-height-gobs", type=int, required=True)
     a = p.parse_args()
-    a.output.parent.mkdir(parents=True, exist_ok=True)
-    a.output.write_bytes(make_asset(a.source.read_bytes(), a.width, a.height, a.format, a.color_space == "srgb", a.block_height_gobs))
+    out = require_generated_output(a.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(make_asset(a.source.read_bytes(), a.width, a.height, a.format, a.color_space == "srgb", a.block_height_gobs))
 
 
 if __name__ == "__main__":
