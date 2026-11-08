@@ -774,7 +774,7 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             if (insn.words[2] == (0x08010600U | high) && dst < 16 && low < 16 && high < 16 &&
                 uniform_dst != ~0U && uniform_low != ~0U && uniform_high != ~0U &&
                 native_predicate == 7 && insn.words[1] <= 32) {
-                emit(0x36f8000000000000ULL | predicate | (u64{uniform_low} << 8) |
+                emit(0x36f8000000000000ULL | predicate | u64{uniform_dst} | (u64{uniform_low} << 8) |
                      (u64{insn.words[1]} << 20) | (u64{uniform_high} << 39));
                 break;
             }
@@ -977,7 +977,13 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
                 emit(0x3828000000070000ULL | 252 | (u64{250} << 8) | (u64{lane} << 20));
                 emit(0x0400000000070000ULL | 252 | (u64{252} << 8) | (u64{1} << 20));
                 emit(0x5c10000000070000ULL | 252 | (u64{255} << 8) | (u64{252} << 20) | (u64{1} << 48));
-                emit(0x5c40000000070000ULL | 251 | (u64{251} << 8) | (u64{252} << 20) | (u64{7} << 48));
+                // R252 is all ones for an active lane and zero for an inactive one. Inactive lanes must not
+                // change the result: for SUM and MAX the neutral value is 0 (AND with the mask), for the
+                // unsigned MIN it is 0xffffffff, so OR the value with ~mask (LOP.OR with B inverted:
+                // Maxwell LOP bits 41-42 = 1 for OR, bit 40 = negate B).
+                emit((minimum ? (0x5c40000000070000ULL | (u64{1} << 41) | (u64{1} << 40))
+                              : 0x5c40000000070000ULL) |
+                     251 | (u64{251} << 8) | (u64{252} << 20) | (u64{7} << 48));
                 if (maximum || minimum) {
                     // Maxwell IMNMX selects MAX with !P7 and MIN with P7; keep the U32 type.
                     emit(0x5c20000000070000ULL | target | (u64{target} << 8) | (u64{251} << 20) |

@@ -24,7 +24,8 @@ static LoweredProgram lower(Instruction op) {
 int main() {
     auto result = lower(captured_funnel());
     CHECK(bool(result));
-    const std::uint64_t expected = 0x36f8000000000000ULL | (7ULL << 16) |
+    // The captured destination is UR6, which maps to R222 (UR0 is R216); UR4 maps to R220.
+    const std::uint64_t expected = 0x36f8000000000000ULL | (7ULL << 16) | std::uint64_t{222} |
         (std::uint64_t{220} << 8) | (std::uint64_t{16} << 20) | (std::uint64_t{220} << 39);
     CHECK(std::find(result.instructions.begin(), result.instructions.end(), expected) != result.instructions.end());
 
