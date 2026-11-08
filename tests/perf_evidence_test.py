@@ -15,8 +15,21 @@ class IniDiagnosticsTests(unittest.TestCase):
         self.assertEqual(perf_evidence.ini_diagnostics('[display]\nfullscreen = 0\nwindow_size = 1920x1080\n'), [])
 
     def test_switches_that_are_on(self):
-        text = '[diagnostics]\nflight = 1\nTOTK_TRACE = on\nDKB_PROFILE = "1"\nvk_validation = 1\n'
+        text = '[diagnostics]\nflight = 1\nTOTK_TRACE = on\nprofile = "1"\nvk_validation = 1\n'
         self.assertEqual(sorted(perf_evidence.ini_diagnostics(text)), ['FLIGHT', 'PROFILE', 'TRACE', 'VK_VALIDATION'])
+
+    def test_later_line_wins_like_cfg_c(self):
+        # runtime/cfg.c add(): a repeated key takes the later line, so the switch is off here and on in the second case.
+        self.assertEqual(perf_evidence.ini_diagnostics('flight = 1\nflight = 0\n'), [])
+        self.assertEqual(perf_evidence.ini_diagnostics('flight = 0\nflight = 1\n'), ['FLIGHT'])
+
+    def test_empty_later_line_leaves_the_earlier_value(self):
+        # cfg.c: "key =" leaves the setting at its default, it does not reset an earlier line.
+        self.assertEqual(perf_evidence.ini_diagnostics('flight = 1\nflight =\n'), ['FLIGHT'])
+
+    def test_dkb_prefix_is_not_a_file_key(self):
+        # cfg.c norm_key strips only TOTK_, so DKB_FLIGHT in the file is an unknown key and switches nothing on.
+        self.assertEqual(perf_evidence.ini_diagnostics('DKB_FLIGHT = 1\n'), [])
 
     def test_off_values_and_empty_do_not_count(self):
         text = 'flight = 0\ntrace = off\nprofile =\nvk_validation = false\ncpu_branch_evidence = no\n'
@@ -32,6 +45,19 @@ class IniDiagnosticsTests(unittest.TestCase):
     def test_none_and_empty_text(self):
         self.assertEqual(perf_evidence.ini_diagnostics(None), [])
         self.assertEqual(perf_evidence.ini_diagnostics(''), [])
+
+
+class EffectiveSettingsTests(unittest.TestCase):
+    def test_dkb_name_maps_to_totk_name(self):
+        self.assertEqual(perf_evidence.effective_settings({'DKB_PROFILE': '1'}).get('TOTK_PROFILE'), '1')
+
+    def test_dkb_wins_over_totk(self):
+        got = perf_evidence.effective_settings({'TOTK_PROFILE': '0', 'DKB_PROFILE': '1'})
+        self.assertEqual(got['TOTK_PROFILE'], '1')
+
+    def test_other_names_are_kept(self):
+        got = perf_evidence.effective_settings({'TOTK_FPS_LIMIT': '60'})
+        self.assertEqual(got, {'TOTK_FPS_LIMIT': '60'})
 
 
 @unittest.skipUnless(shutil.which('pwsh'), 'PowerShell 7 not installed')

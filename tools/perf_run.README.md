@@ -24,8 +24,9 @@ Summarise any bundle again: `.venv\Scripts\python.exe -I tools\perf_evidence.py 
 
 - `-Visit first|repeat`. `first`: a fresh, empty profile and an empty shader cache. `repeat` (needs `-From`): copies the
   profile and shader cache of a completed first-visit bundle. A bundle is reusable only with `complete: true`.
-- `-Exe` (default `build\dkb100\dkb.exe`), `-Exefs` (default `build\extracted\dkb100\exefs`) and `-Romfs` (default
-  `build\extracted\dkb100\romfs`): relative to the repo root or absolute. The runner copies the exe folder's `dkb.exe`,
+- `-Exe` (default `build\dkb100\dkb.exe`), `-Exefs` (default `build\extracted\dkb100-dump\exefs`, where
+  `tools\extract_nup.py` writes it) and `-Romfs` (default `build\extracted\dkb100\romfs`, the packed folder with `romfs.bin`
+  and `index.json`): relative to the repo root or absolute. The runner copies the exe folder's `dkb.exe`,
   `*.dll`, `*.bin` and `dkb.ini` (or `totk.ini` for a TotK build) into `<bundle>\bin\` and runs the copy, so every bundle holds
   a full copy of `dkb.exe` (about 190 MB). The source folder is not written to.
 - Requires PowerShell 7 (`#Requires -Version 7.0`). GPU and process sampling use `nvidia-smi`; on a machine without it the
@@ -34,7 +35,8 @@ Summarise any bundle again: `.venv\Scripts\python.exe -I tools\perf_evidence.py 
   presses, then from tick 3000 a 600-tick cycle of forward walk (5 s), diagonal walk (2 s), camera turn right (1.5 s)
   and walk back (1.5 s), until the run ends. Ticks are 60 Hz from the first present. Stick values are +-32767.
   The walk starts after the menu sequence: at tick 1800 the game was still in an intro caption.
-- `-Realtime` (default 1): sets `TOTK_REALTIME`. Builds without the realtime patch set ignore it.
+- `-Realtime`: unset by default, so the run uses the game's own default (runtime/cfg.c); `0` or `1` sets `TOTK_REALTIME`.
+  Builds without the realtime patch set ignore it.
 - `-Measure flight|summary`. See below.
 - `-Seconds` (wall clock, default 180), `-WarmAfter` (default 60), `-SampleSeconds` (default 5), `-Label`.
 - `-Thumbs`: verification only (flight thumbnails, 120-frame ring).

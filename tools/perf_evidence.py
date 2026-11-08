@@ -245,30 +245,40 @@ DIAGNOSTIC_SWITCHES = ('FLIGHT', 'TRACE', 'PROFILE', 'PROFILE_SLOW', 'PROFILE_RE
 OFF_VALUES = ('', '0', 'off', 'false', 'no')
 
 
+def effective_settings(settings):
+    """The run's own settings as the game sees them: a DKB_X variable wins over TOTK_X (runtime/cfg.c dkb_alias), so
+    map every DKB_X to TOTK_X before looking for a switch."""
+    out = {k: v for k, v in settings.items() if not k.startswith('DKB_')}
+    for k, v in settings.items():
+        if k.startswith('DKB_'):
+            out['TOTK_' + k[4:]] = v
+    return out
+
+
 def ini_diagnostics(text):
     """The diagnostic switches a copied dkb.ini or totk.ini would turn on, as runtime/cfg.c reads it: "key = value"
-    lines, a line starting with '#' or ';' is a comment and '[...]' only groups, the key is the variable name without
-    TOTK_ or DKB_ (case-insensitive), the value is the rest of the line, trimmed, optionally in double quotes."""
-    found = []
+    lines, a line starting with '#' or ';' is a comment and '[...]' only groups, the key is the variable name in capitals
+    with an optional TOTK_ prefix (a DKB_ prefix is not accepted by the file), the value is the rest of the line,
+    trimmed, optionally in double quotes. An empty value leaves an earlier line standing; otherwise the later line wins."""
+    values = {}
     for line in (text or '').splitlines():
         line = line.strip()
         if not line or line[0] in '#;[' or '=' not in line:
             continue
         key, value = (part.strip() for part in line.split('=', 1))
         key = key.upper()
-        for prefix in ('TOTK_', 'DKB_'):
-            if key.startswith(prefix):
-                key = key[len(prefix):]
+        if key.startswith('TOTK_'):
+            key = key[len('TOTK_'):]
         if len(value) >= 2 and value[0] == value[-1] == '"':
             value = value[1:-1]
-        if key in DIAGNOSTIC_SWITCHES and value.strip().lower() not in OFF_VALUES:
-            found.append(key)
-    return found
+        if value:
+            values[key] = value
+    return [key for key in DIAGNOSTIC_SWITCHES if key in values and values[key].strip().lower() not in OFF_VALUES]
 
 
 def build(bundle, warm_after):
     run = json.loads((bundle / 'run.json').read_text(encoding='utf-8-sig'))
-    settings = run.get('settings', {})
+    settings = effective_settings(run.get('settings', {}))
     measure = run.get('measure', 'flight')
     frames, dumps, skipped = read_flight(bundle) if measure == 'flight' else ({}, [], 0)
     # The game writes its log lines to stderr (runtime/main.c log_open puts the log beside the stderr file only when a

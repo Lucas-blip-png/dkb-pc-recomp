@@ -17,10 +17,12 @@
   not written to.
 
 .PARAMETER Exefs
-  The extracted ExeFS folder (main, sdk), relative to the repo root or absolute (default build\extracted\dkb100\exefs, the layout of docs/building.md).
+  The extracted ExeFS folder (main, sdk), relative to the repo root or absolute. The default is where
+  `tools\extract_nup.py <game>.nup --out build\extracted\dkb100-dump` writes it (docs/dkb-testing.md).
 
 .PARAMETER Romfs
-  The extracted RomFS folder (romfs.bin, index.json), relative to the repo root or absolute (default build\extracted\dkb100\romfs).
+  The packed RomFS folder (it holds romfs.bin and index.json), relative to the repo root or absolute
+  (default build\extracted\dkb100\romfs).
 
 .PARAMETER Seconds
   Wall-clock length of the run before the game window is closed (default 180).
@@ -54,7 +56,7 @@ param(
     [ValidateSet('first', 'repeat')] [string]$Visit = 'first',
     [string]$From = '',
     [string]$Exe = 'build\dkb100\dkb.exe',
-    [string]$Exefs = 'build\extracted\dkb100\exefs',
+    [string]$Exefs = 'build\extracted\dkb100-dump\exefs',
     [string]$Romfs = 'build\extracted\dkb100\romfs',
     [int]$Seconds = 180,
     [int]$SampleSeconds = 5,
@@ -80,7 +82,7 @@ function Write-Json([object]$obj, [string]$path) { $obj | ConvertTo-Json -Depth 
 # The menu presses that reached the cave scene in build\native-port-integrate\menu-to-scene.txt (60 Hz ticks).
 $menuLines = @('300 A 4', '520 A 4', '700 A 4', '900 A 4', '1100 A 4', '1300 A 4', '1500 A 4')
 
-# Walk script: after the menu, a 600-tick cycle from tick 1800 on. Each cycle walks forward 5 s, walks diagonally
+# Walk script: after the menu, a 600-tick cycle from tick 3000 on. Each cycle walks forward 5 s, walks diagonally
 # 2 s, turns the camera right 1.5 s, and walks back 1.5 s. Stick values are +-32767 (runtime/input.c STICK_MAX).
 # Sticks are held in ticks, so the same script is the same input at any frame rate.
 function New-Script([string]$kind, [int]$ticks) {
@@ -195,7 +197,7 @@ $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exeSrc).Hash
 $exeItem = Get-Item -LiteralPath $exeSrc
 # nvidia-smi exists only with an NVIDIA driver; with $ErrorActionPreference = 'Stop' a missing command would end the script.
 $hasSmi = [bool](Get-Command nvidia-smi -ErrorAction SilentlyContinue)
-$gpu = if ($hasSmi) { (& nvidia-smi --query-gpu=name,driver_version,vbios_version --format=csv,noheader 2>$null) -split ',' } else { @('n/a (no nvidia-smi)') }
+$gpu = if ($hasSmi) { (& nvidia-smi --query-gpu=name,driver_version,vbios_version --format=csv,noheader 2>$null | Select-Object -First 1) -split ',' } else { @('n/a (no nvidia-smi)') }
 $plan = (powercfg /getactivescheme 2>$null) -join ' '
 Add-Type -AssemblyName System.Windows.Forms
 $ps0 = [System.Windows.Forms.SystemInformation]::PowerStatus
@@ -286,7 +288,7 @@ try {
         $t = $sw.Elapsed.TotalSeconds
         if ($t -ge $nextSample) {
             $nextSample += $SampleSeconds
-            $g = if (-not $hasSmi) { $null } else { (& nvidia-smi --query-gpu=temperature.gpu,power.draw,clocks.sm,clocks.max.sm,clocks.mem,utilization.gpu,memory.used,clocks_throttle_reasons.active --format=csv,noheader,nounits 2>$null) }
+            $g = if (-not $hasSmi) { $null } else { (& nvidia-smi --query-gpu=temperature.gpu,power.draw,clocks.sm,clocks.max.sm,clocks.mem,utilization.gpu,memory.used,clocks_throttle_reasons.active --format=csv,noheader,nounits 2>$null | Select-Object -First 1) }
             $g = if ($g) { ($g -replace '\s', '') } else { 'n/a,n/a,n/a,n/a,n/a,n/a,n/a,n/a' }
             $p = Get-Process -Id $game.Id -ErrorAction SilentlyContinue
             # F1 with the invariant culture: no thousands separator and always a '.', whatever the user's culture is.
