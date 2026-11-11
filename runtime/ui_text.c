@@ -162,6 +162,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                     "has six or more channels. Applies after a restart.",
     [UI_MENU_CHANNELS_AUTO] = "Automatic", [UI_MENU_CHANNELS_STEREO] = "Stereo", [UI_MENU_CHANNELS_51] = "5.1 surround",
 
+    [UI_MENU_CONTROLLER] = "Controller", [UI_MENU_MOUSE_KEYBOARD] = "Mouse & Keyboard",
     [UI_MENU_MOTION] = "Motion controls", [UI_MENU_MOTION_DESC] = "Aiming with the controller's gyroscope.",
     [UI_MENU_RUMBLE_STRENGTH] = "Vibration strength",
     [UI_MENU_RUMBLE_STRENGTH_DESC] = "How strong the controller vibrates.",
@@ -190,15 +191,17 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_MOUSE_SENS] = "Mouse camera sensitivity",
     [UI_MENU_MOUSE_SENS_DESC] = "How fast the mouse turns the camera.",
 
-    [UI_BINDS_HELP] = "Select a cell and press A or Enter, then the key, mouse button or controller button. Delete or "
-                      "X clears a cell. A key in use moves here; a controller button swaps with the one it replaces.",
-    [UI_BINDS_COL_KEY1] = "Key 1", [UI_BINDS_COL_KEY2] = "Key 2", [UI_BINDS_COL_PAD] = "Controller",
+    [UI_BINDS_HELP_KEYS] = "Click a binding or press Enter, then press a key or mouse button. Delete or X clears it. "
+                           "A key already in use moves to the new action.",
+    [UI_BINDS_HELP_PAD] = "Press A on a binding, then press a controller button. X clears it. Buttons already in use "
+                          "swap. The left stick moves and the right stick controls the camera.",
+    [UI_BINDS_COL_KEY1] = "Primary", [UI_BINDS_COL_KEY2] = "Secondary",
     [UI_BINDS_GROUP_BUTTONS] = "Buttons", [UI_BINDS_GROUP_MOVE] = "Movement", [UI_BINDS_GROUP_CAMERA] = "Camera",
     [UI_BINDS_PRESS_KEY] = "Press a key or mouse button for %s",
     [UI_BINDS_PRESS_PAD] = "Press a controller button for %s",
     [UI_BINDS_CANCEL_HINT] = "Esc cancels, or wait %d s",
     [UI_BINDS_TAKEN] = "%s was taken from %s", [UI_BINDS_SWAPPED] = "%s swapped with %s",
-    [UI_BINDS_RESET] = "Reset all buttons",
+    [UI_BINDS_RESET] = "Reset all bindings",
     [UI_BINDS_RESET_DESC] = "Back to the default keys and controller buttons. The button layout above applies again: remapped controller buttons stay where you put them until this reset.",
     [UI_BIND_A] = "A", [UI_BIND_B] = "B", [UI_BIND_X] = "X", [UI_BIND_Y] = "Y",
     [UI_BIND_LCLICK] = "Left stick click", [UI_BIND_RCLICK] = "Right stick click", [UI_BIND_L] = "L",
@@ -479,6 +482,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
                                     "вывода по умолчанию шесть каналов или больше. Применяется после перезапуска.",
     [UI_MENU_CHANNELS_AUTO] = "Автоматически", [UI_MENU_CHANNELS_STEREO] = "Стерео", [UI_MENU_CHANNELS_51] = "Объёмный 5.1",
 
+    [UI_MENU_CONTROLLER] = "Контроллер", [UI_MENU_MOUSE_KEYBOARD] = "Мышь и клавиатура",
     [UI_MENU_MOTION] = "Управление движением", [UI_MENU_MOTION_DESC] = "Прицеливание гироскопом контроллера.",
     [UI_MENU_RUMBLE_STRENGTH] = "Сила вибрации",
     [UI_MENU_RUMBLE_STRENGTH_DESC] = "Насколько сильно вибрирует контроллер.",
@@ -504,16 +508,17 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_MOUSE_SENS] = "Чувствительность мыши",
     [UI_MENU_MOUSE_SENS_DESC] = "Как быстро мышь поворачивает камеру.",
 
-    [UI_BINDS_HELP] = "Выберите ячейку и нажмите A или Enter, затем клавишу, кнопку мыши или кнопку контроллера. "
-                      "Delete или X очищает ячейку. Занятая клавиша переходит сюда; кнопка контроллера меняется "
-                      "местами с той, которую заменяет.",
-    [UI_BINDS_COL_KEY1] = "Клавиша 1", [UI_BINDS_COL_KEY2] = "Клавиша 2", [UI_BINDS_COL_PAD] = "Контроллер",
+    [UI_BINDS_HELP_KEYS] = "Щёлкните назначение или нажмите Enter, затем нажмите клавишу или кнопку мыши. Delete или X очищает ячейку. "
+                           "Занятая клавиша переходит к новому действию.",
+    [UI_BINDS_HELP_PAD] = "Нажмите A на назначении, затем нажмите кнопку контроллера. X очищает ячейку. Занятые кнопки "
+                          "меняются местами. Левый стик отвечает за движение, правый — за камеру.",
+    [UI_BINDS_COL_KEY1] = "Основное", [UI_BINDS_COL_KEY2] = "Дополнительное",
     [UI_BINDS_GROUP_BUTTONS] = "Кнопки", [UI_BINDS_GROUP_MOVE] = "Движение", [UI_BINDS_GROUP_CAMERA] = "Камера",
     [UI_BINDS_PRESS_KEY] = "Нажмите клавишу или кнопку мыши для «%s»",
     [UI_BINDS_PRESS_PAD] = "Нажмите кнопку контроллера для «%s»",
     [UI_BINDS_CANCEL_HINT] = "Esc отменяет, или подождите %d с",
     [UI_BINDS_TAKEN] = "%s: убрано с «%s»", [UI_BINDS_SWAPPED] = "«%s» и «%s» поменялись местами",
-    [UI_BINDS_RESET] = "Сбросить все кнопки",
+    [UI_BINDS_RESET] = "Сбросить все привязки",
     [UI_BINDS_RESET_DESC] = "Вернуть клавиши и кнопки контроллера по умолчанию. Снова действует раскладка кнопок выше: "
                             "переназначенные кнопки контроллера остаются на своих местах до "
                             "этого сброса.",

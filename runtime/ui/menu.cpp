@@ -778,8 +778,7 @@ static const char *pad_layout_note(void) {
     return note;
 }
 
-static void tab_controls(float scale) {
-    opt_begin("##controls", scale);
+static void rows_controller(void) {
     static const UiTextId layout[] = {UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_PAD_LAYOUT_NINTENDO, UI_MENU_PAD_LAYOUT_XBOX,
                                       UI_MENU_PAD_LAYOUT_XBOX_PROMPTS};
     opt_choice("TOTK_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layout, 4, UI_MENU_PAD_LAYOUT_DESC, pad_layout_note());
@@ -788,10 +787,30 @@ static void tab_controls(float scale) {
     opt_slider("TOTK_RUMBLE_CURVE", UI_MENU_RUMBLE_CURVE, 0.2f, 1.5f, UI_MENU_RUMBLE_CURVE_DESC, 0.05f, "%.2f");
     opt_toggle("TOTK_RUMBLE_TRIGGERS", UI_MENU_RUMBLE_TRIGGERS, UI_MENU_RUMBLE_TRIGGERS_DESC);
     opt_slider("TOTK_STICK_DEADZONE", UI_MENU_STICK_DEADZONE, 0, 50, UI_MENU_STICK_DEADZONE_DESC, 1, "%.0f %%");
-    if (!rt_game_version) opt_toggle("TOTK_MOUSE_CAMERA", UI_MENU_MOUSE_CAMERA, UI_MENU_MOUSE_CAMERA_DESC);
-    opt_slider("TOTK_MOUSE_SENS", UI_MENU_MOUSE_SENS, 0, 10, UI_MENU_MOUSE_SENS_DESC, 0.1f, "%.1f");
-    binds_rows(scale);
-    opt_end();
+}
+
+static void tab_controls(float scale) {
+    if (ImGui::BeginTabBar("##input_devices")) {
+        char controller[96], mouse_keys[96];
+        snprintf(controller, sizeof controller, "%s###controller", menu_text(UI_MENU_CONTROLLER));
+        snprintf(mouse_keys, sizeof mouse_keys, "%s###mouse_keys", menu_text(UI_MENU_MOUSE_KEYBOARD));
+        if (ImGui::BeginTabItem(controller)) {
+            opt_begin("##controller_settings", scale);
+            rows_controller();
+            binds_rows(scale, true);
+            opt_end();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(mouse_keys)) {
+            opt_begin("##mouse_keyboard_settings", scale);
+            if (!rt_game_version) opt_toggle("TOTK_MOUSE_CAMERA", UI_MENU_MOUSE_CAMERA, UI_MENU_MOUSE_CAMERA_DESC);
+            opt_slider("TOTK_MOUSE_SENS", UI_MENU_MOUSE_SENS, 0, 10, UI_MENU_MOUSE_SENS_DESC, 0.1f, "%.1f");
+            binds_rows(scale, false);
+            opt_end();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
     binds_after_page();
 }
 

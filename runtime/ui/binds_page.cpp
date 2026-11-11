@@ -159,20 +159,22 @@ static void reset_binds(void) {
     rt_log("menu: reset %d button bindings", n);
 }
 
-static void row_action(int a, const InputMap &m, int layout) {
-    uint8_t k[INPUT_BINDING_MAX], p[INPUT_PAD_BINDING_MAX];
-    int nk = input_map_keys_of(&m, a, k, INPUT_BINDING_MAX);
-    int np = a < B_SL_LEFT ? input_map_pads_of(&m, a, layout, p, INPUT_PAD_BINDING_MAX) : 0;
+static void row_action(int a, const InputMap &m, int layout, bool controller) {
     char b0[48], b1[48];
-    const char *cells[3] = {nk > 0 ? key_label(k[0], b0, sizeof b0) : "", nk > 1 ? key_label(k[1], b1, sizeof b1) : "",
-                            a >= B_SL_LEFT ? menu_text(a <= B_SL_DOWN ? UI_PAD_LSTICK : UI_PAD_RSTICK)
-                            : np           ? pad_label(p[0])
-                                           : ""};
-    const bool enabled[3] = {true, true, a < B_SL_LEFT};   // the sticks stay sticks
+    const char *cells[3] = {};
+    if (controller) {
+        uint8_t pads[INPUT_PAD_BINDING_MAX];
+        if (input_map_pads_of(&m, a, layout, pads, INPUT_PAD_BINDING_MAX) > 0) cells[2] = pad_label(pads[0]);
+    } else {
+        uint8_t keys[INPUT_BINDING_MAX];
+        int count = input_map_keys_of(&m, a, keys, INPUT_BINDING_MAX);
+        if (count > 0) cells[0] = key_label(keys[0], b0, sizeof b0);
+        if (count > 1) cells[1] = key_label(keys[1], b1, sizeof b1);
+    }
     char key[32];
     snprintf(key, sizeof key, "BIND_%s", input_action_name(a));
     const char *note = g_note_action == a && plat_now_ns() < g_note_until ? g_note : nullptr;
-    int r = opt_bind_row(key, action_label(a), action_desc(a), cells, enabled, note);
+    int r = opt_bind_row(key, action_label(a), action_desc(a), cells, controller, note);
     if (g_cap.action >= 0 || r < 0) return;
     if (r < 3) {
         g_cap.action = a;
@@ -224,18 +226,20 @@ bool binds_modal(void) { return g_cap.action >= 0; }
 
 static bool g_reset_asked;   // the reset row was chosen this frame (acted on after the page)
 
-void binds_rows(float scale) {
+void binds_rows(float scale, bool controller) {
     InputMap m;
     input_map_snapshot(&m);
-    int layout = shown_layout();
+    int layout = controller ? shown_layout() : 0;
     opt_group(UI_BINDS_GROUP_BUTTONS);
-    opt_text(UI_BINDS_HELP);
-    opt_bind_header(UI_BINDS_COL_KEY1, UI_BINDS_COL_KEY2, UI_BINDS_COL_PAD);
-    for (int a : kButtons) row_action(a, m, layout);
-    opt_group(UI_BINDS_GROUP_MOVE);
-    for (int a : kMove) row_action(a, m, layout);
-    opt_group(UI_BINDS_GROUP_CAMERA);
-    for (int a : kCamera) row_action(a, m, layout);
+    opt_text(controller ? UI_BINDS_HELP_PAD : UI_BINDS_HELP_KEYS);
+    if (!controller) opt_bind_key_header();
+    for (int a : kButtons) row_action(a, m, layout, controller);
+    if (!controller) {
+        opt_group(UI_BINDS_GROUP_MOVE);
+        for (int a : kMove) row_action(a, m, layout, false);
+        opt_group(UI_BINDS_GROUP_CAMERA);
+        for (int a : kCamera) row_action(a, m, layout, false);
+    }
     ImGui::Dummy(ImVec2(0, 6 * scale));
     g_reset_asked = opt_button("##binds_reset", UI_BINDS_RESET, UI_BINDS_RESET_DESC);
 }

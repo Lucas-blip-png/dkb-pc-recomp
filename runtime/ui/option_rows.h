@@ -55,13 +55,11 @@ bool opt_button(const char *id, UiTextId label, UiTextId desc, const char *value
 bool opt_slider(const char *key, UiTextId label, float lo, float hi, UiTextId desc, float step = 1,
                 const char *fmt = "%g");
 
-// Binding rows (remapping on the Controls tab): a label and three cells, each selectable on its own (left / right move between them).
-// opt_bind_header: the column titles above them. opt_bind_row: key is the setting's name without TOTK_ (BIND_A; the
-// description names it when the environment sets it); a disabled cell shows its text greyed and takes no cursor; note
-// (NULL none) follows the description. Returns the cell A / Enter / a click activated (0..2), 10 + the cell Delete,
-// Backspace or X cleared, or -1. opt_focus_key("<key>#<cell>") puts the cursor on a cell.
-void opt_bind_header(UiTextId c0, UiTextId c1, UiTextId c2);
-int opt_bind_row(const char *key, const char *label, UiTextId desc, const char *const cells[3], const bool enabled[3],
+// Binding rows show either key cells 0 and 1 or controller cell 2. The key has no TOTK_ prefix (e.g. BIND_A).
+// Returns the activated cell, 10 + the cleared cell (Delete, Backspace or X), or -1. A note follows the description.
+// opt_focus_key("<key>#<cell>") returns the cursor to a cell after remapping.
+void opt_bind_key_header(void);
+int opt_bind_row(const char *key, const char *label, UiTextId desc, const char *const cells[3], bool controller,
                  const char *note = nullptr);
 
 // totk.ini is written a moment after the last change (a held slider would rewrite it every frame) and when the menu

@@ -388,20 +388,19 @@ static void fit_text(ImDrawList *dl, float x0, float x1, float y, float h, ImU32
     dl->AddText(font, fs, ImVec2(x, y + (h - fs) * 0.5f), col, t, NULL, 0, &clip);
 }
 
-// The label column and the three cells of a binding row of width w.
-static void bind_columns(float x, float w, float cx[3], float *cw) {
-    float lw = floorf(w * 0.34f), gap = floorf(8 * g_scale);
-    *cw = floorf((w - lw - gap * 3) / 3);
-    for (int c = 0; c < 3; c++) cx[c] = x + lw + gap + c * (*cw + gap);
+static void bind_columns(float x, float w, int count, float cx[2], float *cw) {
+    float lw = floorf(w * 0.42f), gap = floorf(8 * g_scale);
+    *cw = floorf((w - lw - gap * count) / count);
+    for (int c = 0; c < count; c++) cx[c] = x + lw + gap + c * (*cw + gap);
 }
 
-void opt_bind_header(UiTextId c0, UiTextId c1, UiTextId c2) {
+void opt_bind_key_header(void) {
     ImVec2 p = ImGui::GetCursorScreenPos();
-    float w = ImGui::GetContentRegionAvail().x, cx[3], cw, fs = ImGui::GetFontSize() * 0.8f;
-    bind_columns(p.x, w, cx, &cw);
-    const UiTextId cols[3] = {c0, c1, c2};
+    float w = ImGui::GetContentRegionAvail().x, cx[2], cw, fs = ImGui::GetFontSize() * 0.8f;
+    bind_columns(p.x, w, 2, cx, &cw);
+    const UiTextId cols[] = {UI_BINDS_COL_KEY1, UI_BINDS_COL_KEY2};
     ImFont *font = ImGui::GetFont();
-    for (int c = 0; c < 3; c++) {
+    for (int c = 0; c < 2; c++) {
         const char *t = menu_text(cols[c]);
         float tw = font->CalcTextSizeA(fs, FLT_MAX, 0, t).x;
         ImGui::GetWindowDrawList()->AddText(font, fs, ImVec2(cx[c] + (cw - tw) * 0.5f, p.y), kDim, t);
@@ -409,25 +408,22 @@ void opt_bind_header(UiTextId c0, UiTextId c1, UiTextId c2) {
     ImGui::Dummy(ImVec2(w, fs * 1.2f));
 }
 
-int opt_bind_row(const char *key, const char *label, UiTextId desc, const char *const cells[3], const bool enabled[3],
+int opt_bind_row(const char *key, const char *label, UiTextId desc, const char *const cells[3], bool controller,
                  const char *note) {
     ImGui::PushID(key);
     ImVec2 p = ImGui::GetCursorScreenPos();
-    float fs = ImGui::GetFontSize(), w = ImGui::GetContentRegionAvail().x, h = floorf(fs * 1.9f), cx[3], cw;
-    bind_columns(p.x, w, cx, &cw);
+    float fs = ImGui::GetFontSize(), w = ImGui::GetContentRegionAvail().x, h = floorf(fs * 1.9f), cx[2], cw;
+    int count = controller ? 1 : 2;
+    bind_columns(p.x, w, count, cx, &cw);
     ImDrawList *dl = ImGui::GetWindowDrawList();
     float r = (P->dk ? 6 : 8) * g_scale, pad = 6 * g_scale;
     fit_text(dl, p.x + 16 * g_scale, cx[0] - fs * 0.3f, p.y, h, P->label, label, false);
     int result = -1;
     bool row_foc = false, row_hov = false;
-    for (int c = 0; c < 3; c++) {
-        ImVec2 a(cx[c], p.y), b(cx[c] + cw, p.y + h);
+    for (int column = 0; column < count; column++) {
+        int c = controller ? 2 : column;
+        ImVec2 a(cx[column], p.y), b(cx[column] + cw, p.y + h);
         const char *t = cells[c] && cells[c][0] ? cells[c] : "-";
-        if (!enabled[c]) {   // not a nav item: the cursor skips it
-            dl->AddRect(a, b, P->cell_off_border, r);
-            fit_text(dl, a.x + pad, b.x - pad, a.y, h, kGrey, t, true);
-            continue;
-        }
         ImGui::SetCursorScreenPos(a);
         ImGui::PushID(c);
         ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));   // the cell's own border shows the selection
