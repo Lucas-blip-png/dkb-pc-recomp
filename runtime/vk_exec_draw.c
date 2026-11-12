@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "gfx_spirv.h"
 #include "msort.h"
 #include "host.h"
 #include "nvn_api.h"
@@ -2934,6 +2935,7 @@ static int light_quad_fault_skip(const VkExec *ex, const GfxShader *vs, const Gf
         if (on && !nv) rt_log("vk: TOTK_FIX_VS_FAULT=all: the light quad skip (#9) also runs on this non-NVIDIA GPU");
     }
     if (!on || !vs || !fs) return 0;
+    if (gfx_spirv_lq_folded(vs)) return 0;   // gfx_spirv.c folds this vertex stage, so its draws are drawn
     if (stage_origin(dc, ex->prog, NVN_STAGE_VS) == 0xcae0ef8e9fe9147full) {
         warn_once(W_FAULT_SKIP2, "the light quad of NVN 2 vertex stage cae0ef8e9fe9147f is skipped (#9)");
         return 1;

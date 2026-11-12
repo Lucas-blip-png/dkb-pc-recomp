@@ -14,6 +14,7 @@
 #include "host.h"
 #include "platform/platform.h"
 #include "spirv_hdr_shoulder.h"
+#include "spirv_lq_fold.h"
 #include "spirv_nan_guard.h"
 #include "spirv_rewrite.h"
 #include "spirv_screen_uv.h"
@@ -162,8 +163,70 @@ static uint32_t *nan_guard(const GfxShader *src, const uint32_t *w, uint64_t wor
     return o;
 }
 
+// The light-quad fold (spirv_lq_fold.cpp), Bananza on NVIDIA. A few vertex stages of the light-quad shape lose the
+// device ("instruction pointer (invalid)", 40 to 60 s into a stage) or crash the driver's shader compiler. They compute
+// a selector r = (a computed index) & 3 that picks one of four constant-buffer words, and the fault goes away when the
+// `& 3` results that feed branch conditions are replaced by 0. Every value-preserving rewrite of the same code that was
+// tried still faulted, so THE FOLD IS NOT EXACT:
+//  - whole fold (construct -1): Ground's 67a23e6f132386f9 and e2bf75f927acd249, Tower's 3a10ce1a4f3cdf0b, 8475bd9dadb18f45
+//    and 4645f0dd7b4502a2, Ice's 7a76ae8de5016fd9. r becomes 0, so the per-instance value the fragment stage uses as a
+//    texture array layer is layer 0 for every instance (r was 0 to 3 in captured draws; the other outputs were the same).
+//  - Fort's 1ee77eac998beea5 (construct 31): only the `& 3` results that decide selection construct 31 become 0. That moves
+//    a texture coordinate (Location 3) by up to 0.5 in about 46% of the captured invocations; Position and the layer stay.
+// A rule applies only to the stage its NVN 2 origin names and only if the module has exactly the expected pattern;
+// otherwise the module is left alone and the light-quad skip (vk_exec_draw.c light_quad_fault_skip) still covers its
+// draws. A folded stage is drawn instead of skipped. TOTK_FIX_LQ_FOLD=0 turns the fold off.
+static const struct { uint64_t origin; int construct; } lq_fold_rules[] = {
+    {0x67a23e6f132386f9ull, -1}, {0xe2bf75f927acd249ull, -1}, {0x3a10ce1a4f3cdf0bull, -1}, {0x8475bd9dadb18f45ull, -1},
+    {0x4645f0dd7b4502a2ull, -1}, {0x7a76ae8de5016fd9ull, -1}, {0x1ee77eac998beea5ull, 31},
+};
+#define LQ_RULES (int)(sizeof lq_fold_rules / sizeof *lq_fold_rules)
+static int lq_platform;   // gfx_spirv_set_lq_fold_platform: Bananza on NVIDIA
+
+void gfx_spirv_set_lq_fold_platform(int nvidia) {
+    lq_platform = nvidia && !rt_game_version && cfg_bool("TOTK_FIX_LQ_FOLD");
+}
+
+static int lq_rule(const GfxShader *src) {
+    if (!lq_platform || !src || gfx_shader_stage(src) != GFX_STAGE_VS) return -1;
+    uint64_t o = gfx_shader_origin(src);
+    for (int i = 0; o && i < LQ_RULES; i++)
+        if (lq_fold_rules[i].origin == o) return i;
+    return -1;
+}
+
+int gfx_spirv_lq_folded(const GfxShader *vs) {
+    static int8_t state[LQ_RULES];   // 0 not checked, 1 the pattern is there, 2 it is not (racing threads compute the same)
+    int i = lq_rule(vs);
+    if (i < 0) return 0;
+    int s = __atomic_load_n(&state[i], __ATOMIC_RELAXED);
+    if (!s) {
+        uint64_t n = 0;
+        const uint32_t *w = gfx_shader_spirv(vs, &n);
+        s = w && spirv_lq_fold(w, n, lq_fold_rules[i].construct, NULL, NULL, NULL) == 1 ? 1 : 2;
+        __atomic_store_n(&state[i], (int8_t)s, __ATOMIC_RELAXED);
+        if (s == 2) rt_log("vk: vs origin %016llx: light-quad fold pattern not found; its draws stay skipped", (unsigned long long)lq_fold_rules[i].origin);
+    }
+    return s == 1;
+}
+
+static uint32_t *lq_fold(const GfxShader *src, const uint32_t *w, uint64_t words, uint64_t *out_n) {
+    int i = lq_rule(src);
+    if (i < 0) return NULL;
+    uint32_t *o = NULL;
+    unsigned nulled = 0;
+    if (spirv_lq_fold(w, words, lq_fold_rules[i].construct, &o, out_n, &nulled) != 1) return NULL;
+    static volatile int32_t lines;
+    if (plat_inc32(&lines) <= 16)
+        rt_log("vk: vs origin %016llx: light-quad fold applied (%u `& 3` results set to 0)", (unsigned long long)lq_fold_rules[i].origin, nulled);
+    return o;
+}
+
 uint32_t *gfx_spirv_final(const GfxShader *src, const uint32_t *w, uint64_t words, int geometry_chain,
                           uint32_t clip_cull_limit, uint64_t *out_words) {
+    uint64_t lq_n = 0;
+    uint32_t *lq = lq_fold(src, w, words, &lq_n);   // first, on the translator's module: the pattern is matched there
+    if (lq) w = lq, words = lq_n;
     uint64_t fixed_n = 0;
     uint32_t *fixed = geometry_chain ? spirv_fixup_linked(w, words, &fixed_n, 1, clip_cull_limit)
                                      : spirv_fixup(w, words, &fixed_n, clip_cull_limit);
@@ -223,13 +286,14 @@ uint32_t *gfx_spirv_final(const GfxShader *src, const uint32_t *w, uint64_t word
     uint32_t *ov = spv_override(w, words, &ov_n);
     if (ov) w = ov, words = ov_n;
     // w is the last copy made, or still the caller's module: that copy is the result, the earlier ones go
-    uint32_t *last = ov ? ov : nan ? nan : hs ? hs : fmz ? fmz : suv ? suv : fixed;
+    uint32_t *last = ov ? ov : nan ? nan : hs ? hs : fmz ? fmz : suv ? suv : fixed ? fixed : lq;
     if (ov != last) free(ov);
     if (nan != last) free(nan);
     if (hs != last) free(hs);
     if (fmz != last) free(fmz);
     if (suv != last) free(suv);
     if (fixed != last) free(fixed);
+    if (lq != last) free(lq);
     *out_words = words;
     return last;
 }
