@@ -673,6 +673,7 @@ def main():
             shutil.rmtree(out)
         out.mkdir(parents=True)
         cmd = ['docker', 'run', '--rm', '-u', f'{os.getuid()}:{os.getgid()}',
+               '-e', 'HOME=/tmp', '-e', 'DOTNET_ROOT=/usr/share/dotnet',
                '-v', f'{MAIN_ROOT}:{MAIN_ROOT}', '-v', f'{out}:{out}', '-w', str(MAIN_ROOT),
                image, 'python3', str(ROOT / 'tools' / 'make_release_linux.py'),
                '--game', GAME, '--out', str(out), '--no-rmtree'] + (['--stub'] if STUB else []) + (['--appimage', str(args.appimage)] if args.appimage else [])

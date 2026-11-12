@@ -18,6 +18,9 @@ RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh \
     && ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet \
     && rm /tmp/dotnet-install.sh
 ENV DOTNET_ROOT=/usr/share/dotnet
+# dotnet's first-time use configurer writes to ~/.dotnet; the container runs as the invoking (non-root) user whose
+# home would otherwise be /, so point HOME at a writable directory.
+ENV HOME=/tmp
 
 # Pillow for the window icon. Ubuntu 24.04 marks its system Python as externally managed (PEP 668); this container is
 # throwaway, so overriding is safe.
