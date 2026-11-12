@@ -183,7 +183,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_MOUSE_SENS] = "Mouse sensitivity",
     [UI_MENU_MOUSE_SENS_DESC] = "Sets how far the camera turns when you move the mouse.",
 
-    [UI_BINDS_HELP_KEYS] = "Click a binding or press Enter, then press a key or mouse button. Delete or X clears it. "
+    [UI_BINDS_HELP_KEYS] = "Click a binding or press Enter, then press a key or mouse button. Delete or Backspace clears it. "
                            "A key already in use moves to the new action.",
     [UI_BINDS_HELP_PAD] = "Press A on a binding, then press a controller button. X clears it. Buttons already in use "
                           "swap. The left stick moves and the right stick controls the camera.",
@@ -529,7 +529,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_MOUSE_SENS] = "Чувствительность мыши",
     [UI_MENU_MOUSE_SENS_DESC] = "Как быстро мышь поворачивает камеру.",
 
-    [UI_BINDS_HELP_KEYS] = "Щёлкните назначение или нажмите Enter, затем нажмите клавишу или кнопку мыши. Delete или X очищает ячейку. "
+    [UI_BINDS_HELP_KEYS] = "Щёлкните назначение или нажмите Enter, затем нажмите клавишу или кнопку мыши. Delete или Backspace очищает ячейку. "
                            "Занятая клавиша переходит к новому действию.",
     [UI_BINDS_HELP_PAD] = "Нажмите A на назначении, затем нажмите кнопку контроллера. X очищает ячейку. Занятые кнопки "
                           "меняются местами. Левый стик отвечает за движение, правый — за камеру.",
