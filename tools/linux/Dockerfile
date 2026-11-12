@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         clang lld ninja-build \
         libvulkan1 libvulkan-dev mesa-vulkan-drivers \
         xvfb zsync \
+        libfontconfig1 libxft2 libxrender1 libx11-6 libxext6 libxss1 libxt6 libsm6 libice6 \
         python3 python3-venv python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
