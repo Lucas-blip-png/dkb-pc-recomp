@@ -49,13 +49,14 @@ def main():
         include.append(str(args.deps / 'include'))
         if (args.deps / 'include' / 'vma').is_dir():
             include.append(str(args.deps / 'include' / 'vma'))
+    sysroot_flags = []
     if args.sysroot:
-        # --sysroot= sets clang's system root; also add its usr/include explicitly so the SDL3/opus/vpx/vulkan
-        # headers are found even when the runner's clang ignores --sysroot (some distro builds do).
+        # --target + --sysroot: as build_game.py sets them, so clang picks the sysroot's headers (glibc 2.31, gcc 10
+        # libstdc++) instead of the host's. --sysroot= alone is not enough on some distro clang builds.
+        sysroot_flags = ['--target=x86_64-linux-gnu', f'--sysroot={args.sysroot}']
         include.append(str(args.sysroot / 'usr' / 'include'))
-        include += [f'--sysroot={args.sysroot}']
 
-    cmd_base = [cc, '-c', *flags, *[f'-I{d}' for d in include]]
+    cmd_base = [cc, '-c', *flags, *sysroot_flags, *[f'-I{d}' for d in include]]
     if os.name != 'nt':
         cmd_base += ['-D__linux__']
 
@@ -64,7 +65,11 @@ def main():
         obj = out / (src.stem + '.o')
         cmd = list(cmd_base)
         if src.suffix == '.cpp':
-            cmd += ['-std=c++20', '-I', str(ROOT / 'runtime' / 'third_party' / 'eglantine')]
+            cmd += ['-std=c++20', '-nostdinc++',
+                    '-I', str(ROOT / 'runtime' / 'third_party' / 'eglantine')]
+            if args.sysroot:
+                cmd += ['-I', str(args.sysroot / 'usr' / 'include' / 'c++' / '10'),
+                        '-I', str(args.sysroot / 'usr' / 'include' / 'x86_64-linux-gnu' / 'c++' / '10')]
         cmd += [str(src), '-o', str(obj)]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode:
