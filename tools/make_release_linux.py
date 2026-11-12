@@ -663,6 +663,10 @@ def main():
         dockerfile = ROOT / 'tools' / 'linux' / 'Dockerfile'
         image = 'dkb-release:ci'
         _sp.run(['docker', 'build', '-t', image, '-f', str(dockerfile), str(ROOT / 'tools' / 'linux')], check=True)
+        # Create the output folder on the host first: Docker creates a missing bind target as root, and the container
+        # runs as the invoking user (valentderah PR #656, commit 0f7e166).
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.mkdir(parents=True, exist_ok=True)
         cmd = ['docker', 'run', '--rm', '-u', f'{os.getuid()}:{os.getgid()}',
                '-v', f'{MAIN_ROOT}:{MAIN_ROOT}', '-v', f'{out}:{out}', '-w', str(MAIN_ROOT),
                image, 'python3', str(ROOT / 'tools' / 'make_release_linux.py'),
