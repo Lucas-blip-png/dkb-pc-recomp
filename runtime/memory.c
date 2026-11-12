@@ -56,7 +56,7 @@ static uint64_t alias_page_count = ALIAS_PAGES;   // pages of the alias region a
 #define DEFAULT_POOL (9 * GiB)
 #define SYSTEM_RESOURCE_BUDGET (32ull << 20)
 #define MAX_STACK_MAPS 4096
-#define REEXEC_LIMIT 20
+#define REEXEC_LIMIT 100
 
 // Horizon memory states, permissions, attributes and results used here.
 enum { ST_FREE = 0, ST_CODE = 3, ST_CODEDATA = 4, ST_NORMAL = 5, ST_STACK = 0xB, ST_THREADLOCAL = 0xC,
@@ -230,6 +230,9 @@ static void reexec_or_fail(const char *what) {
     const char *e = cfg_get("TOTK_REEXEC");
     int n = e ? atoi(e) : 0;
     if (n >= REEXEC_LIMIT) rt_fatal("memory: %s is not free after %d attempts", what, n);
+    // Give the system a moment to free memory/VMAs before re-running; with ASLR on each attempt gets a fresh
+    // layout, so a short wait (as in valentderah's retry-on-OOM) can be enough to clear a transient failure.
+    plat_sleep_ms(100);
     char buf[16];
     snprintf(buf, sizeof buf, "%d", n + 1);
     plat_setenv("TOTK_REEXEC", buf);
