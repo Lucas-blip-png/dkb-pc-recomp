@@ -4,7 +4,7 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl wget git make pkg-config \
+        ca-certificates curl wget git make pkg-config file \
         clang lld ninja-build \
         libvulkan1 libvulkan-dev mesa-vulkan-drivers \
         xvfb zsync \
