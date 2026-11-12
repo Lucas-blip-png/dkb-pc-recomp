@@ -1526,7 +1526,8 @@ static void range_add(MRange **a, int *n, int *cap, PoolRec *r, uint64_t off, ui
         return;
     }
     if (*n == *cap) grow((void **)a, cap, sizeof **a);
-    (*a)[(*n)++] = (MRange){r, off, size};
+    (*a)[*n] = (MRange){r, off, size};
+    __atomic_store_n(n, *n + 1, __ATOMIC_RELAXED);   // npend: vk_mem_mirror_pending reads it without mirror_lock
 }
 
 #define MRANGE_LESS(x, y) ((x)->r != (y)->r ? (uintptr_t)(x)->r < (uintptr_t)(y)->r : (x)->off < (y)->off)
@@ -1841,7 +1842,10 @@ void vk_mem_mirror_begin(void) {
     mrep.presnap_t += qpc() - t0;
 }
 
-int vk_mem_mirror_pending(void) { return npend; }
+// Whether copies are queued for the next prologue; vk_sync.c prologue skips its command buffer on 0. Read without
+// mirror_lock: a helper queues a part's copies while it translates the part, before the replay thread joins it, and
+// vk_mem_mirror_prologue reads the count again under the lock. The atomic accesses make the unlocked read defined.
+int vk_mem_mirror_pending(void) { return __atomic_load_n(&npend, __ATOMIC_RELAXED); }
 
 void vk_mem_mirror_prologue(VkCommandBuffer cb) {
     int locked = mirror_lock_if_shared();   // a helper may be queueing a sync
@@ -1851,7 +1855,7 @@ void vk_mem_mirror_prologue(VkCommandBuffer cb) {
         copy_ranges(cb, pend, npend, 1, &mrep.upload_bytes, &mrep.upload_copies);
         mbarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
-        npend = 0;
+        __atomic_store_n(&npend, 0, __ATOMIC_RELAXED);
         mrep.prologues++;
     }
     mirror_unlock(locked);

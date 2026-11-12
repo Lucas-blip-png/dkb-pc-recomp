@@ -1050,7 +1050,12 @@ int vk_texture_gpu_written_ready(const tex_t *t) {
 static void gpu_written_entry(Tex *e);
 
 // vk_texture_gpu_written for a write a helper part made. An entry that went meanwhile is left alone: making a new one
-// here would upload its storage after the part that rendered into it.
+// here would upload its storage after the part that rendered into it. A released entry is still marked: with the
+// replay on the submitting thread (TOTK_REPLAY_ASYNC=0, the default), another game thread's nvnTextureFinalize or
+// nvnTextureInitialize reaches vk_texture_release without waiting for the walk, so it can land between the helper's
+// vk_texture_gpu_written_ready and the join. The part did render into the image, and tex_lock orders the release against this marking, so the entry
+// ends as if the release had come right after the render: GPU-owned, its fence recorded and, when mirrored, on the
+// write-back list.
 void vk_texture_gpu_written_late(const tex_t *t) {
     if (!t || !t->mem) return;
     vk_exec_frame_written(t);
@@ -1058,7 +1063,7 @@ void vk_texture_gpu_written_late(const tex_t *t) {
     make_key(t, &k);
     lock();
     Tex *e = nvn_hm_get(&by_key, &k);
-    if (e && !e->released && e->pub.gpu_owned) gpu_written_entry(e);
+    if (e && e->pub.gpu_owned) gpu_written_entry(e);
     unlock();
 }
 
