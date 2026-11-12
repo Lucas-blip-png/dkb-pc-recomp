@@ -652,6 +652,10 @@ def main():
         llvm = build_llvm(out)
         sysroot = full_sysroot()
         build_deps(out, llvm, sysroot)
+        # Mirror the full sysroot into the toolchain dir so CI can cache one tree.
+        dst = out / 'llvm' / 'sysroot'
+        if not dst.exists():
+            shutil.copytree(sysroot, dst, symlinks=True)
         print(f'toolchain ready in {out}')
         return
     if args.ci_container:

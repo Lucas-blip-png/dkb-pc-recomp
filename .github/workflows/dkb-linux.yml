@@ -26,9 +26,16 @@ jobs:
           python-version: "3.14"
       - name: Fetch refs
         run: sh tools/fetch_refs.sh
+      - name: Fetch the release toolchain
+        run: python tools/make_release_linux.py --fetch-toolchain --out build/ci-toolchain
       - name: Compile gate
-        run: python tools/ci/compile_gate.py --cc clang --sysroot / --undefined --out build/ci-gate
-      # The real gate runs inside the pinned container; this host run is a smoke check.
+        run: |
+          python tools/ci/compile_gate.py \
+            --cc build/ci-toolchain/llvm/bin/clang \
+            --sysroot build/ci-toolchain/llvm/sysroot \
+            --deps build/ci-toolchain/runtime/deps \
+            --undefined \
+            --out build/ci-gate
 
   image:
     runs-on: ubuntu-24.04
@@ -43,6 +50,8 @@ jobs:
           python-version: "3.14"
       - name: Fetch refs
         run: sh tools/fetch_refs.sh
+      - name: Fetch the release toolchain (cached)
+        run: python tools/make_release_linux.py --fetch-toolchain --out build/ci-toolchain
       - name: Build the self-contained AppImage in the pinned container
         run: |
           python tools/make_release_linux.py --game dkb --stub \
