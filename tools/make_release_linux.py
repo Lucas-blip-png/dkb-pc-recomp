@@ -638,6 +638,8 @@ def main():
                     help='download the pinned LLVM and sniper sysroot, build runtime/deps into --out, then stop (CI cache)')
     ap.add_argument('--ci-container', action='store_true',
                     help='build tools/linux/Dockerfile and re-run this script inside it (needs Docker)')
+    ap.add_argument('--no-rmtree', action='store_true',
+                    help='do not rmtree --out at the start (it is a clean, host-prepared bind mount)')
     args = ap.parse_args()
     GAME = args.game
     mr.GAME = GAME   # mr.build_sources and mr.lifted_version read the game from there
@@ -663,22 +665,28 @@ def main():
         dockerfile = ROOT / 'tools' / 'linux' / 'Dockerfile'
         image = 'dkb-release:ci'
         _sp.run(['docker', 'build', '-t', image, '-f', str(dockerfile), str(ROOT / 'tools' / 'linux')], check=True)
-        # Create the output folder on the host first: Docker creates a missing bind target as root, and the container
-        # runs as the invoking user (valentderah PR #656, commit 0f7e166).
+        # Create and clean the output folder on the host first: Docker creates a missing bind target as root, and the
+        # container runs as the invoking user (valentderah PR #656, commit 0f7e166). Clean it here so the container
+        # does not have to rmtree a bind-mounted (busy) mount point.
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.mkdir(parents=True, exist_ok=True)
+        if out.exists():
+            shutil.rmtree(out)
+        out.mkdir(parents=True)
         cmd = ['docker', 'run', '--rm', '-u', f'{os.getuid()}:{os.getgid()}',
                '-v', f'{MAIN_ROOT}:{MAIN_ROOT}', '-v', f'{out}:{out}', '-w', str(MAIN_ROOT),
                image, 'python3', str(ROOT / 'tools' / 'make_release_linux.py'),
-               '--game', GAME, '--out', str(out)] + (['--stub'] if STUB else []) + (['--appimage', str(args.appimage)] if args.appimage else [])
+               '--game', GAME, '--out', str(out), '--no-rmtree'] + (['--stub'] if STUB else []) + (['--appimage', str(args.appimage)] if args.appimage else [])
         _sp.run(cmd, check=True)
         return
     if args.prove:
         prove(out)
         return
-    if out.exists():
+    if args.no_rmtree or os.path.ismount(out):
+        # Host already cleaned this (CI container bind mount); do not rmtree a mount point.
+        pass
+    elif out.exists():
         shutil.rmtree(out)
-    out.mkdir(parents=True)
+    out.mkdir(parents=True, exist_ok=True)
     llvm = build_llvm(out)
     sysroot = full_sysroot()
     build_deps(out, llvm, sysroot)
