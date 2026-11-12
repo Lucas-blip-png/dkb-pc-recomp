@@ -19,8 +19,9 @@ RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh \
     && rm /tmp/dotnet-install.sh
 ENV DOTNET_ROOT=/usr/share/dotnet
 
-# Pillow for the window icon.
-RUN python3 -m pip install --no-cache-dir Pillow
+# Pillow for the window icon. Ubuntu 24.04 marks its system Python as externally managed (PEP 668); this container is
+# throwaway, so overriding is safe.
+RUN python3 -m pip install --no-cache-dir --break-system-packages Pillow
 
 WORKDIR /work
 CMD ["bash"]
