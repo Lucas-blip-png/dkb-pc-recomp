@@ -1,0 +1,26 @@
+# Pinned build image for the DKB Linux release (TotK-style, self-contained).
+# Ubuntu 24.04 keeps the glibc 2.34 floor that the release's LLVM binaries need.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget git make pkg-config \
+        clang lld ninja-build \
+        libvulkan1 libvulkan-dev mesa-vulkan-drivers \
+        xvfb zsync \
+        python3 python3-venv python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# .NET 10 SDK for the shader translator (NativeAOT).
+RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh \
+    && chmod +x /tmp/dotnet-install.sh \
+    && /tmp/dotnet-install.sh --channel 10.0 --install-dir /usr/share/dotnet \
+    && ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet \
+    && rm /tmp/dotnet-install.sh
+ENV DOTNET_ROOT=/usr/share/dotnet
+
+# Pillow for the window icon.
+RUN python3 -m pip install --no-cache-dir Pillow
+
+WORKDIR /work
+CMD ["bash"]

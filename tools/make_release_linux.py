@@ -55,6 +55,8 @@ GAMES = {'totk': dict(icon='totk', title='TotK Recomp Setup',
          'dkb': dict(icon='dkb', title='DKB Recomp Setup',
                      comment='Builds Donkey Kong Bananza for this PC from your own dump')}
 GAME = 'totk'
+STUB = False
+STUB_GEN = None
 
 LLVM_VERSION = '23.1.4'
 LLVM_MAJOR = LLVM_VERSION.split('.')[0]
@@ -218,11 +220,16 @@ def build_bin(out, llvm, sysroot):
 def runtime_lib(out, llvm, sysroot):
     build = CHECK / f'rtlib-{GAME}'
     shutil.rmtree(build, ignore_errors=True)
-    version = mr.lifted_version()
+    if STUB:
+        version = 'dkb100'
+        gen = STUB_GEN
+    else:
+        version = mr.lifted_version()
+        gen = MAIN_ROOT / 'generated' / version
     expected = ['--expected', ROOT / 'tools' / 'data' / f'expected-{version}.json'] if GAME == 'dkb' else []
     run([sys.executable, ROOT / 'tools' / 'build_game.py', '--make-runtime-lib', '--toolchain', llvm, '--sysroot', sysroot,
          '--deps', out / 'runtime' / 'deps', '--ninja', out / 'bin' / 'ninja', '--version', version, *expected,
-         '--gen', MAIN_ROOT / 'generated' / version, '--out', build])
+         '--gen', gen, '--out', build])
     rt = out / 'runtime'
     shutil.copy2(build / 'libtotkrt.a', rt / 'libtotkrt.a')
     for p in sorted((ROOT / 'runtime').rglob('*')):
@@ -475,6 +482,43 @@ def write_appimage(out, path):
     print(f'{path}: {mr.mib(path.stat().st_size)}')
 
 
+# ---- payload audit + zsync ------------------------------------------------------------------------------------------
+
+GAME_DERIVED = {'.nso', '.nca', '.xci', '.nsp', '.bin'}
+GAME_DERIVED_NAMES = {'main', 'sdk', 'rtld', 'subsdk0', 'subsdk1', 'romfs.bin', 'exefs', 'romfs'}
+
+
+def check_payload(out):
+    """Audit the release folder as a shippable artifact: a required payload list and a deny list of game-derived files."""
+    required = ['AppRun', 'VERSION', 'python/bin/python3', 'llvm/bin/clang', 'bin/ninja',
+                'runtime/libtotkrt.a', 'bin/totk_xlate', 'bin/totk_xlate.id', 'bin/libSDL3.so.0']
+    icon = GAMES[GAME]['icon']
+    required += [f'{icon}-setup.desktop', f'{icon}-setup.png', 'runtime/' + icon + '.png']
+    missing = [r for r in required if not (out / r).exists()]
+    denied = []
+    for p in out.rglob('*'):
+        if not p.is_file():
+            continue
+        if p.suffix in GAME_DERIVED or p.name in GAME_DERIVED_NAMES:
+            denied.append(str(p.relative_to(out)))
+    if missing or denied:
+        sys.exit('payload audit failed:\n' + '\n'.join(['missing: ' + m for m in missing] +
+                                                       ['game-derived: ' + d for d in denied]))
+    print(f'payload audit: {len(required)} required files present, no game-derived files')
+
+
+def write_zsync(path):
+    """Write a .zsync next to the AppImage for delta downloads, if zsyncmake is available."""
+    tool = shutil.which('zsyncmake')
+    if tool is None:
+        print('zsync: zsyncmake not found, skipping .zsync')
+        return
+    run([tool, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    zs = path.with_suffix(path.suffix + '.zsync')
+    if zs.is_file():
+        print(f'{zs}: {mr.mib(zs.stat().st_size)}')
+
+
 # ---- checks -------------------------------------------------------------------------------------------------------------
 
 # The newest glibc any program or library in the folder may need: the official LLVM binaries and the cryptography
@@ -543,6 +587,8 @@ def check_bundle(out):
 
 def prove(out):
     """Compile the generated C and link the game with the folder's tools only, then run the probes beside it."""
+    if STUB:
+        sys.exit('--prove needs a real game (generated/dkb100); not available with --stub')
     out = out.resolve()
     version = mr.lifted_version()
     gen = MAIN_ROOT / 'generated' / version
@@ -578,17 +624,47 @@ def prove(out):
 
 
 def main():
-    global GAME
+    global GAME, STUB, STUB_GEN
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--game', choices=('totk', 'dkb'), default='totk',
                     help='totk (default) or dkb: generated/dkb100, the Bananza installer, DKB-Setup and no hactool')
     ap.add_argument('--out', type=Path, required=True, help='release folder (replaced)')
     ap.add_argument('--appimage', type=Path, help='also pack the folder as this AppImage')
     ap.add_argument('--prove', action='store_true', help='only run the compile-and-probe check on an existing folder')
+    ap.add_argument('--stub', action='store_true',
+                    help='dkb only: build the runtime library against tools/ci/stub/dkb100 instead of a real game, so the '
+                         'image builds in CI without a dump')
+    ap.add_argument('--fetch-toolchain', action='store_true',
+                    help='download the pinned LLVM and sniper sysroot, build runtime/deps into --out, then stop (CI cache)')
+    ap.add_argument('--ci-container', action='store_true',
+                    help='build tools/linux/Dockerfile and re-run this script inside it (needs Docker)')
     args = ap.parse_args()
     GAME = args.game
     mr.GAME = GAME   # mr.build_sources and mr.lifted_version read the game from there
+    if args.stub:
+        if GAME != 'dkb':
+            ap.error('--stub is only supported with --game dkb')
+        STUB = True
+        STUB_GEN = ROOT / 'tools' / 'ci' / 'stub' / 'dkb100'
     out = args.out.resolve()
+    if args.fetch_toolchain:
+        out.mkdir(parents=True, exist_ok=True)
+        llvm = build_llvm(out)
+        sysroot = full_sysroot()
+        build_deps(out, llvm, sysroot)
+        print(f'toolchain ready in {out}')
+        return
+    if args.ci_container:
+        import subprocess as _sp
+        dockerfile = ROOT / 'tools' / 'linux' / 'Dockerfile'
+        image = 'dkb-release:ci'
+        _sp.run(['docker', 'build', '-t', image, '-f', str(dockerfile), str(ROOT / 'tools' / 'linux')], check=True)
+        cmd = ['docker', 'run', '--rm', '-u', f'{os.getuid()}:{os.getgid()}',
+               '-v', f'{MAIN_ROOT}:{MAIN_ROOT}', '-v', f'{out}:{out}', '-w', str(MAIN_ROOT),
+               image, 'python3', str(ROOT / 'tools' / 'make_release_linux.py'),
+               '--game', GAME, '--out', str(out)] + (['--stub'] if STUB else []) + (['--appimage', str(args.appimage)] if args.appimage else [])
+        _sp.run(cmd, check=True)
+        return
     if args.prove:
         prove(out)
         return
@@ -608,9 +684,11 @@ def main():
     mr.check_folder(out)
     check_glibc(out)
     check_bundle(out)
+    check_payload(out)
     mr.sizes(out)
     if args.appimage:
         write_appimage(out, args.appimage.resolve())
+        write_zsync(args.appimage.resolve())
 
 
 if __name__ == '__main__':

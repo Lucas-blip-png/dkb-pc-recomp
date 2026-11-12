@@ -862,12 +862,16 @@ def main():
 
     layout = read_layout(gen)
     names = [n for n, _, _ in layout]
-    wanted = args.modules.split(',') if args.modules else names
-    unknown = [m for m in wanted if m not in names]
-    if unknown:
-        sys.exit(f'unknown modules {unknown}; the layout has {names}')
-    linked = [m for m in names if m in wanted]
-    mods = {m: chunk_files(gen, m) for m in linked}
+    # --make-runtime-lib compiles no generated modules: skip chunk_files (and its manifest.json reads) entirely.
+    if args.make_runtime_lib:
+        wanted, linked, mods = [], [], {}
+    else:
+        wanted = args.modules.split(',') if args.modules else names
+        unknown = [m for m in wanted if m not in names]
+        if unknown:
+            sys.exit(f'unknown modules {unknown}; the layout has {names}')
+        linked = [m for m in names if m in wanted]
+        mods = {m: chunk_files(gen, m) for m in linked}
 
     cpus = os.cpu_count() or 1
     budget = min(MEM_BUDGET, int(total_ram() * 0.8))
