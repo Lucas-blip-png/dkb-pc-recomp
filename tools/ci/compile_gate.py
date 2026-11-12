@@ -50,6 +50,9 @@ def main():
         if (args.deps / 'include' / 'vma').is_dir():
             include.append(str(args.deps / 'include' / 'vma'))
     if args.sysroot:
+        # --sysroot= sets clang's system root; also add its usr/include explicitly so the SDL3/opus/vpx/vulkan
+        # headers are found even when the runner's clang ignores --sysroot (some distro builds do).
+        include.append(str(args.sysroot / 'usr' / 'include'))
         include += [f'--sysroot={args.sysroot}']
 
     cmd_base = [cc, '-c', *flags, *[f'-I{d}' for d in include]]
