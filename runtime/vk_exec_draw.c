@@ -3578,6 +3578,7 @@ static int mvk_upscale_blit(VkExec *ex, const GfxShader *cs) {
 // the caller also binds the game's pipeline and resources again before its dispatch.
 static int dlss_upscale(VkExec *ex, const GfxShader *cs) {
     if (!vk_dlss_wanted()) return 0;
+    vk_dlss_warm(ex->cb, ex->fence);   // the first time only; NGX may bind its own state, as for the upscale below
     if (!mvk_upscale_cs(gfx_shader_spirv_fnv(cs))) {
         // The upscaler is matched by hash, which a translator change moves: with DLSS on, list the compute shaders
         // seen (the first 48 distinct) so a run that never reaches DLSS shows which hash to add.

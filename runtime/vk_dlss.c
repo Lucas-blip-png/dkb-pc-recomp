@@ -518,23 +518,8 @@ static int quality(uint32_t w, uint32_t ow) {
     return s < 1.1f ? Q_DLAA : s < 1.6f ? Q_MAX_QUALITY : s < 1.85f ? Q_BALANCED : s < 2.5f ? Q_MAX_PERF : Q_ULTRA_PERF;
 }
 
-// A feature for w x h -> ow x oh, recorded into cb. A dynamic resolution change makes the game render into a new
-// texture of another size, and every new size recreates the feature here: a hitch of a few milliseconds each time.
-// ponytail: one feature per size; create it once at the largest render size and pass the size per frame through
-// DLSS.Render.Subrect.Dimensions if those hitches show.
-// 1 ready; 0 nothing recorded by NGX; -1 NGX failed after it may have recorded into cb.
-static int feature(VkCommandBuffer cb, uint64_t fence, uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
-    if (F.h && F.w == w && F.h_ == h && F.ow == ow && F.oh == oh) return 1;
-    reap();
-    if (F.h) {
-        int i = 0;
-        while (i < GRAVE && grave[i].h) i++;
-        if (i == GRAVE) return 0;   // every slot still in flight: the game's upscaler this frame, a new try next frame
-        grave[i].h = F.h, grave[i].fence = fence;
-        F.h = NULL;
-        drop_inputs();
-    }
-    int q = quality(w, ow);
+// The creation parameters of a feature for inputs up to w x h -> ow x oh in mode q.
+static void create_params(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh, int q) {
     set_u(params, "CreationNodeMask", 1);
     set_u(params, "VisibilityNodeMask", 1);
     set_u(params, "Width", w);
@@ -550,8 +535,30 @@ static int feature(VkCommandBuffer cb, uint64_t fence, uint32_t w, uint32_t h, u
     set_u(params, "DLSS.Hint.Render.Preset.Balanced", PRESET_M);
     set_u(params, "DLSS.Hint.Render.Preset.Performance", PRESET_M);
     set_u(params, "DLSS.Hint.Render.Preset.UltraPerformance", PRESET_L);
-    if (!zero_image(cb, VK_FORMAT_R16G16_SFLOAT, w, h, VK_IMAGE_USAGE_STORAGE_BIT, &F.mv, &F.mv_a, &F.mv_v) ||
-        !zero_image(cb, VK_FORMAT_R32_SFLOAT, w, h, 0, &F.depth, &F.depth_a, &F.depth_v)) {
+}
+
+// A feature for inputs up to ow x oh -> ow x oh, recorded into cb. A dynamic resolution change makes the game render
+// into a new texture of another size; the feature is made for the largest input the game upscales from (the output
+// size: at that size the game stops running its upscaler) and each evaluation passes the input's size as
+// DLSS.Render.Subrect.Dimensions, so only a new output size makes a new one. Recreating it per input size cost about
+// 80 ms of the frame (3.2.0, RTX 5090, a 2560x1440 -> 2793x1571 step). The quality mode is the scale of the input it
+// is made for (w x h); with preset M in every mode but Ultra Performance it names the mode in the log.
+// 1 ready; 0 nothing recorded by NGX; -1 NGX failed after it may have recorded into cb.
+static int feature(VkCommandBuffer cb, uint64_t fence, uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
+    if (F.h && F.ow == ow && F.oh == oh) return 1;
+    reap();
+    if (F.h) {
+        int i = 0;
+        while (i < GRAVE && grave[i].h) i++;
+        if (i == GRAVE) return 0;   // every slot still in flight: the game's upscaler this frame, a new try next frame
+        grave[i].h = F.h, grave[i].fence = fence;
+        F.h = NULL;
+        drop_inputs();
+    }
+    int q = quality(w, ow);
+    create_params(ow, oh, ow, oh, q);
+    if (!zero_image(cb, VK_FORMAT_R16G16_SFLOAT, ow, oh, VK_IMAGE_USAGE_STORAGE_BIT, &F.mv, &F.mv_a, &F.mv_v) ||
+        !zero_image(cb, VK_FORMAT_R32_SFLOAT, ow, oh, 0, &F.depth, &F.depth_a, &F.depth_v)) {
         drop_inputs();
         return fail("its zero motion-vector and depth images could not be made");
     }
@@ -565,10 +572,43 @@ static int feature(VkCommandBuffer cb, uint64_t fence, uint32_t w, uint32_t h, u
         fail(why);
         return -1;
     }
-    F.w = w, F.h_ = h, F.ow = ow, F.oh = oh, F.fresh = 1;
+    F.w = ow, F.h_ = oh, F.ow = ow, F.oh = oh, F.fresh = 1;
     static const char *const names[] = {"Performance", "Balanced", "Quality", "Ultra Performance", "Ultra Quality", "DLAA"};
-    rt_log("dlss: %s %ux%u -> %ux%u, preset %s", names[q], w, h, ow, oh, q == Q_ULTRA_PERF ? "L" : "M");
+    rt_log("dlss: %s %ux%u -> %ux%u, preset %s (made for inputs up to %ux%u)", names[q], w, h, ow, oh,
+           q == Q_ULTRA_PERF ? "L" : "M", ow, oh);
     return 1;
+}
+
+// The first feature NGX makes in a process loads the DLSS model and starts CUDA: on 3.2.0 with an RTX 5090 the frame
+// the game first upscaled in took 2.3 to 2.6 s, nearly all of it in the NVIDIA libraries, as a load ended and play
+// began. A later feature took about 80 ms. So NGX is initialised and one small feature is made at the first compute
+// dispatch the replay sees with DLSS on (the title screen), and released with that submission's fence (grave). A
+// failure here is logged and leaves DLSS to try again at the game's upscaler as before.
+void vk_dlss_warm(VkCommandBuffer cb, uint64_t fence) {
+    static int done;
+    if (done) return;
+    done = 1;
+    if (!vk_dlss_wanted() || strcmp(cfg_value("TOTK_UPSCALER"), "dlss")) return;
+    LARGE_INTEGER f, t0, t1;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&t0);
+    if (!init()) return;
+    reap();
+    int slot = 0;
+    while (slot < GRAVE && grave[slot].h) slot++;
+    if (slot == GRAVE) return;   // nowhere to release it from; the game's first upscale makes the first feature
+    create_params(1280, 720, 1920, 1080, Q_MAX_QUALITY);
+    rec_drain();   // NGX records into cb on this thread
+    NgxHandle *h = NULL;
+    NgxResult r = ngx_create(vk_ctx()->device, cb, NGX_FEATURE_SUPER_SAMPLING, params, &h);
+    QueryPerformanceCounter(&t1);
+    double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
+    if (NGX_FAILED(r) || !h) {
+        rt_log("dlss: warm-up feature failed (%#x) after %.0f ms; the first upscale makes the first feature", r, ms);
+        return;
+    }
+    grave[slot].h = h, grave[slot].fence = fence;
+    rt_log("dlss: NGX initialised and a warm-up feature made in %.0f ms, ahead of the game's first upscale", ms);
 }
 
 int vk_dlss_record(VkCommandBuffer cb, uint64_t fence, const VkTexImage *in, const VkTexImage *out) {
@@ -595,8 +635,8 @@ int vk_dlss_record(VkCommandBuffer cb, uint64_t fence, const VkTexImage *in, con
     VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     NgxResourceVk color = {iv, in->image, rg, in->format, w, h, 0, 0};
     NgxResourceVk output = {ov, out->image, rg, out->format, ow, oh, 0, 1};
-    NgxResourceVk depth = {F.depth_v, F.depth, rg, VK_FORMAT_R32_SFLOAT, w, h, 0, 0};
-    NgxResourceVk mv = {F.mv_v, F.mv, rg, VK_FORMAT_R16G16_SFLOAT, w, h, 0, 0};
+    NgxResourceVk depth = {F.depth_v, F.depth, rg, VK_FORMAT_R32_SFLOAT, F.w, F.h_, 0, 0};
+    NgxResourceVk mv = {F.mv_v, F.mv, rg, VK_FORMAT_R16G16_SFLOAT, F.w, F.h_, 0, 0};
     // Temporal when this frame's scene was noted at the input size: its depth and camera motion go to DLSS. Otherwise
     // the zero inputs and a new history, as a spatial upscaler.
     float jx = J.used ? J.jx : 0.0f, jy = J.used ? J.jy : 0.0f;
@@ -713,6 +753,7 @@ int vk_dlss_record(VkCommandBuffer cb, uint64_t fence, const VkTexImage *in, con
     (void)cb, (void)fence, (void)in, (void)out;
     return 0;
 }
+void vk_dlss_warm(VkCommandBuffer cb, uint64_t fence) { (void)cb, (void)fence; }
 void vk_dlss_release(void) {}
 void vk_dlss_jitter(VkImage depth, float j[2]) { (void)depth, (void)j; }
 void vk_dlss_scene_draw(const VkExec *ex) { (void)ex; }
