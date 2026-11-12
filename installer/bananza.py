@@ -440,6 +440,16 @@ def nuget_needs_fallback(temp):
     return os.name != 'nt' and any(c.isspace() for c in str(temp / 'nuget'))
 
 
+def game_command(exe, *args):
+    """The game binary's command line; on Linux disable ASLR for it (setarch -R) so the fixed module window
+    (0x7000000000) can be reserved, without changing the system's ASLR setting. Falls back to a direct invocation
+    when setarch is unavailable."""
+    cmd = [str(exe), *args]
+    if os.name != 'nt' and shutil.which('setarch'):
+        cmd = ['setarch', 'x86_64', '-R'] + cmd
+    return cmd
+
+
 def lock_temp(temp):
     """An OS-held lock, released even after a crashed process; no PID guessing or stale-lock deletion."""
     path = temp / '.dkb-setup.lock'
@@ -748,14 +758,14 @@ class Shaders(Step):
         run_tool(ctx, self.id, [ctx.layout.python, ctx.layout.tools / 'dkb_shader_census.py', '--version', ctx.info['game'],
                                 '--romfs', ctx.dest / 'romfs', '--out', ctx.dest], name=f'{self.id}-census')
         try:
-            run_tool(ctx, self.id, [ctx.dest / ('dkb' + EXE), '--translate-shaders'], cwd=ctx.dest)
+            run_tool(ctx, self.id, game_command(ctx.dest / ('dkb' + EXE), '--translate-shaders'), cwd=ctx.dest)
         finally:
             pack.unlink(missing_ok=True)
         # The driver pipeline libraries are an optimisation: a driver that crashes building them (nvgpucomp64.dll on
         # NVIDIA 621.01) must not fail the step, or every retry would crash again.
         libraries = True
         try:
-            run_tool(ctx, self.id, [ctx.dest / ('dkb' + EXE), '--warm-shaders'], cwd=ctx.dest,
+            run_tool(ctx, self.id, game_command(ctx.dest / ('dkb' + EXE), '--warm-shaders'), cwd=ctx.dest,
                      name=f'{self.id}-warm')
         except InstallError as error:
             if error.id != 'dkb.tool_failed':   # a path-safety rejection still stops the install
@@ -781,7 +791,7 @@ class Prepare(Step):
         for name in ('dkb.ini', 'dkb.ini.tmp', 'totk.ini'):
             ensure_plain(ctx.dest / name)
         ini.write(ctx.dest, ctx.state['lang'], ctx.layout.ini_example, 'dkb.ini', fallback='totk.ini')
-        run_tool(ctx, self.id, [ctx.dest / ('dkb' + EXE), '--selftest'])
+        run_tool(ctx, self.id, game_command(ctx.dest / ('dkb' + EXE), '--selftest'))
         return {'selftest': True}
 
 
