@@ -498,7 +498,15 @@ static void portable_paths(RtConfig *c) {
     c->profile = portable_path(exe, "TOTK_PROFILE_DIR", "profile", NULL, pp_profile, sizeof pp_profile, c->profile);
 }
 
+int g_shader_translate_mode = 0;
+
 int main(int argc, char **argv) {
+    // Detect shader-translation mode before mem_init() so LOW_SIZE can be reduced on Linux (smaller heap reservation).
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--translate-shaders") || !strcmp(argv[i], "--warm-shaders")) {
+            g_shader_translate_mode = 1;
+            break;
+        }
     mem_init();   // first: claim the guest address space before anything else can land there; reads totk.ini
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
