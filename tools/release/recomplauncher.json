@@ -1,0 +1,20 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "DKB Recomp",
+  "repo": "Lucas-blip-png/dkb-pc-recomp",
+  "game": {
+    "kind": "iso_or_folder",
+    "label": "Your own dump of Donkey Kong Bananza: the .nup file (1.0.0, or with the 3.2.0 update inside), or a folder with its exefs and romfs."
+  },
+  "prepare": {
+    "program": ["setup.sh", "setup.command"],
+    "args": ["--prepare", "--source", "{game}", "--dest", "{install}/game"],
+    "label": "Building the game from your copy (it compiles everything on this computer and takes a while)",
+    "timeout": 14400
+  },
+  "start": {
+    "program": ["play.sh"]
+  },
+  "saves": ["{install}/game/profile"]
+}

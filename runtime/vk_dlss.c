@@ -447,8 +447,10 @@ static void next_jitter(uint32_t w, uint32_t ow) {
 
 static uint64_t frames_now(void) { return __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED); }
 
-// J.depth is read by the helper translators (vk_spec.h) while the replay thread may clear it, here or in the release
-// below, so it is loaded and stored atomically. The rest of J is written only where no helper part is translated.
+// J.depth is read by the helper translators (vk_spec.h) and the threads recording slices of parallel passes while the
+// replay thread may clear it, here or in the release below, so it is loaded and stored atomically; a slice thread may
+// clear it here too. J.used is set by the replay thread and the slice threads, atomically. The rest of J is written
+// only where no helper part or slice is translated.
 static VkImage jdepth(void) { return __atomic_load_n(&J.depth, __ATOMIC_RELAXED); }
 static void jdepth_set(VkImage v) { __atomic_store_n(&J.depth, v, __ATOMIC_RELAXED); }
 
@@ -461,7 +463,7 @@ void vk_dlss_jitter(VkImage depth, float j[2]) {
     }
     j[0] = J.jx, j[1] = J.jy;
     if (vk_spec_helper()) used_h[vk_spec_here - 1] = 1;
-    else J.used = 1;
+    else __atomic_store_n(&J.used, 1, __ATOMIC_RELAXED);   // the replay thread or a thread recording slices
 }
 
 void vk_dlss_scene_draw(const VkExec *ex) {

@@ -38,7 +38,8 @@ A frame without the scene noted at the input size (a cutscene drawn another way,
 as before this change: zero motion vectors, a zero depth image, a new history. The quality mode follows the ratio of
 output to input (DLAA at 1:1).
 
-DLSS only runs where the game runs its own upscaler. When the game draws the scene at the output size (in 150 s
+DLSS only runs where the game runs its own upscaler. `scene_res = full` (`docs/dkb-testing.md`) draws the scene at
+the whole render resolution on purpose, so neither the game's upscaler nor DLSS runs then. When the game draws the scene at the output size (in 150 s
 replays on 1.0.0 with a 1920x1080 output it switched to that partway through the play, at a different point in each
 run), there is no upscaler dispatch to replace and the game's picture is shown as it is.
 

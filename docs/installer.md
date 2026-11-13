@@ -252,7 +252,8 @@ Preview. `DKB-Setup-<version>-linux-x86_64.tar.gz` and `DKB-Setup-<version>-maco
 zip. They carry no binaries and no game data: the player already has the system packages, and the build runs on their
 machine. The folder holds `installer/`, `recomp/`, `tools/` (with the translator and its vendored sources), every
 `runtime/` source and header, `data/`, `licenses/`, `THIRD_PARTY_NOTICES.md`, `LICENSE*`, `VERSION` (version and commit, as
-on Windows), `dkb.ini.example`, `README-SETUP.txt` and `setup.sh` (Linux) or `setup.command` (macOS).
+on Windows), `dkb.ini.example`, `README-SETUP.txt`, `recomplauncher.json`, `play.sh` and `setup.sh` (Linux) or
+`setup.command` (macOS).
 
 The flow: unzip (the executable bit is kept), run `./setup.sh --check` to list what is missing (clang, lld, ninja, SDL3,
 Opus, libvpx, zstd, Vulkan headers, spirv-tools, .NET 10 SDK, uv, Git; Linux 6.7 or later, or macOS 14.4 or later on
@@ -263,6 +264,17 @@ Without `--check` the script creates `.venv` with uv (Python 3.12), installs `to
 installer runs in its repository mode: system clang, ninja and libraries, temp folder `build/install-temp`. Status: on
 Linux the build from source is verified on AMD and NVIDIA; macOS boots to the mode select without the destructible
 terrain ([building.md](building.md)).
+
+RecompLauncher installs the same package and reads its `recomplauncher.json` (from `tools/release/`, the launcher's
+docs/DEVELOPERS.md in elripalda/RecompLauncher describes the format). The launcher asks the player for their copy, a
+.nup file or a folder with `exefs/` and `romfs/`, and runs the profile's prepare step: `setup.sh --prepare --source
+<copy> --dest <package folder>/game`. `--source` stands for `--nup`, or `--exefs` and `--romfs`, depending on what the
+path is. `--prepare` prints the `progress <0..1> <text>` lines the launcher shows under its setup step instead of JSON
+events (`events.py`, `LauncherReporter`): every step of the plan gets an equal share of the bar, and an error's text is
+the last line. The launcher then starts `play.sh`, which runs `game/dkb` from its folder (and says so when it is not
+built yet), and backs up `game/profile/`. It runs the step again after it installs a newer package, which resumes or
+updates the recorded install as a second `setup.sh` run would. A missing system package stops the step with exit code 1
+before Python starts; `./setup.sh --check` in a terminal names it.
 
 `tools/make_release_linux.py` builds the same setup for Linux and packs it as `TotK-Setup-x86_64.AppImage` (the static
 type-2 runtime: no libfuse2 needed on the host). The player makes it executable and starts it; on a Steam Deck, from

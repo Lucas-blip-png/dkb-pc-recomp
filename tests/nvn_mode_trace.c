@@ -58,6 +58,8 @@ void rt_log(const char *format,...) {
     }
 }
 void rt_fatal(const char *format,...) {(void)format;abort();}
+int hdr_trace_hit(const Cpu *c,const char *name) {(void)c;(void)name;return 0;}   // DKB_HDR_TRACE off
+void hdr_trace_dump(const char *name,const void *p) {(void)name;(void)p;}
 void nvn_called(uint8_t *seen,const char *name) {(void)seen;(void)name;__atomic_fetch_add(&normal_calls,1,__ATOMIC_RELAXED);}
 int cfg_bool(const char *name) {
     if(strcmp(name,"TOTK_NVN2_MODE_TRACE"))abort();__atomic_fetch_add(&config_calls,1,__ATOMIC_RELAXED);return on;

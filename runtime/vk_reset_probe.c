@@ -89,7 +89,7 @@ static void work(VkExec *ex, void *context) {
     ex->recorded++;
     publish(ex, test, &list, test->list, LIST_BYTES);
 
-    // Entries 0 and 6 are deliberately outside the selection; the selected entries contain a null and a duplicate.
+    // Entries 0 and 6 are outside the selection; the ordered cases include a duplicate.
     test->applied = vk_exec_reset_indirect(ex, test->list, LIST_BYTES, 1, 5);
     if (!snapshot(ex, test, 0)) return;
     if (!test->reject) {
@@ -163,7 +163,7 @@ static int buffer(VkBufferUsageFlags usage, VkDeviceSize bytes, int write, VkBuf
     return 1;
 }
 
-static int run_case(uint8_t *heap, const char *name, int warm, int reject, int device) {
+static int run_case(uint8_t *heap, const char *name, int warm, int reject, int device, int disjoint) {
     unsigned before = failures;
     pool_t list_pool = {.magic = NVN_POOL_MAGIC, .flags = 0x24, .mem = heap + 0x100000,
         .size = POOL_BYTES, .game_mem = heap + 0x100000};
@@ -209,6 +209,10 @@ static int run_case(uint8_t *heap, const char *name, int warm, int reject, int d
     test.pointers[3] = 0;
     test.pointers[4] = test.target + 0x40;
     test.pointers[5] = reject ? UINT64_C(0xfffffff000000000) : test.target + 0xc0;
+    if (disjoint) {
+        test.pointers[4] = test.pointers[5];
+        test.pointers[5] = 0;
+    }
     test.pointers[6] = test.target + 0x120;
     if (!buffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, LIST_BYTES, 1, &test.producer, &producer_allocation, &producer_map) ||
         !buffer(VK_BUFFER_USAGE_TRANSFER_DST_BIT, 2 * WINDOW_BYTES, 0, &test.readback, &readback_allocation, &readback_map)) {
@@ -261,10 +265,11 @@ int probe_vkreset(void) {
     CHECK(!mem_set_heap_size(UINT64_C(16) << 20, &heap) && heap, "owned heap allocation");
     if (failures) return 1;
     vk_sync_start();
-    int bad = run_case((uint8_t *)(uintptr_t)heap, "first target use", 0, 0, 0);
-    if (!bad) bad = run_case((uint8_t *)(uintptr_t)heap, "pre-existing target backing", 1, 0, 0);
-    if (!bad) bad = run_case((uint8_t *)(uintptr_t)heap, "late-invalid target is atomic rejection", 0, 1, 0);
-    if (!bad) bad = run_case((uint8_t *)(uintptr_t)heap, "virtual reset targets / physical readback", 0, 0, 1);
+    int bad = run_case((uint8_t *)(uintptr_t)heap, "first target use", 0, 0, 0, 0);
+    if (!bad) bad = run_case((uint8_t *)(uintptr_t)heap, "pre-existing target backing", 1, 0, 0, 0);
+    if (!bad) bad = run_case((uint8_t *)(uintptr_t)heap, "late-invalid target is atomic rejection", 0, 1, 0, 0);
+    if (!bad) bad = run_case((uint8_t *)(uintptr_t)heap, "virtual reset targets / physical readback", 0, 0, 1, 0);
+    if (!bad) bad = run_case((uint8_t *)(uintptr_t)heap, "disjoint reset targets", 0, 0, 0, 1);
     vk_sync_finish();
     vk_pipeline_shutdown();
     vk_exec_draw_shutdown();

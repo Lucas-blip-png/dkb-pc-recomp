@@ -49,6 +49,9 @@ Run
       --exefs: the ExeFS folder of the 1.0.0 base game. --romfs: its RomFS folder. --dest: where the game is built.
       Further options (--toolchain, --deps, --ninja, --translator, --dotnet, --jobs) are passed through; see
       `.venv/bin/python -m installer --help`.
+  {setup} --source PATH --dest DIR
+      The same with your copy as one path: a .nup file, or a folder with exefs/ and romfs/ in it. RecompLauncher runs
+      it this way from recomplauncher.json, with --prepare and --dest set to the game/ folder beside this file.
 
 The script never uses sudo and never installs system packages. The build compiles the whole runtime and the generated
 code on your machine and takes a long time. Keep your keys and dumps outside this folder.
@@ -91,10 +94,14 @@ def main():
     for lic in sorted(ROOT.glob('LICENSE*')):
         shutil.copy2(lic, out / lic.name)
     shutil.copy2(ROOT / 'tools' / 'release' / 'setup.sh', out / SETUP[plat])   # one script, named setup.command on macOS
+    # RecompLauncher's profile: it asks for the copy, runs the setup with --prepare and starts play.sh (docs/installer.md)
+    shutil.copy2(ROOT / 'tools' / 'release' / 'recomplauncher.json', out / 'recomplauncher.json')
+    shutil.copy2(ROOT / 'tools' / 'release' / 'play.sh', out / 'play.sh')
     (out / 'README-SETUP.txt').write_text(
         README_SETUP.format(label=f'{plat} {ARCH[plat]}', status=STATUS[plat], requirements=REQUIREMENTS[plat],
                             setup='./' + SETUP[plat]), encoding='utf-8', newline='\n')
-    (out / SETUP[plat]).chmod(0o755)   # the zip carries its own bits; this is for a folder used directly
+    for script in (SETUP[plat], 'play.sh'):   # the archives carry their own bits; this is for a folder used directly
+        (out / script).chmod(0o755)
     mr.check_folder(out)
     if args.pack:
         if plat == 'linux':

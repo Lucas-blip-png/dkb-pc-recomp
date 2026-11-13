@@ -382,6 +382,13 @@ def runtime_lib(out, llvm):
     """Build libtotkrt.a with the folder's llvm/ and copy it, the headers and the install-side sources into runtime/."""
     if GAME == 'dkb':   # no prebuilt library: the installer compiles the full runtime sources
         copy_tree(ROOT / 'runtime', out / 'runtime', lambda r: '__pycache__' in r)
+        # build_game.runtime_sources() keeps only these files, so a release unpacked over an older one cannot
+        # compile the sources the older one shipped and this one dropped.
+        src = ROOT / 'runtime'
+        names = sorted(p.relative_to(src).as_posix() for p in src.rglob('*')
+                       if p.is_file() and '__pycache__' not in p.parts)
+        (out / 'runtime' / 'sources.txt').write_text(''.join(f'{n}\n' for n in names), encoding='utf-8',
+                                                      newline='\n')
         return
     build = MAIN_ROOT / 'build' / 'release-check' / 'rtlib'
     version = lifted_version()

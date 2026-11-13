@@ -55,3 +55,58 @@ Same route, 60 s runs, one knob changed from the defaults at a time. Repeated ru
 
 This route is light, so these are not yet reasons to change a default. A low-end profile would turn the recorder off at
 2 logical processors once a heavy scene confirms it.
+
+## Heavy scene: layer -101
+
+A player's recording in layer -101 on an RTX 5060 Ti at 1920x1080 with a 60 fps limit, measured on 13 November over
+the first minute with a warm shader cache. Each setting ran once or twice; two values are the two runs.
+
+0.3.0 build:
+
+| Setting | fps | 1% low | Frames over 25 ms |
+| --- | --- | --- | --- |
+| defaults | 50.5 and 49.8 | 21.4 and 23.1 | 346 and 370 |
+| `TOTK_REPLAY_PAR=1` | 51.3 | 23.4 | 314 |
+| `TOTK_REPLAY_THREADS=4` | 54.3 | 25.6 | 146 |
+| `TOTK_REPLAY_THREADS=8` | 53.1 | 23.1 | 198 |
+
+Build 89645fc (warm cache):
+
+| Setting | fps | Frames over 25 ms |
+| --- | --- | --- |
+| defaults | 50.3 and 51.6 | not recorded |
+| `TOTK_REPLAY_THREADS=4` | 54.2 and 53.6 | 188 and 181 |
+
+- A cold shader cache cost about 5 fps in the first run.
+- A stall of about 0.9 s around frame 1775, almost all of it replay, shows in every run.
+- Cause of that stall: the first frame of the new area imports guest memory pools on their first GPU use
+  (`TOTK_POOL_LAZY`, `vk_memory.c` `lazy_import`). A sampling profile of the frame (`TOTK_PROFILE_SLOW`) put about 70%
+  of the render thread in `import_pool` (`vkAllocateMemory` of host memory); 673 pools were imported between frames 600
+  and 1800, about 960 ms in all, 1.4 ms each, most of them in that frame. The GPU uses only two pool kinds: of 3325
+  imported pools at frame 3600, 430 of 1651 `CPU_UNCACHED|GPU_CACHED` and 638 of 1076 `CPU_CACHED|GPU_CACHED` were
+  resolved, and almost none of the other kinds.
+- Tried and dropped: a background thread that imported every lazy pool older than 2 s. The worst frame fell from
+  about 750 ms to 350 ms, but the import time rose from 1.5 s to 5.7 s, held the pool lock the guest's threads wait on,
+  and the run got worse overall: 47.1 and 49.1 fps against 52.7 and 53.6, a 1% low of 9.4 and 10.6 against 25.6 and
+  27.8, and 29 to 32 frames over 100 ms against 4 to 5.
+- Merging neighbouring pools into one import was ruled out by measurement (the census line "imports took", new
+  defaults, 13 November). At frame 1800, 717 lazy imports took 431 ms in all, about 0.6 ms each: 301 ms in
+  `vkAllocateMemory` and 129 ms committing and touching the pages. The cost follows the size, not the number of calls:
+  a single 450 MiB pool took 114 ms of `vkAllocateMemory` in the 485 ms worst frame (1753). 541 of the 711 used pools
+  start within 1 MiB of the previous one, but joining small pools would not shrink the large ones. What is left to try
+  is importing only the part of a large pool the GPU uses.
+
+Defaults chosen from these runs (13 November, build of bananza with the pre-import dropped, warm cache, two runs each):
+
+| Setting | fps | 1% low | Frames over 25 ms | Worst frame |
+| --- | --- | --- | --- | --- |
+| old defaults | 52.7 and 53.6 | 25.6 and 27.0 | 177 and 226 | about 760 ms |
+| `TOTK_REPLAY_THREADS=4` | 57.0 and 57.2 | 28.8 and 29.0 | 63 and 77 | about 775 ms |
+| `TOTK_HEAP_LAZY=1` | 54.3 and 54.3 | 28.2 and 28.4 | 168 and 193 | about 473 ms |
+| new defaults (both) | 57.9 and 57.6 | 29.6 and 29.6 | 62 and 65 | about 456 ms |
+| 8 logical processors, old defaults | 49.8 and 50.5 | 23.7 and 26.3 | 371 and 389 | |
+| 8 logical processors, `TOTK_REPLAY_THREADS=4` | 54.1 and 54.3 | 26.1 and 23.5 | 165 and 185 | |
+
+So `TOTK_REPLAY_THREADS` defaults to 4 from 8 logical processors (not on AMD, not measured there) and `TOTK_HEAP_LAZY`
+to 1 on Windows.
+- Run-to-run noise is about 2 fps, and 3 in the 1% low.

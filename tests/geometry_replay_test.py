@@ -92,6 +92,7 @@ const GfxShader *gfx_shader_await(int stage,const uint8_t *ctl,const uint8_t *co
     write_providers = r'''
 _Alignas(256) static uint64_t pointer_words[4];
 _Alignas(256) static uint32_t output_words[64];
+static uint32_t twin_pass;
 static CbRes callback_resources;
 static unsigned uses,gpu_writes,drops,pending_writes,counts,barriers,passes;
 static uint64_t expected_count_bytes=sizeof output_words;

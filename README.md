@@ -23,15 +23,26 @@ As far as we know, no other static recompilation of a Switch 2 game is public.
 
 ## Status
 
-**Not playable yet.** The game boots, goes through the title screen into the tutorial cave, renders the 3D scene and
-answers the controller: you can walk and punch through the mining tunnel, with the guide movies playing, and one
-hand-played run reached the Ingot Isle Cave-In section. It still
-can crash (on NVIDIA two light quads are skipped to avoid a GPU fault,
-[#9](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/9)), and
-many effects are missing.
-The [latest release](https://github.com/Lucas-blip-png/dkb-pc-recomp/releases/latest) carries an installer that
-builds the game from your own dump: [docs/installer.md](docs/installer.md).
-Progress, day by day: [docs/devlog.md](docs/devlog.md).
+**Playable on recent NVIDIA cards, well past the first level.** Players report runs through layer -101, sublayer 200,
+the Glacier layer, Snow World (Layer 500) and the Tempest layer. The current release is 0.3.0. The
+[latest release](https://github.com/Lucas-blip-png/dkb-pc-recomp/releases/latest) carries an installer that
+builds the game from your own dump: [docs/installer.md](docs/installer.md). What still fails:
+
+- Device lost on NVIDIA in the Glacier rock ride ([#196](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/196))
+  and in Layer 500 ([#197](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/197)): one bug, with the same draw in
+  flight in both. Fast-linked pipelines and the pipeline cache are ruled out; a recorded crashing run is being replayed.
+- Device lost on AMD cards with AMD's Windows driver. On 0.3.0, `vk_recorder = 0` in `dkb.ini` stopped it for three
+  players (#84, #155, #142), then #124 and #123, and it is the default on `bananza` since d161f88. Other AMD reports
+  wait for a retest (#176, #193, #206). GPU hangs under RADV on Linux are still open (#99, #122, #198, #204).
+- Guest crashes in later areas (#148, #157, #136, #218, #229).
+- Missing effects in the Tempest layer (falling golden hail, tornadoes: #221, #183).
+- Heavy scenes below 60 fps (#141, #156, #194, #207). On `bananza` (70c1b4a) new defaults raise our heavy test scene
+  from about 53 to 58 fps and halve the frames over 25 ms; a stall of about 0.45 s on area loads is left. See
+  [docs/dkb-lowend.md](docs/dkb-lowend.md).
+- A soft 3D picture: the game's dynamic resolution draws the scene at 2/3 of the output (1280x720 at 1080p, #210).
+  On `bananza` (9190e6b), `scene_res = full` draws it at the output size.
+
+Progress, day by day: [docs/devlog.md](docs/devlog.md). Last updated: 13 November 2026.
 
 | Phase | | State |
 | --- | --- | --- |
@@ -40,7 +51,11 @@ Progress, day by day: [docs/devlog.md](docs/devlog.md).
 | F2 NVN 2 | ✅ | 700 NVN 2 entry points answered; the game loop runs. 51 new command buffer calls (mesh shaders, VRS, DLSS, push constants…) are accepted but not recorded yet. |
 | F3 Shaders | ✅ | All 4,820 Ampere shader stages of the first 3D scene go through Eglantine's Ampere-to-Maxwell lowering and TotK Recomp's translator to SPIR-V. |
 | F4 Vulkan | ✅ | The title screen and the tutorial's 3D scene render. |
-| F5 Playable | 🚧 | Controller, guide movies (VP9) and push constants work. Open: a GPU fault some minutes in on NVIDIA, the black destructible terrain (its geometry stage, [#45](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/45)), some textures, performance outside the tutorial. |
+| F5 Playable | ✅ | Controller, guide movies (VP9), push constants, installer and releases 0.1.0 to 0.3.0. |
+| F6 Stability | 🚧 | Device lost on NVIDIA and AMD, RADV hangs and guest crashes in later areas. |
+| F7 Performance | 🚧 | A heavy scene runs at about 58 fps on `bananza`, with a stall of about 0.45 s on area loads. |
+| F8 Image | 🚧 | Missing effects, some textures and terrain details. |
+| F9 Platforms | 🚧 | Linux and macOS preview packages, RecompLauncher, audio and DLC. |
 
 The plan, phase by phase: [docs/bananza-plan.md](docs/bananza-plan.md). What is open right now:
 [Roadmap to playable](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/10).

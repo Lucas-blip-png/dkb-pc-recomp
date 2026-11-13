@@ -47,7 +47,7 @@ Each phase ends in a milestone someone else can check. The order follows the cri
 - Every single-sample colour texture can be used as a storage image, because NVN 2 does not ask for it.
 - **Milestone reached:** the title screen and the tutorial cave render (2,600 frames, 0 validation errors).
 
-## F5 — Playable (in progress)
+## F5 — Playable (done)
 
 - [x] Controller input in the menu and in gameplay (walking, punching). Keyboard and mouse come from TotK Recomp's
       input layer ([controls.md](controls.md)).
@@ -103,26 +103,56 @@ Issues: [#2] [#3] [#4] [#5] [#7] [#8] [#9]; the whole list is the
 [#7]: https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/7
 [#8]: https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/8
 [#9]: https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/9
-- **Milestone:** play from the start to the end of the first level without a crash.
+- **Milestone (met):** play from the start to the end of the first level without a crash.
+- [x] Installer and releases 0.1.0 to 0.3.0.
+- [x] Update 3.2.0 support.
+- [x] Linux and macOS preview packages (RecompLauncher sets them up).
+- [x] Own DLSS inputs (`upscaler = dlss`).
+- [x] HDR experiment.
+- [x] Frame generation experiment.
+- [x] Replay helper threads and sliced passes.
+- [x] Lazy heap knob (`TOTK_HEAP_LAZY`).
+
+## F6 — Stability (in progress)
+
+- [ ] Device lost on NVIDIA in later layers: the Glacier rock ride (#196) and Layer 500 (#197).
+- [ ] Guest crashes in later areas (#148 #157 #136 #218 #229), each with its log.
+- [ ] Device lost on AMD (#3 #84 #124 #142 #155 #176 #193) and GPU hangs under RADV (#99 #122 #198 #204).
+- [x] Validation errors from a depth-compare sampler on an R32_SFLOAT view used by a draw: draws now sample a depth twin, as compute passes did (2201ec6). The first level runs with 0 validation errors.
+
+## F7 — Performance (in progress)
+
+- [ ] The stall of about 0.9 s at an area load (almost all of it replay).
+- [ ] Replay cost per draw.
+- [x] `TOTK_REPLAY_THREADS` default chosen by core count (4 from 8 logical processors).
+- [x] `TOTK_HEAP_LAZY` on by default on Windows.
+- [ ] Frame rates above 60 (#113 #118 #137 #201).
+
+## F8 — Image (in progress)
+
+- [ ] #62 (PR #220), #221.
+- [ ] #139.
+- [ ] #210, #214.
+- [ ] #5, #45, #76, #112.
+- [ ] #149 (PR #223).
+- [ ] #152 (PR #225).
+
+## F9 — Platforms (in progress)
+
+- [ ] Linux setup (#134 #200).
+- [ ] Audio (#133), #166.
+- [ ] RecompLauncher for Linux and macOS.
+- [ ] DLC (#183 #111).
+
+**0.4.0:** reach the end of the game on NVIDIA with no known crash, and heavy scenes without a 1 s stall.
 
 ## Later
 
 - NVN 2 calls the host accepts and does not record yet (`runtime/nvn_api_nvn2.c`, `NVN2_NOT_RECORDED`): mesh shaders,
-  variable-rate shading, DLSS, ray tracing, device command buffers. Each one is logged on its first call. None of
-  them has mattered so far.
-- Play-testing of update 3.2.0 (`dkb458752`): the installer supports it and it boots, but nobody has played it as
-  far as the base has been played. Add-on content (`runtime/aoc_romfs.c`) is likewise untested in game.
-- Linux, which TotK Recomp's toolchain supports.
-- DLSS and temporal upscalers (checked 2026-11-09). The game does not use DLSS: with `nvnDlssNetworkInitialize`
-  answering success it still called no `nvnDlss*` proc in a 330 s run on 1.0.0, and a scan of the guest code finds
-  no reference to the DLSS slots of the NVN proc table in 1.0.0 or in 3.2.0 (the loader alone names them). Nor do the
-  frame dumps show a velocity target or a history texture, so the game has no temporal AA to borrow from.
-  `upscaler = dlss` (docs/dkb-dlss.md) therefore makes its own inputs, as TotK Recomp's `vk_dlaa.c` does: a sub-pixel
-  jitter on the scene's viewports, the scene depth, and camera-only motion vectors from depth and the camera block's
-  view-projection (vertex bank c3, 0x980 bytes, found with `DKB_DUMP_UBO=1`). Still missing: per-object motion
-  (animated characters can smear), DLSS where the game renders at the output size and skips its upscaler, and FSR 3.
-  Frame generation has the same input needs. The drivers' own frame generation (NVIDIA Smooth Motion, AMD AFMF) needs
-  nothing from this project.
+  variable-rate shading, ray tracing, device command buffers. Each one is logged on its first call (#6).
+- `upscaler = dlss` (docs/dkb-dlss.md) exists. The game does not use DLSS and has no velocity target, so the option
+  makes its own inputs. Still missing: per-object motion vectors (animated characters can smear), DLSS where the game
+  renders at the output size and skips its upscaler, and FSR 3.
 
 ## Alongside
 

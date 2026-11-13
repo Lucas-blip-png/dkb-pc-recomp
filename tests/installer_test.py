@@ -15,7 +15,8 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from installer import ini, runner, state, steps  # noqa: E402
-from installer.events import Reporter  # noqa: E402
+from installer.cli import source_inputs  # noqa: E402
+from installer.events import LauncherReporter, Reporter  # noqa: E402
 from installer.layout import Layout  # noqa: E402
 
 
@@ -318,6 +319,76 @@ class EventsTest(unittest.TestCase):
             used |= set(re.findall(r"warning\('([a-z_.]+)'", path.read_text(encoding='utf-8')))
             used |= {f'phase.{s}.{p}' for s, p in re.findall(r"progress\('(\w+)', '(\w+)'[,)]", path.read_text(encoding='utf-8'))}
         self.assertEqual(sorted(i for i in used if i not in catalog), [])
+
+
+class LauncherReporterTest(unittest.TestCase):
+    """--prepare: the `progress <0..1> <text>` lines RecompLauncher's prepare step reads."""
+
+    def lines(self, rep):
+        return rep.out.getvalue().splitlines()
+
+    def test_each_planned_step_gets_an_equal_share(self):
+        rep = LauncherReporter(out=io.StringIO())
+        rep.emit('plan', run=['check', 'cleanup'])
+        rep.step('check', 'started')
+        rep.step('cleanup', 'started')
+        self.assertEqual(self.lines(rep), ['progress 0.000 Checking the computer and the game files',
+                                           'progress 0.500 Cleaning up'])
+
+    def test_a_phase_with_an_amount_moves_within_its_step(self):
+        rep = LauncherReporter(out=io.StringIO())
+        rep.emit('plan', run=['check', 'extract'])
+        rep.progress('extract', 'copy', 5, 10, 'bytes')
+        self.assertTrue(self.lines(rep)[0].startswith('progress 0.750 '))
+
+    def test_the_bar_never_moves_back(self):
+        rep = LauncherReporter(out=io.StringIO())
+        rep.emit('plan', run=['check', 'extract'])
+        rep.progress('extract', 'copy', 10, 10, 'bytes')
+        rep.progress('extract', 'verify', 0, 10, 'bytes')
+        self.assertTrue(self.lines(rep)[1].startswith('progress 1.000 '))
+
+    def test_an_error_is_the_last_lines_text(self):
+        rep = LauncherReporter(out=io.StringIO())
+        rep.emit('plan', run=['check'])
+        rep.error('check.disk_space', {'path': '/games', 'need_gb': 40, 'free_gb': 3}, step='check')
+        self.assertIn('40 GB needed, 3 GB free', self.lines(rep)[-1])
+
+    def test_a_finished_install_ends_at_one(self):
+        rep = LauncherReporter(out=io.StringIO())
+        rep.emit('end', result='ok', seconds=1.0)
+        self.assertTrue(self.lines(rep)[-1].startswith('progress 1.000 '))
+
+    def test_no_json_events_reach_the_launcher(self):
+        rep = LauncherReporter(out=io.StringIO())
+        rep.emit('start', release='0.3.0', mode='install')
+        rep.emit('space', dest='/games', need=1, free=2)
+        self.assertEqual(self.lines(rep), [])
+
+
+class SourceTest(unittest.TestCase):
+    """--source: the player's copy as one path, the way RecompLauncher hands it over."""
+
+    def test_a_file_is_the_nup(self):
+        with tempfile.TemporaryDirectory() as d:
+            nup = Path(d) / 'Donkey Kong Bananza.nup'
+            nup.write_bytes(b'')
+            self.assertEqual(source_inputs(nup), (nup, None, None))
+
+    def test_a_folder_gives_its_exefs_and_romfs_in_any_case(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / 'ExeFS').mkdir()
+            (Path(d) / 'romfs').mkdir()
+            self.assertEqual(source_inputs(Path(d)), (None, Path(d) / 'ExeFS', Path(d) / 'romfs'))
+
+    def test_a_folder_without_romfs_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / 'exefs').mkdir()
+            self.assertIsNone(source_inputs(Path(d)))
+
+    def test_a_missing_path_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(source_inputs(Path(d) / 'gone.nup'))
 
 
 if __name__ == '__main__':

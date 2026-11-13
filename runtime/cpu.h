@@ -18,7 +18,8 @@ typedef struct __attribute__((aligned(16))) Cpu {
     uint64_t fpcr;           // 320: guest FPCR/FPSR (portable FP/SIMD lowering only; the asm path uses the host's)
     uint64_t fpsr;           // 328
     uint64_t excl_val_hi;    // 336: upper half of a 128-bit exclusive pair (LDXP/LDAXP of two X registers)
-    uint8_t _pad[512 - 344];
+    uint64_t excl_ver;       // 344: version of the reservation granule at the load exclusive (cpu_excl_ver)
+    uint8_t _pad[512 - 352];
     __uint128_t v[32];       // 512
 } Cpu;
 
@@ -94,9 +95,54 @@ void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
 #define ST32(a, v) (*(u32u *)(uintptr_t)(a) = (uint32_t)(v))
 #define ST64(a, v) (*(u64u *)(uintptr_t)(a) = (uint64_t)(v))
 
-// ---- exclusive monitor (emulated with compare-and-swap)
+// ---- exclusive monitor
+// A load exclusive remembers the address, the value and the version of the address's 16-byte reservation granule
+// (cpu_excl_ver). A store exclusive succeeds only if no store exclusive to that granule succeeded since, on any thread
+// (the version is unchanged), and the memory still holds the remembered value (compare-and-swap). The version makes
+// another thread's change and change back (ABA) fail the store, as on the console; the value check still covers plain
+// stores, LSE atomics, CAS and host code, which do not move the version, so a change and change back made by those
+// alone is not seen.
+// While a store exclusive writes, its granule's version is odd; a load exclusive that reads an odd version, or a store
+// exclusive that finds one, fails, which the architecture allows (a store exclusive may fail spuriously). The store
+// runs out of line (excl_store*, defined once by CPU_EXCL_DEFINE in runtime/excl.c), so it is never inside lifted code
+// while the version is odd: asynchronous preemption only redirects a thread whose host rip is in lifted code
+// (kernel.c ap_try), and a thread stopped with its granule odd would make every other thread's store exclusive to that
+// granule fail until it ran again. Granules share slots by hash; a collision only adds spurious failures.
+#define EXCL_SLOTS 4096   // power of two: excl_slot takes the top 12 bits of the hash
+extern uint64_t cpu_excl_ver[EXCL_SLOTS];
+static inline uint64_t *excl_slot(uint64_t a) {
+    return &cpu_excl_ver[((a >> 4) * 0x9e3779b97f4a7c15ull) >> 52];
+}
+static inline uint64_t excl_load_ver(uint64_t a) {   // before the value, so a store between the two fails the reservation
+    return __atomic_load_n(excl_slot(a), __ATOMIC_ACQUIRE);
+}
+// Takes the granule (version ver -> ver + 1) if its version is still ver. 0: another store exclusive came first.
+static inline int excl_take(uint64_t *slot, uint64_t ver) {
+    return !(ver & 1) && __atomic_compare_exchange_n(slot, &ver, ver + 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED);
+}
+// Gives it back: a new version when the store was made, the old one when memory had changed and nothing was stored.
+static inline void excl_give(uint64_t *slot, uint64_t ver, int stored) {
+    __atomic_store_n(slot, stored ? ver + 2 : ver, __ATOMIC_RELEASE);
+}
+#ifdef CPU_EXCL_DEFINE
+uint64_t cpu_excl_ver[EXCL_SLOTS] __attribute__((aligned(64)));
+#define EXCL_STORE(N, T)                                                                   \
+    __attribute__((noinline)) uint32_t excl_store##N(uint64_t a, uint64_t ver, uint64_t old, uint64_t v) { \
+        uint64_t *slot = excl_slot(a);                                                     \
+        if (!excl_take(slot, ver)) return 1;                                               \
+        T expected = (T)old;                                                               \
+        int stored = __atomic_compare_exchange_n((T *)(uintptr_t)a, &expected, (T)v, 0,    \
+                                                 __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);      \
+        excl_give(slot, ver, stored);                                                      \
+        return !stored;                                                                    \
+    }
+#else
+#define EXCL_STORE(N, T) uint32_t excl_store##N(uint64_t a, uint64_t ver, uint64_t old, uint64_t v);
+#endif
 #define EXCL(N, T)                                                                         \
+    EXCL_STORE(N, T)                                                                       \
     static inline uint64_t ldx##N(Cpu *c, uint64_t a) {                                    \
+        c->excl_ver = excl_load_ver(a);                                                    \
         T v = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_ACQUIRE);                        \
         c->excl_addr = a;                                                                  \
         c->excl_val = v;                                                                   \
@@ -105,9 +151,7 @@ void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
     static inline uint32_t stx##N(Cpu *c, uint64_t a, uint64_t v) {                        \
         if (c->excl_addr != a) return 1;                                                   \
         c->excl_addr = ~0ull;                                                              \
-        T expected = (T)c->excl_val;                                                       \
-        return !__atomic_compare_exchange_n((T *)(uintptr_t)a, &expected, (T)v, 0,         \
-                                            __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);           \
+        return excl_store##N(a, c->excl_ver, c->excl_val, v);                              \
     }                                                                                      \
     static inline uint64_t lda##N(uint64_t a) {                                            \
         return __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_ACQUIRE);                       \
@@ -121,8 +165,24 @@ EXCL(32, uint32_t)
 EXCL(64, uint64_t)
 
 // Exclusive pair of two X registers: one 16-byte-aligned 128-bit access (cmpxchg16b; x86-64-v3 has CX16).
-// A pair of two W registers is a 64-bit exclusive and uses ldx64/stx64.
+// A pair of two W registers is a 64-bit exclusive and uses ldx64/stx64. Versions as for ldxN/stxN above.
+#ifdef CPU_EXCL_DEFINE
+__attribute__((noinline)) uint32_t excl_store128(uint64_t a, uint64_t ver, uint64_t old_lo, uint64_t old_hi,
+                                                 uint64_t lo, uint64_t hi) {
+    uint64_t *slot = excl_slot(a);
+    if (!excl_take(slot, ver)) return 1;
+    __uint128_t expected = ((__uint128_t)old_hi << 64) | old_lo;
+    __uint128_t v = ((__uint128_t)hi << 64) | lo;
+    int stored = __atomic_compare_exchange_n((__uint128_t *)(uintptr_t)a, &expected, v, 0, __ATOMIC_SEQ_CST,
+                                             __ATOMIC_SEQ_CST);
+    excl_give(slot, ver, stored);
+    return !stored;
+}
+#else
+uint32_t excl_store128(uint64_t a, uint64_t ver, uint64_t old_lo, uint64_t old_hi, uint64_t lo, uint64_t hi);
+#endif
 static inline __uint128_t ldxp128(Cpu *c, uint64_t a) {
+    c->excl_ver = excl_load_ver(a);
     __uint128_t v = __atomic_load_n((__uint128_t *)(uintptr_t)a, __ATOMIC_ACQUIRE);
     c->excl_addr = a;
     c->excl_val = (uint64_t)v;
@@ -132,10 +192,7 @@ static inline __uint128_t ldxp128(Cpu *c, uint64_t a) {
 static inline uint32_t stxp128(Cpu *c, uint64_t a, uint64_t lo, uint64_t hi) {
     if (c->excl_addr != a) return 1;
     c->excl_addr = ~0ull;
-    __uint128_t expected = ((__uint128_t)c->excl_val_hi << 64) | c->excl_val;
-    __uint128_t v = ((__uint128_t)hi << 64) | lo;
-    return !__atomic_compare_exchange_n((__uint128_t *)(uintptr_t)a, &expected, v, 0, __ATOMIC_SEQ_CST,
-                                        __ATOMIC_SEQ_CST);
+    return excl_store128(a, c->excl_ver, c->excl_val, c->excl_val_hi, lo, hi);
 }
 
 // ---- LSE atomics (ARMv8.1; the A57 lacks them, the SDK carries them behind a CPU feature check).

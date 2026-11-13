@@ -221,8 +221,7 @@ uint64_t gfx_replayed_submits(void) {
 static uint64_t submit_sync(const uint64_t *handles, int n, uint64_t submitted_ticks) {
     vk_sync_start();
     vk_present_drain();
-    vk_texture_new_submit();
-    return vk_sync_submit(handles, n, submitted_ticks);
+    return vk_sync_submit_guest(handles, n, submitted_ticks);
 }
 
 static void replay_main(void *arg) {

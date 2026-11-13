@@ -65,7 +65,7 @@ subprocess.run([dotnet,'msbuild',out/'parallel.proj','-t:Run','-m:2','-nologo','
     ctx = SimpleNamespace(temp=workspace, dest=dest, layout=SimpleNamespace(root=base, tools=tools,
                            python=Path(sys.executable), dlls=(), llvm=dotnet.parent, sysroot=None),
                            options=SimpleNamespace(jobs=2),
-                           reporter=Reporter(), info={'translator':None, 'identity':'local-msbuild-probe',
+                           reporter=Reporter(), info={'translator':None, 'identity':'local-msbuild-probe', 'game':b.GAME,
                                                      'dotnet':dotnet, 'owner':owner})
     before = dict(os.environ)
     try:

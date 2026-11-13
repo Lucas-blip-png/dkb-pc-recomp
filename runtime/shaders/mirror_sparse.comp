@@ -1,0 +1,16 @@
+#version 450
+
+// One workgroup per disjoint, word-aligned range. Gaps stay untouched.
+layout(local_size_x = 32) in;
+layout(std430, binding = 0) readonly restrict buffer Source { uint src[]; };
+layout(std430, binding = 1) writeonly restrict buffer Destination { uint dst[]; };
+layout(std430, binding = 2) readonly restrict buffer Ranges { uvec2 ranges[]; };
+layout(push_constant) uniform Params { uint first_range; };
+
+void main() {
+    uvec2 range = ranges[first_range + gl_WorkGroupID.x];
+    for (uint i = gl_LocalInvocationID.x; i < range.y; i += gl_WorkGroupSize.x) {
+        uint offset = range.x + i;
+        dst[offset] = src[offset];
+    }
+}

@@ -149,6 +149,9 @@
 # and keeps FSR for the window; it needs nvngx_dlss.dll next to dkb.exe (docs/dkb-dlss.md) and falls back to the
 # game's upscaler, with a "dlss:" line in the log, when anything is missing.
 # upscaler = fsr
+# Bananza only: auto keeps the game's dynamic 3D resolution (usually two thirds of output_res on each side), full draws
+# the 3D scene at output_res (sharper, more GPU cost; no upscaler or DLSS then). Read at start.
+# scene_res = auto
 # sharpness = 80
 # SMAA 1x anti-aliasing of the final picture: off (the default), low, medium or high. It runs after the picture is scaled to
 # the window (FSR or bilinear) and before the menu is drawn, so the game's HUD is smoothed as well. Changes while the game

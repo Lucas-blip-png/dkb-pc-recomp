@@ -23,7 +23,7 @@ from pathlib import Path
 from . import layout as layouts
 from . import state as statefile
 from . import ini
-from .events import Reporter
+from .events import LauncherReporter, Reporter
 from .runner import Context, InstallError, Step, run_steps
 
 STATE = 'dkb-install.json'
@@ -803,7 +803,7 @@ def write_owner(path, value):
 
 
 def main(options):
-    rep = Reporter()
+    rep = LauncherReporter() if getattr(options, 'prepare', False) else Reporter()
     locks = []
     started = time.monotonic()
     try:
