@@ -118,6 +118,45 @@ static void blur_frames(Cpu *c) {
     c->x[8] = (uint32_t)whole;
 }
 
+// Bananza damped velocity update (the sites at main+13fad88..13fada4 in recomp/patches-dkb458752.txt, main+1241c78..
+// 1241c94 in patches-dkb100.txt). main+13fad60 (1.0.0 main+1241c50) steps the player's velocity v toward a target as
+// v = r^step * v + sum of r^i * target for i = 1 .. step, adding the target once per whole 60 Hz frame, so a step under
+// 1.0 added nothing and the climb velocity decayed to 0 (#201: DK stops on walls and ceilings above 60 fps). This
+// stands in for the fmov s12, #1.0 that bounds the loop. On a fractional step it writes the closed form of the sum,
+// r * (1 - r^step) / (1 - r) * target, which equals the loop's sum at every whole step and keeps the steady velocity
+// r / (1 - r) * target at any step, then sets s12 to +inf so the loop does not run. On a whole step, or a rate outside
+// (0, 1), it leaves s12 = 1.0 and s9..s11 = 0, the game's own state: the loop runs as on the console. At the BL x0 is
+// the mover ([actor+0x60], step at [[x0+0x18]]), x1 the target vector and s8 the rate r.
+static float reg_f32(const Cpu *c, int n) {
+    uint32_t bits = (uint32_t)c->v[n];
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
+
+static void set_f32(Cpu *c, int n, float f) {
+    uint32_t bits;
+    memcpy(&bits, &f, 4);
+    c->v[n] = bits;   // a scalar write clears the rest of the vector register, as fmov and movi do
+}
+
+static float ld_f32(uint64_t a) {
+    uint32_t bits = LD32(a);
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
+
+static void damped_sum(Cpu *c) {
+    float step = ld_f32(LD64(c->x[0] + 0x18)), r = reg_f32(c, 8);
+    set_f32(c, 9, 0), set_f32(c, 10, 0), set_f32(c, 11, 0), set_f32(c, 12, 1.0f);
+    if (!(step > 0 && step < 1000) || step == floorf(step) || !(r > 0 && r < 1)) return;
+    float g = r * (1.0f - powf(r, step)) / (1.0f - r);
+    uint64_t t = c->x[1];
+    set_f32(c, 11, g * ld_f32(t)), set_f32(c, 10, g * ld_f32(t + 4)), set_f32(c, 9, g * ld_f32(t + 8));
+    set_f32(c, 12, INFINITY);
+}
+
 void frame_step_init(void) {
     int fps60 = rt_patch_set("fps60"), realtime = rt_patch_set("realtime"), cloth = rt_patch_set("cloth");
     if (realtime < 0) {
@@ -135,6 +174,7 @@ void frame_step_init(void) {
         if (!rt_game_version) {
             dkb_rate = (_Atomic uint32_t *)((uint8_t *)rt_patch_page() + 12);
             rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + 0x250, blur_frames);   // 3.2.0 radial blur lifetimes
+            rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + 0x260, damped_sum);    // damped velocity, both versions
         }
         step_store((float)STEP_FIRST_S);
     }

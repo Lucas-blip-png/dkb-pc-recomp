@@ -31,6 +31,19 @@ site realtime main 6b8260 1e201820 f81f0fe9 @page:x9 bd400920 f84107e9  # second
 # The function saves LR in its prologue (main+426e94), so the BL keeps its return.
 site realtime main 426f54 1e380008 948fa4bf  # fcvtzs w8, s0 in the blur entry update  [3.2.0 only]
 
+# The player's damped velocity update (main+13fad60; its eight callers are the player's movers, the wall and ceiling
+# climbs among them) steps v = r^step * v + sum of r^i * target for i = 1 .. step: it adds the target once per whole
+# 60 Hz frame. A step under 1.0 (any rate above 60 fps) adds nothing, so the climb velocity decays to 0 and DK stops on
+# walls and ceilings (#201). runtime/frame_rate.c damped_sum (patch page +0x260) stands in for the fmov s12, #1.0 that
+# bounds the loop: on a fractional step it puts the closed form of the sum in s9..s11 and +inf in s12, so the loop does
+# not run; on a whole step it leaves s12 = 1.0 and the game's loop. The three movi that clear s9..s11 on the path that
+# skips the loop become nops so the sum reaches the store. At the BL x0, x1 and s8 hold the mover, the target and r; the
+# function saves LR in its prologue (main+13fad70), so the BL keeps its return.
+site realtime main 13fad88 1e2e100c 94505536  # fmov s12, #1.0, the loop bound  [3.2.0 only]
+site realtime main 13fad9c 2f00e40b d503201f  # movi d11, #0 on the path that skips the loop
+site realtime main 13fada0 2f00e40a d503201f  # movi d10, #0
+site realtime main 13fada4 2f00e409 d503201f  # movi d9, #0
+
 # Optional Bananza virtual display and camera aspect. Values are supplied by
 # runtime/dkb_wide.c at page +0x100 (width), +0x104 (height), +0x108 (aspect),
 # +0x10c (aspect / 16:9), +0x110 (render-target pool bytes).
