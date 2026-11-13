@@ -23,11 +23,6 @@
 // Switch 2 sizes (Donkey Kong Bananza): the game sizes its heap from TotalMemorySize (GetInfo 6), so the pool and the
 // heap block are the Switch 2's, not the Switch 1's 0xCD500000 and 4 GiB. The heap is committed as the game asks
 // (SetHeapSize), and Windows commit charge only grows with it.
-// During shader translation (--translate-shaders / --warm-shaders) the game does not need the full 12 GiB heap, so on
-// Linux the stack-and-heap reservation is halved to make a free block easier to find on fragmented address spaces.
-// Only Linux gets this (Windows keeps 16 GiB); macOS keeps its own 13 GiB.
-extern int g_shader_translate_mode;
-
 #ifdef __APPLE__
 // macOS maps nothing between 63 GiB and 448 GiB (a kernel guard region), so the stack and heap block, the alias
 // region and the module window all share the 64 GiB from 448 GiB to 2^39, in whatever holes libmalloc has left. The
@@ -39,9 +34,6 @@ extern int g_shader_translate_mode;
 // the largest that fits, logging when it does.
 #define ALIAS_SIZE (16 * GiB)
 #define ALIAS_MIN (10 * GiB)
-#elif defined(__linux__)
-#define LOW_SIZE (g_shader_translate_mode ? (8 * GiB) : (16 * GiB))
-#define ALIAS_SIZE (64 * GiB)
 #else
 #define LOW_SIZE (16 * GiB)
 #define ALIAS_SIZE (64 * GiB)
@@ -64,7 +56,7 @@ static uint64_t alias_page_count = ALIAS_PAGES;   // pages of the alias region a
 #define DEFAULT_POOL (9 * GiB)
 #define SYSTEM_RESOURCE_BUDGET (32ull << 20)
 #define MAX_STACK_MAPS 4096
-#define REEXEC_LIMIT 100
+#define REEXEC_LIMIT 20
 
 // Horizon memory states, permissions, attributes and results used here.
 enum { ST_FREE = 0, ST_CODE = 3, ST_CODEDATA = 4, ST_NORMAL = 5, ST_STACK = 0xB, ST_THREADLOCAL = 0xC,
@@ -238,9 +230,6 @@ static void reexec_or_fail(const char *what) {
     const char *e = cfg_get("TOTK_REEXEC");
     int n = e ? atoi(e) : 0;
     if (n >= REEXEC_LIMIT) rt_fatal("memory: %s is not free after %d attempts", what, n);
-    // Give the system a moment to free memory/VMAs before re-running; with ASLR on each attempt gets a fresh
-    // layout, so a short wait (as in valentderah's retry-on-OOM) can be enough to clear a transient failure.
-    plat_sleep_ms(100);
     char buf[16];
     snprintf(buf, sizeof buf, "%d", n + 1);
     plat_setenv("TOTK_REEXEC", buf);
