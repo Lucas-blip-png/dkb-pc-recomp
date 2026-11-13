@@ -80,6 +80,11 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_RENDER_SCALE_DESC] = "Size of the 3D scene relative to the game resolution; the game's FSR scales it to "
                                   "that size. Above 100 % smooths jagged edges (supersampling) at a high GPU cost.",
     [UI_MENU_RENDER_SCALE_GAME] = "Game (83 %)",
+    [UI_MENU_SCENE_RES] = "3D scene resolution",
+    [UI_MENU_SCENE_RES_DESC] = "Auto lets the game scale its 3D scene by load, usually to two thirds of the render resolution "
+                               "on each side, then upscale it. Full draws the 3D scene at the whole render resolution: a "
+                               "sharper picture at a higher GPU cost, and the upscaler and DLSS are not used. Applies at the next start.",
+    [UI_MENU_SCENE_RES_AUTO] = "Auto (game)", [UI_MENU_SCENE_RES_FULL] = "Full",
     [UI_MENU_UPSCALER] = "Upscaling method",
     [UI_MENU_UPSCALER_DESC] = "This applies when the game image is smaller than the area it fills on your screen or in your window. "
                               "AMD FSR 1 can keep edges sharper than Bilinear.",
@@ -265,7 +270,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_REPLAY_ASYNC] = "GPU frame prep on its own thread",
     [UI_MENU_REPLAY_ASYNC_DESC] = "Prepares frames for the GPU on a separate thread instead of the game thread. Adds up to one frame of latency.",
     [UI_MENU_REPLAY_THREADS] = "Threads recording big render passes",
-    [UI_MENU_REPLAY_THREADS_DESC] = "Records the draws of big render passes on this many threads at once. Experimental; Off records them on one thread. Faster in busy areas on CPUs with many cores.",
+    [UI_MENU_REPLAY_THREADS_DESC] = "Records the draws of big render passes on this many threads at once. Automatic uses 4 threads on 8 or more logical processors (not on AMD); Off records them on one thread. Faster in busy areas on CPUs with many cores.",
     [UI_MENU_TIMER_1MS] = "1 ms Windows timer",
     [UI_MENU_TIMER_1MS_DESC] = "Raises the system timer resolution to 1 ms for steadier frame pacing.",
     [UI_MENU_PIPE_WAIT] = "Waiting draw handling",
@@ -416,6 +421,11 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_RENDER_SCALE_DESC] = "Размер 3D-сцены относительно разрешения игры; FSR игры доводит её до этого размера. "
                                   "Выше 100 % сглаживает лесенки на краях (суперсэмплинг) ценой большой нагрузки на GPU.",
     [UI_MENU_RENDER_SCALE_GAME] = "Как в игре (83 %)",
+    [UI_MENU_SCENE_RES] = "Разрешение 3D-сцены",
+    [UI_MENU_SCENE_RES_DESC] = "Авто: игра сама меняет размер 3D-сцены по нагрузке, обычно до двух третей разрешения рендеринга "
+                               "по каждой стороне, и затем растягивает её. Полное: 3D-сцена рисуется в полном разрешении "
+                               "рендеринга, картинка чётче, но нагрузка на GPU выше; апскейлер и DLSS не работают. Действует после перезапуска.",
+    [UI_MENU_SCENE_RES_AUTO] = "Авто (игра)", [UI_MENU_SCENE_RES_FULL] = "Полное",
     [UI_MENU_UPSCALER] = "Масштабирование под окно",
     [UI_MENU_UPSCALER_DESC] = "Этот параметр действует, когда изображение игры меньше области вывода на экране или в окне. "
                               "AMD FSR 1 может сохранять края более чёткими, чем билинейное масштабирование.",
@@ -615,7 +625,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_REPLAY_ASYNC] = "Подготовка кадра для GPU в отдельном потоке",
     [UI_MENU_REPLAY_ASYNC_DESC] = "Кадр для GPU готовится в отдельном потоке, а не в потоке игры. Добавляет до одного кадра задержки.",
     [UI_MENU_REPLAY_THREADS] = "Потоки записи больших проходов",
-    [UI_MENU_REPLAY_THREADS_DESC] = "Отрисовки больших проходов записываются сразу в столько потоков. Экспериментально; «Выкл.» — в одном потоке. Быстрее в насыщенных местах на процессорах с большим числом ядер.",
+    [UI_MENU_REPLAY_THREADS_DESC] = "Отрисовки больших проходов записываются сразу в столько потоков. «Автоматически» — 4 потока при 8 и более логических процессорах (кроме AMD); «Выкл.» — в одном потоке. Быстрее в насыщенных местах на процессорах с большим числом ядер.",
     [UI_MENU_TIMER_1MS] = "Таймер Windows 1 мс",
     [UI_MENU_TIMER_1MS_DESC] = "Повышает точность системного таймера до 1 мс для ровного темпа кадров.",
     [UI_MENU_PIPE_WAIT] = "Обработка ожидающих отрисовок",

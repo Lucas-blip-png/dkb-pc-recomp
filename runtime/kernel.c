@@ -359,8 +359,11 @@ static void ap_init(void) {
                 if (f < lo) lo = f;
                 if (f > hi) hi = f;
             }
+        // The store exclusives must lie outside too: a thread stopped in one holds its granule (cpu.h, excl.c).
         const uintptr_t host[] = {(uintptr_t)kern_ap_stub, (uintptr_t)kern_checkpoint, (uintptr_t)rt_svc,
-                                  (uintptr_t)rt_dispatch, (uintptr_t)rt_call};
+                                  (uintptr_t)rt_dispatch, (uintptr_t)rt_call, (uintptr_t)excl_store8,
+                                  (uintptr_t)excl_store16, (uintptr_t)excl_store32, (uintptr_t)excl_store64,
+                                  (uintptr_t)excl_store128};
         int bad = !n || lo >= hi;
         for (unsigned i = 0; i < sizeof host / sizeof *host; i++) bad |= host[i] >= lo && host[i] <= hi;
         if (bad) {

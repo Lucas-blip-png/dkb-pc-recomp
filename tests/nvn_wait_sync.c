@@ -49,6 +49,7 @@ void nvn_mode_trace(unsigned kind, uint64_t cb, uint64_t handle, uint32_t value,
     (void)kind; (void)cb; (void)handle; (void)value; (void)submit;
 }
 void rt_log(const char *fmt, ...) { (void)fmt; }
+void rt_logf(const char *fmt, ...) { (void)fmt; }
 void rt_fatal(const char *fmt, ...) {
     va_list args; va_start(args, fmt); vfprintf(stderr, fmt, args); va_end(args);
     fputc('\n', stderr); exit(70);

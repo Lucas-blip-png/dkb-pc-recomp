@@ -115,3 +115,9 @@ spin main 3dfc08 3dfc1c   # recursive spin lock
 spin main 40b508 40b51c   # recursive spin lock
 spin main 4a9f2c 4a9f40   # recursive spin lock
 spin main 4c0b6c 4c0b80   # recursive spin lock
+
+# Dynamic-resolution ratio store, as in patches-dkb100.txt (1.0.0 3c1624): the page +0x118 ratio replaces the
+# controller's quantised ratio. Same instruction words, found by the unique ldr/str/str/fmov sequence.
+set dkbscene DKB_SCENE 0
+site dkbscene main 38de2c f9407a69 @page:x9 bd411928 f9407a69  # 1.0.0 3c1548, s8
+site dkbscene main 38df08 bd400120 @page:x9 bd411920  # 1.0.0 3c1624

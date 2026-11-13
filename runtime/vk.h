@@ -442,6 +442,11 @@ uint32_t vk_texture_slots_gen(void);
 // its storage address is created, dropped, released or taken back into use. Unlocked; read it before the lookup it
 // guards (a lookup may create an entry). 0 when the slot was never registered: nothing is kept under 0.
 uint64_t vk_texture_slot_token(const dpool_ref *pool, int id);
+// What a token was read from, so that it can be checked again without the texture lock: vk_texture_slot_token_again
+// gives the slot's token while it was not registered again or retired since (the address generation read anew), else 0.
+typedef struct { uint32_t serial, ridx, rgen, aidx, valid; } VkSlotStamp;
+uint64_t vk_texture_slot_token_stamped(const dpool_ref *pool, int id, VkSlotStamp *st);
+uint64_t vk_texture_slot_token_again(const VkSlotStamp *st);
 uint32_t vk_sampler_gen(void);                      // changes whenever a sampler slot is registered
 void vk_texture_gpu_written(const tex_t *t);        // rendered or copied into by the GPU: no re-upload from storage
 // The same for a part the helper thread recorded (vk_spec.h): _ready asks, on the helper, whether the marking can wait
@@ -493,6 +498,7 @@ void vk_dlss_release(void);   // device idle, before it goes away
 // Fence values are ctx->timeline values: each submission signals the next one, in submit order. A value counts as done
 // once the GPU reached it and the completion thread ran its side effects. Guest or host threads.
 void vk_sync_start(void);                  // vk_init (fatal without a device) and the completion thread; idempotent
+uint64_t vk_sync_submit_guest(const uint64_t *handles, int n, uint64_t submitted_ticks);
 uint64_t vk_sync_submit(const uint64_t *handles, int n, uint64_t submitted_ticks); // immutable front-end entry tick
 uint64_t vk_sync_reserve(void);            // asynchronous replay: the value the next queued submission signals
 int vk_sync_fence_wait(uint64_t value, uint64_t timeout_ns);   // 1 when done; 0 on timeout or a value never submitted

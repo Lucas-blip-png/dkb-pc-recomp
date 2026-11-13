@@ -69,6 +69,7 @@ def main():
     if 'static VkCommandBuffer split_impl(' in sync:
         # Follow the real shared split/submit lifecycle while retaining older-source RED comparisons.
         sync_functions = functions('vk_sync.c', ('claim_slot', 'take_slot', 'split_impl', 'vk_sync_split',
+                                                *(('submit_record',) if 'static uint64_t submit_record(' in sync else ()),
                                                 'vk_sync_submit_record'))
         sync_functions += '\n' + between(sync, 'typedef struct { const uint64_t *handles; int n; } ReplayHandles;',
                                           'static int record_handles(')

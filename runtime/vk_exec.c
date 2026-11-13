@@ -51,12 +51,14 @@ static _Thread_local int x_here;   // this thread is inside vk_exec_record (vk_e
 #define PAR_SLICE_MIN 48       // the smallest: below it a slice's fixed costs (a copy of X, cold memos) weigh too much
 #define PAR_EXPECT 1024        // draws of each piece of a target set the last time (par_expect)
 #define PAR_HIST 256
-enum { PAR_WHY_UNSEEN, PAR_WHY_NONE, PAR_WHY_NEW, PAR_WHY_SMALL, PAR_WHY_BANNED, PAR_WHY_NOATT, PAR_WHY_QUERY };
+enum { PAR_WHY_UNSEEN, PAR_WHY_NONE, PAR_WHY_NEW, PAR_WHY_SMALL, PAR_WHY_BANNED, PAR_WHY_NOATT, PAR_WHY_QUERY, PAR_WHY_DUMP,
+       PAR_WHY_NOPASS };
 #define PAR_BAN_AFTER 8   // hazards after which a target set is not sliced again
 
 typedef struct { uint64_t sig; uint32_t draws; uint8_t banned; } ParHist;
 static ParHist par_hist[PAR_HIST];
 static int par_mode = -1;                       // DKB_REPLAY_THREADS: 0 off, else the threads (stage A: 1)
+static int par_threads(void);
 static uint64_t par_t_collect, par_t_own, par_t_wait, par_t_exec;   // ns on the submitting thread (TOTK_TRACE=perf)
 static uint64_t par_t0;
 static volatile int64_t par_rec[2][3];          // slices recorded by the submitting thread [0] and workers [1]: count, draws, ns
@@ -205,13 +207,13 @@ void vk_exec_frame_log(const tex_t *p, uint64_t frame) {
                                   fw[i].h, fw[i].fmt, fw[i].n);
     }
     rt_log("frame %llu: submits %llu passes %llu draws %llu/%llu clears %llu copies %llu dispatches %llu; present %p "
-           "%ux%u/%#x written %d; feedback draws %llu barriers %llu restarts %llu layouts %llu; targets%s",
+           "%ux%u/%#x written %d; feedback draws %llu barriers %llu restarts %llu layouts %llu twin restarts %llu; targets%s",
            (unsigned long long)frame, (unsigned long long)f->submits,
            (unsigned long long)f->passes, (unsigned long long)f->draws, (unsigned long long)f->draws_seen,
            (unsigned long long)f->clears, (unsigned long long)f->copies, (unsigned long long)f->dispatches,
            p ? (const void *)p->mem : NULL, p ? p->d.width : 0, p ? p->d.height : 0, p ? (uint32_t)p->d.format : 0,
            hit, (unsigned long long)f->fb_draws, (unsigned long long)f->fb_barriers, (unsigned long long)f->fb_restarts,
-           (unsigned long long)f->fb_layouts, list);
+           (unsigned long long)f->fb_layouts, (unsigned long long)f->twin_restarts, list);
     memset(f, 0, sizeof *f);
     nfw = 0;
 }
@@ -741,7 +743,7 @@ void vk_exec_barrier(VkExec *ex) { barrier_to(ex, NULL, NULL, 0); }
 
 void vk_exec_pass_begin(VkExec *ex) {
     if (ex->in_pass) return;
-    if (par_slice) { par_hazard = 1; return; }   // a slice cannot open a pass (parallel passes)
+    if (par_slice) { vk_exec_par_hazard(); return; }   // a slice cannot open a pass (parallel passes)
     resolve_rt(ex);
     // Learned targets (VkTexImage.fb_learned) are attached in the feedback layout
     VkImage want[9];
@@ -784,7 +786,8 @@ void vk_exec_pass_begin(VkExec *ex) {
                           .pStencilAttachment = ex->pass_stencil ? &sa : NULL,
                           .flags = pass_secondary ? VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT : 0};
     vkCmdBeginRendering(ex->cb, &ri);
-    pass_draws = 0, pass_tried = 0, pass_sliced = pass_secondary, pass_why = PAR_WHY_UNSEEN;
+    // The replay thread's pass bookkeeping (par_start, vk_exec_pass_end): a helper's part opens passes of its own.
+    if (ex == &X) pass_draws = 0, pass_tried = 0, pass_sliced = pass_secondary, pass_why = PAR_WHY_UNSEEN;
     FRAME->passes++;
     ex->recorded++;
     ex->in_pass = 1;
@@ -792,7 +795,7 @@ void vk_exec_pass_begin(VkExec *ex) {
 
 void vk_exec_pass_end(VkExec *ex) {
     if (!ex->in_pass) return;
-    if (par_slice) { par_hazard = 1; return; }   // a slice cannot end the pass (parallel passes)
+    if (par_slice) { vk_exec_par_hazard(); return; }   // a slice cannot end the pass (parallel passes)
     // The draws this pass's targets take, for the next time (par_start). A pass with fewer draws lowers the count by an
     // eighth only: a big pass comes in several pieces when a counter op ends a collection, and its targets may also
     // take a small pass in the same frame.
@@ -801,7 +804,8 @@ void vk_exec_pass_end(VkExec *ex) {
         static int told;
         if (par_mode > 0 && !pass_sliced && pass_draws >= PAR_SLICE_DRAWS && (told < 24 || told % 1000 == 0 || !++told)) {
             static const char *const why[] = {"no direct draw reached par_start", "not refused", "targets not seen before",
-                                              "targets drew little before", "banned", "no attachment", "queries"};
+                                              "targets drew little before", "banned", "no attachment", "queries",
+                                              "a dump is armed", "the pass did not open again"};
             ParHist *h = par_find(sig, 0);
             told++;   // the first 24, then one in a thousand
             rt_log("vk: a pass of %u draws was not sliced: %s (targets %016llx, slot %u, kept count %u, slot holds %016llx)",
@@ -833,7 +837,7 @@ void vk_exec_pass_end(VkExec *ex) {
 VkCommandBuffer vk_exec_inline_begin(int *reopen) {
     VkExec *ex = &X;
     *reopen = 0;
-    if (par_slice) { par_hazard = 1; return VK_NULL_HANDLE; }   // not inside a slice (parallel passes)
+    if (par_slice) { vk_exec_par_hazard(); return VK_NULL_HANDLE; }   // not inside a slice (parallel passes)
     if (!x_here || !ex->cb) return VK_NULL_HANDLE;
     *reopen = ex->in_pass;
     vk_exec_barrier(ex);   // ends the pass; feedback-layout targets go back to GENERAL
@@ -1019,8 +1023,7 @@ static void maybe_split(VkExec *ex) {
         // With the replay recorded on several threads (TOTK_REPLAY_THREADS above 1) the default is 300 us: in the
         // hills region on eight threads, parts of at least 300 us gave 47-49 fps against 43-47 with 1000 us and 45-47
         // with none, since the GPU starts sooner on the big passes the game waits for within the frame.
-        const char *threads = cfg_get("TOTK_REPLAY_THREADS");
-        if (!cfg_is_set("TOTK_SPLIT_US") && threads && atoi(threads) > 1) us = 300;
+        if (!cfg_is_set("TOTK_SPLIT_US") && par_threads() > 1) us = 300;
         split_ns = us > 0 ? (uint64_t)us * 1000 : 0;
         rt_log("vk: replay command buffer split every %d draws between passes, parts of at least %d us%s", split_n,
                us > 0 ? us : 0, split_n ? "" : " (off)");
@@ -1779,7 +1782,8 @@ static void par_log(void) {
 // uniform snapshot copy, which makes later bindings depend on the draw order (vk_exec_par_order_hazard).
 static int par_collecting(void) { return PC.on; }
 void vk_exec_par_hazard(void) { if (!par_hazard) par_hazard = 1; }
-void vk_exec_par_order_hazard(void) { par_hazard = 2; }
+void vk_exec_par_order_hazard(void) { if (par_hazard < 2) par_hazard = 2; }
+void vk_exec_par_ban(void) { par_hazard = 3; }
 
 static void par_done(void *arg) {   // completion thread: the secondaries of a finished submission can be reused
     ParDone *d = arg;
@@ -1844,14 +1848,19 @@ static void par_wake_workers(void);
 static int par_nworkers;
 
 // At a draw outside a pass: 1 when the pass it opens is sliced (the pass is then open, with secondary contents).
-// TOTK_REPLAY_THREADS (0: off), read once.
+// TOTK_REPLAY_THREADS (0: off), read once. Unset, it is 4 when the process may run on 8 or more logical processors and
+// 0 below that: in the layer -101 scene (RTX 5060 Ti, 1920x1080, 60 fps limit) 4 threads gave 57.0 and 57.2 fps and
+// 63 to 77 frames over 25 ms a minute, against 52.7 and 53.6 fps and 177 to 226 frames without (docs/dkb-lowend.md).
+// Not on AMD: secondary command buffers recorded on several threads were measured on NVIDIA only, and AMD's driver
+// already lost the device with the recorder thread (vk_rec.c rec_begin).
 static int par_threads(void) {
     if (par_mode < 0) {
         const char *e = cfg_get("TOTK_REPLAY_THREADS");
-        par_mode = e && *e ? atoi(e) : 0;
+        par_mode = e && *e ? atoi(e) : !vk_caps.amd && plat_cpu_usable() >= 8 ? 4 : 0;
         if (par_mode < 0) par_mode = 0;
         if (par_mode) rt_log("vk: passes of %d or more draws are recorded in slices of up to %d draws into secondary command buffers "
-                             "(TOTK_REPLAY_THREADS=%d: recorded by that many threads)", PAR_MIN_DRAWS, PAR_SLICE_DRAWS, par_mode);
+                             "(TOTK_REPLAY_THREADS=%d%s: recorded by that many threads)", PAR_MIN_DRAWS, PAR_SLICE_DRAWS, par_mode,
+                             e && *e ? "" : ", the default");
     }
     return par_mode;
 }
@@ -1862,11 +1871,12 @@ static int par_start(VkExec *ex) {
     // again below. One look per pass. Disabled rendering does not matter: the slices skip their draws as the walk would.
     if (!par_mode || ex != &X || (ex->in_pass && pass_tried)) return 0;
     pass_tried = 1, pass_why = PAR_WHY_NONE;
-    if (vk_dlss_wanted()) return 0;   // vk_dlss.c notes the scene pass from its draws, on the replaying thread
+    // DLSS is not a reason to stay unsliced: the collection notes the scene from the collected draws on this thread
+    // (par_take), and the slices only read the jitter.
     if (vk_dump_armed) {   // the dump follows draws one by one, on one thread
         static int told;
-        if (!told++) rt_log("vk: TOTK_DUMP is set: no pass is sliced in this run (TOTK_REPLAY_THREADS has no effect)");
-        return 0;
+        if (!told++) rt_log("vk: TOTK_DUMP is armed: passes are not sliced while it dumps");
+        return pass_why = PAR_WHY_DUMP, 0;
     }
     resolve_rt(ex);
     uint64_t sig = par_sig(ex);
@@ -1890,7 +1900,7 @@ static int par_start(VkExec *ex) {
     vk_exec_pass_begin(ex);
     pass_secondary = 0;
     pass_tried = 1;
-    if (!ex->in_pass) return par_no[4]++, vk_exec_oq_pass_ended(ex), 0;
+    if (!ex->in_pass) return pass_why = PAR_WHY_NOPASS, par_no[4]++, vk_exec_oq_pass_ended(ex), 0;
     PC.oq = qopen, PC.oq_flags = qf;
     if (!PC.ops) {
         PC.ops = malloc(sizeof *PC.ops * PAR_MAX_OPS), PC.snap = malloc(sizeof *PC.snap * PAR_MAX_SLICES);
@@ -1931,7 +1941,8 @@ static int par_size(void) {
 }
 
 static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
-    if (PC.nops == PAR_MAX_OPS) return 0;
+    // A dump armed during the collection ends it: the dump follows draws one by one, on this thread.
+    if (PC.nops == PAR_MAX_OPS || vk_dump_armed) return 0;
     switch (h->op) {
     case OP_SET_RT:
         return !memcmp(&ex->rt, a, sizeof ex->rt);   // the same targets again: the pass goes on
@@ -1957,6 +1968,10 @@ static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
         }
         PC.slice_draws++, PC.draws++;
         vk_exec_frame.draws_seen++;
+        // DLSS takes the scene's depth and camera from the first scene draw of a pass, in draw order. The slices are
+        // recorded at once, so the collection notes it here from ex, which has the draw's targets and binds: a draw
+        // the slice later skips (a pipeline still building) may note it, with the same targets and camera.
+        if (ex->depth.image && vk_dlss_wanted()) vk_dlss_scene_draw(ex);
         break;
     default:
         return 0;
@@ -2192,11 +2207,13 @@ static void par_flush(VkExec *ex) {
         // A feedback target learned inside a slice is one: its pass restart was dropped, and the next pass attaches
         // the target in the feedback layout, so a few hazards are expected; a set that keeps having them is left alone.
         par_no[3]++;
-        if (hazard == 2 && e->banned < PAR_BAN_AFTER) {
-            // A draw of a slice stored into a range a uniform snapshot copy covers: which later bindings take the copy
-            // follows the draw order, which slices recorded at once do not keep.
+        if (hazard >= 2 && e->banned < PAR_BAN_AFTER) {
+            // 2: a draw of a slice stored into a range a uniform snapshot copy covers: which later bindings take the copy
+            // follows the draw order, which slices recorded at once do not keep. 3: a draw samples an image that needs a
+            // depth twin, which only the primary can copy (it ends the pass), and will on every frame.
             e->banned = PAR_BAN_AFTER;
-            rt_log("vk: a draw of a sliced pass stores over a uniform snapshot copy: those targets are not sliced again");
+            rt_log(hazard == 2 ? "vk: a draw of a sliced pass stores over a uniform snapshot copy: those targets are not sliced again"
+                               : "vk: a draw of a sliced pass samples an image that needs a depth twin: those targets are not sliced again");
         } else if (e->banned < 255 && ++e->banned == PAR_BAN_AFTER)
             rt_log("vk: a sliced pass needed a pass or barrier change inside a slice %d times: those targets are not sliced again",
                    PAR_BAN_AFTER);
@@ -2297,7 +2314,7 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
         int par = vk_spec_on() && !vk_mem_shadow_on() && !par_threads();
         if (vk_spec_on() && par_mode > 0) {
             static int told;
-            if (!told++) rt_log("vk: TOTK_REPLAY_THREADS is set: the helper threads of TOTK_REPLAY_PAR take no run");
+            if (!told++) rt_log("vk: passes are recorded on several threads (TOTK_REPLAY_THREADS): the helper threads of TOTK_REPLAY_PAR take no run");
         }
         P.rec += par;
         for (int i = 0; i < n; i++) {

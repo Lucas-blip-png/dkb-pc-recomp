@@ -35,6 +35,8 @@ def main():
     code += '\n' + function(execute, 'static int record_impl(')
     code += '\n' + function(execute, 'int vk_exec_record(')
     code += '\n' + function(execute, 'int vk_exec_record_work(')
+    if 'static uint64_t submit_record(' in sync:
+        code += '\n' + function(sync, 'static uint64_t submit_record(')
     code += '\n' + function(sync, 'uint64_t vk_sync_submit_record(')
     replay_start = sync.index('typedef struct { const uint64_t *handles; int n; } ReplayHandles;')
     code += '\n' + sync[replay_start:sync.index('} ReplayHandles;', replay_start) + len('} ReplayHandles;')]

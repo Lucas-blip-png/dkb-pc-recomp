@@ -149,6 +149,12 @@ class Runtime(unittest.TestCase):
         self.assertEqual(failures, [])
         print(f'runtime: {len(plan)} keys, {sum(len(s) for s in plan.values())} values', file=sys.stderr)
 
+    def test_dkb_prefix_in_file(self):
+        # The issues ask for DKB_ names in dkb.ini; the file takes them as the environment does.
+        k, d, v, _ = METAS[0]
+        val = next(s for s in samples(k, d, v) if s != self.base[k])
+        self.assertEqual(self.dump({'DKB_'+k: val})[k], val)
+
     def test_invalid_range_values_fall_back_to_default(self):
         # Lists are not validated by cfg.c (a bad entry reaches the consumer as is); a range row's number must parse.
         ranged = [k for k, _, v, _ in METAS if v and '..' in v]

@@ -12,6 +12,7 @@
 #include <sys/mman.h>
 #endif
 
+#define CPU_EXCL_DEFINE   // the exclusive monitor's table and stores (runtime/excl.c in the game)
 #include "cpu.h"
 
 extern GuestFn tests[];

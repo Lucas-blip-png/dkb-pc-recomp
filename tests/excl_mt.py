@@ -20,6 +20,7 @@ SRC = r'''
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#define CPU_EXCL_DEFINE   // one translation unit: the monitor's table and stores live here
 #include "cpu.h"
 
 static volatile int step;

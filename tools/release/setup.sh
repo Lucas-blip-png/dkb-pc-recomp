@@ -96,8 +96,9 @@ case "${1:-}" in
     echo "usage: $0 --check"
     echo "       $0 --nup FILE --dest DIR [installer options]"
     echo "       $0 --exefs DIR --romfs DIR --dest DIR [installer options]"
+    echo "       $0 --source FILE_OR_DIR --dest DIR [installer options]"
     echo "--nup is your Donkey Kong Bananza .nup file (1.0.0, or 3.2.0 when the update is inside), or --exefs and --romfs"
-    echo "are the folders of a 1.0.0 or 3.2.0 dump; --dest is where the game is built."
+    echo "are the folders of a 1.0.0 or 3.2.0 dump; --source takes either as one path; --dest is where the game is built."
     echo "See README-SETUP.txt and: .venv/bin/python -m installer --help"
     exit 2
     ;;

@@ -134,3 +134,15 @@ spin main 375968 37597c   # recursive spin lock
 spin main 3a2c08 3a2c1c   # recursive spin lock
 spin main 56976c 569780   # recursive spin lock
 spin main 5803b4 5803c8   # recursive spin lock
+
+# The game's dynamic-resolution controller (the function at main 3c12b4) steps a ratio of the virtual display
+# to the 3D scene size by frame-time load, quantises it against a table (1.375, 1.5, 1.667 ... 3.0) and stores
+# it at 3c1628. Under emulation it settles at 1.5, so the 3D scene is 2/3 of the display on each side. Load the
+# ratio from page +0x118 instead (runtime/dkb_wide.c, TOTK_SCENE_RES, 1.0 draws the scene at the full display).
+# The next instruction overwrites x9, so it is free scratch. Off by default: the game's own control runs.
+# The controller also keeps the unquantised ratio in s8, which its hold test (fcmp s8, s9 at 3c154c) and two
+# per-view scales (3c1650, 3c172c) read: load the same ratio into s8 at the join 3c1548, whose own load
+# overwrites x9 right after, so all of them see the forced ratio.
+set dkbscene DKB_SCENE 0
+site dkbscene main 3c1548 f9407a69 @page:x9 bd411928 f9407a69
+site dkbscene main 3c1624 bd400120 @page:x9 bd411920

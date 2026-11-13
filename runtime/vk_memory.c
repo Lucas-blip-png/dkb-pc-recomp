@@ -17,6 +17,7 @@
 #include "cfg.h"
 #include "gfx.h"
 #include "host.h"
+#include "mirror_sparse_spv.h"
 #include "nvn_api.h"
 #include "msort.h"
 #include "nvn_pool_index.h"
@@ -98,6 +99,7 @@ static PoolRec **phys_list;            // physical pools by key, for MapVirtual 
 static int nphys, cap_phys;
 static int32_t n_imports, n_import_failures;
 static volatile uint64_t import_alloc_ns;   // all vkAllocateMemory calls that imported guest memory (vk_mem_census logs it)
+static volatile uint64_t import_touch_ns, import_total_ns;   // mem_touch and all of import_pool, same census line
 static PlatMutex lazy_lock = PLAT_MUTEX_INIT;   // one deferred import at a time (the driver serializes them anyway)
 static volatile int32_t n_lazy_imports;         // pools imported on their first GPU use instead of at nvnMemoryPoolInitialize
 static PFN_vkGetMemoryHostPointerPropertiesEXT p_host_props;
@@ -123,8 +125,18 @@ static int memory_type(const VkCtx *c, uint32_t bits, VkMemoryPropertyFlags want
 }
 
 // CPU-visible storage: the guest pages themselves become the buffer's memory (VK_EXT_external_memory_host).
+static int import_pool_timed(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size);
 static int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
+    uint64_t t0 = qpc();
     mem_touch(addr, size);   // the driver pins the pages: reserved ones of a lazy heap (TOTK_HEAP_LAZY) would fail
+    uint64_t t1 = qpc();
+    int ok = import_pool_timed(c, r, addr, size);
+    __atomic_add_fetch(&import_touch_ns, t1 - t0, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&import_total_ns, qpc() - t0, __ATOMIC_RELAXED);
+    return ok;
+}
+
+static int import_pool_timed(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     if (shadow_on) return shadow_pool(c, r, addr, size);
     if (!p_host_props)
         p_host_props = (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(c->device, "vkGetMemoryHostPointerPropertiesEXT");
@@ -784,11 +796,17 @@ void vk_mem_census(uint64_t frame) {
     typedef struct { int kind; uint32_t flags; uint64_t n, bytes; } Group;
     Group g[64];
     int ng = 0;
-    uint64_t total[4] = {0}, count[4] = {0}, used_n = 0, used_bytes = 0;
+    uint64_t total[4] = {0}, count[4] = {0}, used_n = 0, used_bytes = 0, prev_hi = 0, near_n = 0, gap_bytes = 0;
     plat_mutex_lock_shared(&pool_lock);
     for (int i = 0; i < pool_index.n; i++) {
         const PoolRec *r = pool_index.e[i].buf;
-        if (r->kind == POOL_IMPORT && r->used) used_n++, used_bytes += r->size;
+        if (r->kind == POOL_IMPORT && r->used) {
+            used_n++, used_bytes += r->size;
+            // Neighbours: a used imported pool that starts within 1 MiB of the previous one's import end (the index is
+            // sorted by address), so one larger import could have covered both.
+            if (prev_hi && r->import_lo >= prev_hi && r->import_lo - prev_hi <= (1u << 20)) near_n++, gap_bytes += r->import_lo - prev_hi;
+            if (r->import_hi) prev_hi = r->import_hi;
+        }
         int j = 0;
         while (j < ng && (g[j].kind != r->kind || g[j].flags != r->flags)) j++;
         if (j == ng && ng < 64) g[ng++] = (Group){r->kind, r->flags, 0, 0};
@@ -806,6 +824,9 @@ void vk_mem_census(uint64_t frame) {
     rt_log("mem: of the %llu imported pools, %llu (%.1f MiB) were resolved by the GPU so far; %.0f ms in all imports (%d, %d of them on first GPU use)",
            (unsigned long long)count[POOL_IMPORT], (unsigned long long)used_n, used_bytes / 1048576.0,
            __atomic_load_n(&import_alloc_ns, __ATOMIC_RELAXED) / 1e6, n_imports, n_lazy_imports);
+    rt_log("mem: imports took %.0f ms in all, %.0f ms of it committing and touching the pages; %llu used pools start within "
+           "1 MiB of the previous one (%.1f MiB of gaps)", __atomic_load_n(&import_total_ns, __ATOMIC_RELAXED) / 1e6,
+           __atomic_load_n(&import_touch_ns, __ATOMIC_RELAXED) / 1e6, (unsigned long long)near_n, gap_bytes / 1048576.0);
     static const char *const kinds[] = {"", "import", "physical", "virtual"};
     for (int j = 0; j < ng; j++) {
         char f[160];
@@ -1462,6 +1483,7 @@ enum { MR_BUDGET, MR_UNTRACKED, MR_OVERLAP, MR_ALLOC, MR_N };
 
 int vk_mirror_on;
 static int mirror_verify;
+static int mirror_sparse;
 static int mirror_gap = 2;             // pre-snap: hot pools at most this many 2 MiB regions apart share one query
 static PoolRec **mlist;                // pool_lock: mirrored pools by import_lo
 static int nm, mcap;
@@ -1500,6 +1522,8 @@ static PlatMutex mirror_stat_lock = PLAT_MUTEX_INIT;
 static volatile int64_t m_live_n, m_live_bytes, m_refused_n[MR_N], m_refused_bytes[MR_N];
 static volatile int64_t m_flush_calls, m_flush_bytes, v_pages, v_skipped, v_mismatch;
 
+static void sparse_cache_open(void);
+
 static void mirror_mode(int discrete) {
     const char *e = cfg_value("TOTK_MEMORY");
     int mode = discrete ? 1 : 0;   // 0 import, 1 mirror, 2 verify
@@ -1512,6 +1536,9 @@ static void mirror_mode(int discrete) {
     }
     vk_mirror_on = mode > 0;
     mirror_verify = mode == 2;
+    const char *sparse = cfg_get("TOTK_SPARSE_MIRROR_COPY");
+    mirror_sparse = vk_mirror_on && sparse && !strcmp(sparse, "1");
+    if (mirror_sparse) sparse_cache_open();
     const char *g = cfg_get("TOTK_MIRROR_GAP");
     mirror_gap = g && *g ? atoi(g) : 2;
     if (mirror_gap < 0) mirror_gap = 0;
@@ -1532,6 +1559,38 @@ static void mirror_mode(int discrete) {
            mode ? "pools used as buffers get a device-local mirror" : "every CPU-visible pool is imported host memory");
 }
 
+static void range_add(MRange **a, int *n, int *cap, PoolRec *r, uint64_t off, uint64_t size);
+
+// The write-back ranges a thread recording slices of parallel passes adds (vk_mem_count_quiet on), in a list of its own
+// that vk_mem_mirror_end moves into wbl: every slice of a submission is recorded before its end, so the lists are not
+// written then. With eight threads adding to wbl under mirror_lock, a profile had 7% of the slices' time waiting for
+// the lock in vk_mem_gpu_wrote.
+typedef struct WbLocal { MRange *a; int n, cap; struct WbLocal *next; } WbLocal;
+static WbLocal *wb_locals;   // every thread's, added under mirror_lock and kept until exit
+static _Thread_local WbLocal *wb_mine;
+
+static void wb_local_add(PoolRec *r, uint64_t off, uint64_t size) {
+    if (!wb_mine) {
+        WbLocal *w = calloc(1, sizeof *w);
+        if (!w) rt_fatal("vk: out of memory");
+        plat_mutex_lock(&mirror_lock);
+        w->next = wb_locals;
+        __atomic_store_n(&wb_locals, w, __ATOMIC_RELEASE);
+        plat_mutex_unlock(&mirror_lock);
+        wb_mine = w;
+    }
+    range_add(&wb_mine->a, &wb_mine->n, &wb_mine->cap, r, off, size);
+}
+
+static void wb_locals_take(void) {   // replay thread, no slice being recorded
+    plat_mutex_lock(&mirror_lock);
+    for (WbLocal *w = wb_locals; w; w = w->next) {
+        for (int i = 0; i < w->n; i++) range_add(&wbl, &nwbl, &cwbl, w->a[i].r, w->a[i].off, w->a[i].size);
+        w->n = 0;
+    }
+    plat_mutex_unlock(&mirror_lock);
+}
+
 static void range_add(MRange **a, int *n, int *cap, PoolRec *r, uint64_t off, uint64_t size) {
     if (*n && (*a)[*n - 1].r == r && (*a)[*n - 1].off + (*a)[*n - 1].size == off) {
         (*a)[*n - 1].size += size;
@@ -1545,13 +1604,195 @@ static void range_add(MRange **a, int *n, int *cap, PoolRec *r, uint64_t off, ui
 #define MRANGE_LESS(x, y) ((x)->r != (y)->r ? (uintptr_t)(x)->r < (uintptr_t)(y)->r : (x)->off < (y)->off)
 MSORT_DEFINE(sort_ranges, MRange, MRANGE_LESS)   // by pool, then offset, without a call per comparison (msort.h)
 
-// Records the ranges as one vkCmdCopyBuffer per pool, overlapping and adjacent ranges merged; to_mirror: buf -> mbuf,
-// else mbuf -> buf. Returns the commands recorded; adds what they move to *bytes and *copies.
-static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint64_t *bytes, uint64_t *copies) {
+// Local experiment: one dispatch for a pool's many small write-back ranges. The usual transfer path
+// handles large pools, bulk copies, and any unsupported alignment or device capability.
+static struct {
+    int tried;
+    PFN_vkCmdPushDescriptorSetKHR push;
+    VkDescriptorSetLayout set;
+    VkPipelineLayout layout;
+    VkPipeline pipeline;
+} sparse_copy;
+
+typedef struct {
+    uint32_t start, words;
+} SparseRange;
+
+typedef struct {
+    VkBuffer buffer;
+    VmaAllocation allocation;
+    SparseRange *ranges;
+    VkDeviceSize bytes;
+    uint32_t used;
+} SparseBatch;
+
+enum { SPARSE_CACHE_COUNT = 8, SPARSE_CACHE_BYTES = 2 * 1024 * 1024 };
+static struct {
+    PlatMutex lock;
+    SparseBatch *ready[SPARSE_CACHE_COUNT];
+    VkDeviceSize bytes;
+    int n, closed;
+} sparse_cache;   // ready buffers have reached their submission's completion callback
+
+static void sparse_cache_open(void) {
+    plat_mutex_lock(&sparse_cache.lock);
+    sparse_cache.closed = 0;
+    plat_mutex_unlock(&sparse_cache.lock);
+}
+
+static SparseBatch *sparse_cache_take(VkDeviceSize bytes) {
+    SparseBatch *batch = NULL;
+    plat_mutex_lock(&sparse_cache.lock);
+    int best = -1;
+    for (int i = 0; i < sparse_cache.n; i++) {
+        VkDeviceSize size = sparse_cache.ready[i]->bytes;
+        if (size >= bytes && (best < 0 || size < sparse_cache.ready[best]->bytes)) best = i;
+    }
+    if (best >= 0) {
+        batch = sparse_cache.ready[best];
+        sparse_cache.ready[best] = sparse_cache.ready[--sparse_cache.n];
+        sparse_cache.bytes -= batch->bytes;
+    }
+    plat_mutex_unlock(&sparse_cache.lock);
+    if (batch) batch->used = 0;
+    return batch;
+}
+
+static int sparse_copy_init(VkCtx *c) {
+    if (sparse_copy.tried) return sparse_copy.pipeline != VK_NULL_HANDLE;
+    sparse_copy.tried = 1;
+    sparse_copy.push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->device, "vkCmdPushDescriptorSetKHR");
+    if (!sparse_copy.push) return 0;
+    VkDescriptorSetLayoutBinding bindings[3];
+    for (uint32_t i = 0; i < 3; i++)
+        bindings[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                                     VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+    VkDescriptorSetLayoutCreateInfo set = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+                                           .bindingCount = 3, .pBindings = bindings};
+    if (vkCreateDescriptorSetLayout(c->device, &set, NULL, &sparse_copy.set) != VK_SUCCESS) return 0;
+    VkPushConstantRange push = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t)};
+    VkPipelineLayoutCreateInfo layout = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                         .setLayoutCount = 1, .pSetLayouts = &sparse_copy.set,
+                                         .pushConstantRangeCount = 1, .pPushConstantRanges = &push};
+    if (vkCreatePipelineLayout(c->device, &layout, NULL, &sparse_copy.layout) != VK_SUCCESS) return 0;
+    VkShaderModule shader;
+    VkShaderModuleCreateInfo module = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                       .codeSize = sizeof mirror_sparse_spv, .pCode = mirror_sparse_spv};
+    if (vkCreateShaderModule(c->device, &module, NULL, &shader) != VK_SUCCESS) return 0;
+    VkComputePipelineCreateInfo pipeline = {
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                  .module = shader, .pName = "main"},
+        .layout = sparse_copy.layout
+    };
+    VkResult result = vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &pipeline, NULL, &sparse_copy.pipeline);
+    vkDestroyShaderModule(c->device, shader, NULL);
+    return result == VK_SUCCESS;
+}
+
+static SparseBatch *sparse_batch_create(VkCtx *c, int capacity) {
+    VkDeviceSize bytes = (VkDeviceSize)capacity * sizeof(SparseRange);
+    if (bytes > c->props.limits.maxStorageBufferRange || !sparse_copy_init(c)) return NULL;
+    SparseBatch *cached = sparse_cache_take(bytes);
+    if (cached) return cached;
+    SparseBatch *batch = calloc(1, sizeof *batch);
+    if (!batch) return NULL;
+    VkBufferCreateInfo buffer = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = bytes,
+                                 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+    VmaAllocationCreateInfo allocation = {
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    };
+    VmaAllocationInfo mapped;
+    if (vmaCreateBuffer(c->vma, &buffer, &allocation, &batch->buffer, &batch->allocation, &mapped) != VK_SUCCESS) {
+        free(batch);
+        return NULL;
+    }
+    if (!mapped.pMappedData) {
+        vmaDestroyBuffer(c->vma, batch->buffer, batch->allocation);
+        free(batch);
+        return NULL;
+    }
+    batch->bytes = bytes;
+    batch->ranges = mapped.pMappedData;
+    return batch;
+}
+
+static void sparse_batch_free(void *arg) {
+    SparseBatch *batch = arg;
+    vmaDestroyBuffer(vk_ctx()->vma, batch->buffer, batch->allocation);
+    free(batch);
+}
+
+static void sparse_batch_complete(void *arg) {
+    SparseBatch *batch = arg;
+    plat_mutex_lock(&sparse_cache.lock);
+    if (!sparse_cache.closed && sparse_cache.n < SPARSE_CACHE_COUNT &&
+        batch->bytes <= SPARSE_CACHE_BYTES - sparse_cache.bytes) {
+        sparse_cache.ready[sparse_cache.n++] = batch;
+        sparse_cache.bytes += batch->bytes;
+        plat_mutex_unlock(&sparse_cache.lock);
+        return;
+    }
+    plat_mutex_unlock(&sparse_cache.lock);
+    sparse_batch_free(batch);
+}
+
+static void sparse_cache_close(void) {
+    SparseBatch *ready[SPARSE_CACHE_COUNT];
+    plat_mutex_lock(&sparse_cache.lock);
+    sparse_cache.closed = 1;
+    int n = sparse_cache.n;
+    memcpy(ready, sparse_cache.ready, (size_t)n * sizeof *ready);
+    sparse_cache.n = 0;
+    sparse_cache.bytes = 0;
+    plat_mutex_unlock(&sparse_cache.lock);
+    for (int i = 0; i < n; i++) sparse_batch_free(ready[i]);
+}
+
+static int sparse_ranges(VkCtx *c, uint64_t size, int count) {
+    if (count < 64 || size > 4u * 1024 * 1024 || size > c->props.limits.maxStorageBufferRange ||
+        (uint32_t)count > c->props.limits.maxComputeWorkGroupCount[0]) return 0;
+    uint64_t total = 0;
+    for (int i = 0; i < count; i++) {
+        const VkBufferCopy *region = &mregions[i];
+        if ((region->srcOffset | region->size) & 3) return 0;
+        total += region->size;
+    }
+    return total <= 128u * (uint64_t)count;
+}
+
+static void sparse_dispatch(VkCommandBuffer cb, SparseBatch *batch, PoolRec *pool, uint64_t size, int count) {
+    uint32_t first = batch->used;
+    for (int i = 0; i < count; i++) {
+        const VkBufferCopy *region = &mregions[i];
+        batch->ranges[batch->used++] = (SparseRange){(uint32_t)(region->srcOffset / 4), (uint32_t)(region->size / 4)};
+    }
+    VkDescriptorBufferInfo infos[3] = {{pool->mbuf, 0, size}, {pool->buf, 0, size}, {batch->buffer, 0, batch->bytes}};
+    VkWriteDescriptorSet writes[3];
+    for (uint32_t i = 0; i < 3; i++)
+        writes[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                           .dstBinding = i, .descriptorCount = 1,
+                                           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &infos[i]};
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, sparse_copy.pipeline);
+    rec_push(sparse_copy.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, sparse_copy.layout, 0, 3, writes);
+    vkCmdPushConstants(cb, sparse_copy.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof first, &first);
+    vkCmdDispatch(cb, (uint32_t)count, 1, 1);
+}
+
+// Merge ranges by pool before recording either a transfer or an exact sparse write-back dispatch.
+// to_mirror: buf -> mbuf, else mbuf -> buf. Returns the command count; accumulates bytes and ranges moved.
+static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint64_t *bytes, uint64_t *copies,
+                       uint64_t fence) {
     static MRange *sbuf;   // the replaying thread's (vk_mem_mirror_begin and _end)
     static size_t scap;
     sort_ranges(a, (size_t)n, &sbuf, &scap);
     int rec = 0;
+    VkCtx *c = mirror_sparse && !to_mirror ? vk_ctx() : NULL;
+    SparseBatch *sparse = NULL;
+    int sparse_tried = 0;
     for (int i = 0; i < n;) {
         PoolRec *r = a[i].r;
         uint64_t lim = r->import_hi - r->import_lo;
@@ -1569,12 +1810,27 @@ static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint
             mregions[k++] = (VkBufferCopy){lo, lo, hi - lo};
         }
         if (!k) continue;
-        if (to_mirror) vkCmdCopyBuffer(cb, r->buf, r->mbuf, (uint32_t)k, mregions);
-        else vkCmdCopyBuffer(cb, r->mbuf, r->buf, (uint32_t)k, mregions);
-        rec++;
+        int dispatched = 0;
+        if (c && sparse_ranges(c, lim, k)) {
+            if (!sparse_tried) {
+                sparse = sparse_batch_create(c, n);
+                sparse_tried = 1;
+            }
+            if (sparse) {
+                sparse_dispatch(cb, sparse, r, lim, k);
+                rec += 4;
+                dispatched = 1;
+            }
+        }
+        if (!dispatched) {
+            if (to_mirror) vkCmdCopyBuffer(cb, r->buf, r->mbuf, (uint32_t)k, mregions);
+            else vkCmdCopyBuffer(cb, r->mbuf, r->buf, (uint32_t)k, mregions);
+            rec++;
+        }
         for (int j = 0; j < k; j++) *bytes += mregions[j].size;
         *copies += (uint64_t)k;
     }
+    if (sparse) vk_completion_add(fence, sparse_batch_complete, sparse);
     return rec;
 }
 
@@ -1791,9 +2047,12 @@ void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
     __typeof__(seen[0]) *k = &seen[((uintptr_t)r >> 6 ^ sp->offset >> 4) & 127];
     uint32_t sub = __atomic_load_n(&msub, __ATOMIC_RELAXED);
     if (k->r == r && k->sub == sub && k->off == sp->offset && k->size >= size) return;
-    int locked = mirror_lock_if_shared();
-    range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
-    mirror_unlock(locked);
+    if (count_quiet) wb_local_add(r, sp->offset, size);
+    else {
+        int locked = mirror_lock_if_shared();
+        range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
+        mirror_unlock(locked);
+    }
     *k = (__typeof__(*k)){r, sp->offset, size, sub};
 }
 
@@ -1880,7 +2139,7 @@ void vk_mem_mirror_prologue(VkCommandBuffer cb) {
     if (npend) {
         mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
                  VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
-        copy_ranges(cb, pend, npend, 1, &mrep.upload_bytes, &mrep.upload_copies);
+        copy_ranges(cb, pend, npend, 1, &mrep.upload_bytes, &mrep.upload_copies, 0);
         mbarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         __atomic_store_n(&npend, 0, __ATOMIC_RELAXED);
@@ -1981,13 +2240,20 @@ static int verify_record(VkCommandBuffer cb, uint64_t fence) {
 int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
     if (!vk_mirror_on) return 0;
     int rec = 0;
+    if (__atomic_load_n(&wb_locals, __ATOMIC_ACQUIRE)) wb_locals_take();
     if (nwbl) {
-        mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
-                 VK_ACCESS_2_TRANSFER_READ_BIT);
+        VkPipelineStageFlags2 stage = VK_PIPELINE_STAGE_2_COPY_BIT;
+        VkAccessFlags2 reads = VK_ACCESS_2_TRANSFER_READ_BIT, writes = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        if (mirror_sparse) {
+            stage |= VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            reads |= VK_ACCESS_2_SHADER_READ_BIT;
+            writes |= VK_ACCESS_2_SHADER_WRITE_BIT;
+        }
+        mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, stage, reads);
         for (int i = 0; i < nwbl; i++) wbl[i].r->wb_sub = msub;
         mrep.wb_ranges += (uint64_t)nwbl;
-        rec += copy_ranges(cb, wbl, nwbl, 0, &mrep.wb_bytes, &mrep.wb_copies) + 2;
-        mbarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        rec += copy_ranges(cb, wbl, nwbl, 0, &mrep.wb_bytes, &mrep.wb_copies, fence) + 2;
+        mbarrier(cb, stage, writes,
                  VK_PIPELINE_STAGE_2_HOST_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                  VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         nwbl = 0;
@@ -2043,6 +2309,7 @@ static void mirror_log(uint64_t frame) {
            a.first_n / f, a.first_bytes / f / M, a.wb_bytes / f / M, a.wb_copies / f, fc / f, fb / f / M,
            a.presnap_queries / f, a.presnap_bytes / f / M, a.sync_queries / f, a.prologues / f, qpc_ms(a.presnap_t + a.sync_t) / f,
            qpc_ms(a.presnap_t) / f, qpc_ms(a.sync_t) / f, ver);
+
 }
 
 // With TOTK_TRACE=perf every 600 frames: what holds device-local memory, to see what grows over a long session.
@@ -2469,6 +2736,11 @@ void vk_mem_shutdown(void) {
     vk_queue_lock();
     vkDeviceWaitIdle(c->device);
     vk_queue_unlock();
+    if (mirror_sparse) sparse_cache_close();
+    if (sparse_copy.pipeline) vkDestroyPipeline(c->device, sparse_copy.pipeline, NULL);
+    if (sparse_copy.layout) vkDestroyPipelineLayout(c->device, sparse_copy.layout, NULL);
+    if (sparse_copy.set) vkDestroyDescriptorSetLayout(c->device, sparse_copy.set, NULL);
+    memset(&sparse_copy, 0, sizeof sparse_copy);
     vk_texture_shutdown();
     plat_rmutex_lock(&cmd_lock);
     retire(c, 1);
@@ -2492,6 +2764,7 @@ void vk_mem_shutdown(void) {
     for (int i = 0; i < pool_index.n; i++) destroy_rec(c, pool_index.e[i].buf);
     pool_index.n = 0;
     nm = npend = nwbl = 0;   // mirrors went with their pools
+    for (WbLocal *w = wb_locals; w; w = w->next) w->n = 0;
     plat_mutex_lock(&shadow_lock);
     nstouch = nspend = nsblocked = spend_dirty = 0;   // shadows too
     s_live_n = s_live_bytes = 0;
