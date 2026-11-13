@@ -1,5 +1,7 @@
 // Original CPU provider fixture for the actual prefix-split/readback functions. No Vulkan loader is linked.
 #include <stdarg.h>
+
+void vk_texture_new_submit(void) {}
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

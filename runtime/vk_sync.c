@@ -517,11 +517,13 @@ uint64_t vk_sync_reserve(void) {
     return v;
 }
 
-uint64_t vk_sync_submit_record(VkSyncRecordFn record, void *context, uint64_t submitted_ticks) {
+static uint64_t submit_record(VkSyncRecordFn record, void *context, uint64_t submitted_ticks, int guest) {
     if (!record) rt_fatal("vk: submission without a recorder");
     vk_sync_start();
     VkCtx *c = vk_ctx();
     plat_mutex_lock(&sub_lock);
+    // Keep texture freshness stable while another guest submission is recording.
+    if (guest) vk_texture_new_submit();
     vk_mem_dirty_submit();   // TOTK_TRACE=perf: what a mirror would upload before this submit
     uint64_t fence = __atomic_load_n(&issued, __ATOMIC_ACQUIRE) + 1;
     cur_fence = fence;
@@ -573,6 +575,10 @@ uint64_t vk_sync_submit_record(VkSyncRecordFn record, void *context, uint64_t su
     return fence;
 }
 
+uint64_t vk_sync_submit_record(VkSyncRecordFn record, void *context, uint64_t submitted_ticks) {
+    return submit_record(record, context, submitted_ticks, 0);
+}
+
 typedef struct { const uint64_t *handles; int n; } ReplayHandles;
 
 static int record_handles(VkCommandBuffer cb, uint64_t fence, uint64_t submitted_ticks, void *context) {
@@ -583,6 +589,11 @@ static int record_handles(VkCommandBuffer cb, uint64_t fence, uint64_t submitted
 uint64_t vk_sync_submit(const uint64_t *handles, int n, uint64_t submitted_ticks) {
     ReplayHandles r = {handles, n};
     return vk_sync_submit_record(record_handles, &r, submitted_ticks);
+}
+
+uint64_t vk_sync_submit_guest(const uint64_t *handles, int n, uint64_t submitted_ticks) {
+    ReplayHandles r = {handles, n};
+    return submit_record(record_handles, &r, submitted_ticks, 1);
 }
 
 void vk_completion_add(uint64_t fence, void (*fn)(void *), void *arg) {

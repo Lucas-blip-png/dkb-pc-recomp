@@ -239,6 +239,13 @@ def _insn(mod, a):
     return next(_mdd.disasm(mod.image[a - mod.base:a - mod.base + 4], a), None)
 
 
+# By capstone mnemonic, with the pointer-authentication forms (ARMv8.3) the Switch 2 binaries use: `retab` ends a
+# block like `ret`, `blraa` is a call like `blr`. recomp/jumptables.py _no_fallthrough tests the encodings instead.
+_NO_FALLTHROUGH = {'b', 'br', 'braa', 'braaz', 'brab', 'brabz', 'ret', 'retaa', 'retab', 'eret', 'eretaa', 'eretab',
+                   'brk', 'udf', 'hlt'}
+_CALLS = {'bl', 'blr', 'blraa', 'blraaz', 'blrab', 'blrabz'}
+
+
 def _regno(name):
     """X register number of a capstone register name (w and x views), 31 for sp/zr, None for others."""
     if name in ('fp', 'x29', 'w29'):
@@ -265,7 +272,7 @@ def _writes(ins):
         n = _regno(ins.reg_name(r))
         if n is not None and n < 31:
             out.add(n)
-    if ins.mnemonic in ('bl', 'blr'):
+    if ins.mnemonic in _CALLS:
         out |= CALL_CLOBBERED
     return out
 
@@ -425,7 +432,7 @@ def _ways_in(fc, lo, hi, tables):
     if lo <= fc.entry or any(lo <= t <= hi for ts in tables.values() if ts != 'all' for t in ts):
         return None
     prev = _insn(mod, lo - 4)
-    if prev is None or prev.mnemonic not in ('b', 'br', 'ret'):
+    if prev is None or prev.mnemonic not in _NO_FALLTHROUGH:
         return None
     out = []
     for a in range(fc.entry, fc.end, 4):
@@ -446,7 +453,7 @@ _DEPTH = 4   # predecessor blocks above the dispatch region
 
 
 def _ends_block(ins):
-    return ins is None or _branch_target(ins) is not None or ins.mnemonic in ('br', 'ret', 'brk', 'udf')
+    return ins is None or _branch_target(ins) is not None or ins.mnemonic in _NO_FALLTHROUGH
 
 
 class _Ways:
@@ -475,7 +482,7 @@ class _Ways:
         out = [(a, ins, True) for a, ins in self.into.get(s, ())]
         if s > self.entry:
             p = _insn(self.mod, s - 4)
-            if p is not None and p.mnemonic not in ('b', 'br', 'ret', 'brk', 'udf'):
+            if p is not None and p.mnemonic not in _NO_FALLTHROUGH:
                 out.append((s - 4, p, False))
         return out
 

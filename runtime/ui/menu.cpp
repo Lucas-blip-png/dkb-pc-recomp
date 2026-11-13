@@ -937,11 +937,12 @@ static void tab_advanced(float scale) {
     opt_choice("TOTK_ASYNC_PREEMPT", UI_MENU_ASYNC_PREEMPT, preempt, 3, UI_MENU_ASYNC_PREEMPT_DESC);
     opt_toggle("TOTK_REPLAY_ASYNC", UI_MENU_REPLAY_ASYNC, UI_MENU_REPLAY_ASYNC_DESC);
     {
-        static const char *const vals[] = {"0", "2", "4", "5", "6", "8", "12", "16"};
+        static const char *const vals[] = {"", "0", "2", "4", "5", "6", "8", "12", "16"};   // "": vk_exec.c par_threads picks
         enum { N = sizeof vals / sizeof *vals };
         const char *names[N];
-        names[0] = menu_text(UI_MENU_OFF);
-        for (int i = 1; i < N; i++) names[i] = vals[i];
+        names[0] = menu_text(UI_MENU_AUTO);
+        names[1] = menu_text(UI_MENU_OFF);
+        for (int i = 2; i < N; i++) names[i] = vals[i];
         opt_choice_list("TOTK_REPLAY_THREADS", UI_MENU_REPLAY_THREADS, vals, names, N, UI_MENU_REPLAY_THREADS_DESC);
     }
     opt_toggle("TOTK_TIMER_1MS", UI_MENU_TIMER_1MS, UI_MENU_TIMER_1MS_DESC);

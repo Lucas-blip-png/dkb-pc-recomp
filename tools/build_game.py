@@ -297,7 +297,12 @@ def runtime_sources(skip=()):
     names in skip, so a task adds a file without editing this script."""
     pats = ('*.c', '*.cpp', 'platform/*.c', '*.rc', 'ui/*.cpp', 'third_party/imgui/*.cpp',
             'third_party/imgui/backends/*.cpp')
-    return sorted(p for pat in pats for p in RUNTIME.glob(pat) if p.name not in skip and not other_os(p.name))
+    found = sorted(p for pat in pats for p in RUNTIME.glob(pat) if p.name not in skip and not other_os(p.name))
+    listing = RUNTIME / 'sources.txt'   # written by make_release.py: a release unpacked over an older one leaves
+    if listing.exists():                # files the new release dropped, and compiling them breaks the link
+        keep = set(listing.read_text(encoding='utf-8').split())
+        found = [p for p in found if p.relative_to(RUNTIME).as_posix() in keep]
+    return found
 
 
 def runtime_object(out, src):

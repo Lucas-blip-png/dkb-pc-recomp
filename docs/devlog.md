@@ -3,6 +3,51 @@
 Milestones of DKB Recomp, newest first. The plan they follow is [bananza-plan.md](bananza-plan.md); open work is in
 the [roadmap issue](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/10).
 
+## 13 November 2026
+
+- **A heavy scene, measured.** A player's recording in layer -101 (RTX 5060 Ti, 1920x1080, 60 fps limit, first
+  minute, warm shader cache, 0.3.0 build) runs at 50.5 and 49.8 fps by default. `TOTK_REPLAY_THREADS=4` gives 54.3 fps
+  and cuts the frames over 25 ms from 346 and 370 to 146. A stall of about 0.9 s around frame 1775, almost all replay,
+  shows in every run. The tables are in [dkb-lowend.md](dkb-lowend.md).
+
+## 12 November 2026
+
+- **Release 0.3.0** (a5796d9). Merged after it on bananza (89645fc): #209 (sliced passes under DLSS), #211 (fewer
+  locks in slices), #213 (RecompLauncher for Linux and macOS, by Felitendo), #217 (ABA-safe store exclusive, by
+  thatbananaman08), #222 (one-command test runner `tools/test.py`, 81 tests, by thatbananaman08), #226 (batched
+  write-backs, by oshoubber), #227 (stable texture generation, by oshoubber) and #228 (batched terrain copies, by
+  oshoubber).
+- **The guest's recursive spin lock is gated** (e0f6c66): a thread spinning on a lock whose owner waits for a virtual
+  core now hands its core over.
+- **`TOTK_HEAP_LAZY`** (d635637, Windows, off by default): the guest heap is committed on first touch, so the commit of
+  the first level drops from about 14.5 GiB to about 9.3 GiB.
+
+## 11 November 2026
+
+- **Replay helper threads** (#164 and #185 by Zorkats): long runs of draws translate on up to five helper threads,
+  three from 8 logical processors and two from 4. Also merged: #181 (descriptor memos, each behind its own switch),
+  #182 (replay diagnostics), #184 (inline sort, by GlebShekovtsov), the settings pages #168, #169 and #170 (by
+  oshoubber), and the host seam #178 and #179 (by LiamTheCreat0r).
+- **Low-end baseline:** the first level holds 60, 60, 58.9 and 55.6 fps on 16, 8, 4 and 2 logical processors.
+
+## 10 November 2026
+
+- **HDR** (#150 by wrothgaril) and the radial blur fix (#159). 3840x2160 and 5120x1440 no longer overflow the
+  render-target pool on 1.0.0 (#152, 63e9cf9); the same patch is ported to 3.2.0 but not run there yet.
+
+## 9 November 2026
+
+- **Release 0.2.0.** `upscaler = dlss` is a temporal option with its own jitter, depth and camera motion vectors. The
+  installer tells the user when a newer release exists. Update 3.2.0 gets its code patches. The pool guard (#135 by
+  luis-7654) merged.
+
+## 6 to 8 November 2026
+
+- **Installer and release packaging.** `make_release.py --game dkb` builds the setup zip, a CI workflow publishes it
+  from a version tag, and the build has its own `dkb.log` and `dkb.ini`. Version 0.1.0 was prepared on 6 November
+  (#94). Merged: #79 (shader precompile), #86, #87, #88 and #89 (settings, ultrawide HUD, mouse sensitivity, dynamic
+  frame timing, by oshoubber), #90, #91, #96, and macOS on Apple silicon (#98).
+
 ## 5 November 2026
 
 - **The destructible terrain renders by default.** `native_gs` (#67) is now on unless `TOTK_NATIVE_GS=0`. On an RTX

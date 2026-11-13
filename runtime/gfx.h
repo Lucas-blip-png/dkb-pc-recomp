@@ -147,6 +147,7 @@ void gfx_shader_local_size(const GfxShader *s, uint32_t local[3]);     // CS: th
 // TOTK_TRACE=gfx and the flight recorder: replay counters of the current frame, as the back end counts them.
 typedef struct {
     uint64_t passes, draws_seen, draws, clears, copies, dispatches, submits;
+    uint64_t twin_restarts;   // pass restarts to copy a depth twin (vk_exec_draw.c twin_prepare)
     uint64_t fb_draws, fb_barriers, fb_restarts, fb_layouts;   // feedback loops: draws sampling a written target of
                                                                // their pass, in-pass barriers, pass restarts, layout
                                                                // transitions

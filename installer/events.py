@@ -121,3 +121,51 @@ class Reporter:
         if self.log_file:
             self.log_file.close()
             self.log_file = None
+
+
+class LauncherReporter(Reporter):
+    """The output RecompLauncher's prepare step reads (--prepare): `progress <0..1> <text>` lines on stdout, whose text
+    it shows under its setup step. It ignores every other line, so the JSON events are left out. Each step the plan runs
+    gets an equal share of the bar, and a phase that knows its amount moves within its step's share. An error is shown
+    as the last line's text, so the player reads why before the launcher reports the exit code. The log file is the
+    same as Reporter's."""
+
+    def __init__(self, out=None, log_path=None):
+        super().__init__(out, log_path)
+        self.plan = []
+        self.fraction = 0.0
+
+    def emit(self, type, **fields):
+        event = {'type': type, 't': round(self.elapsed(), 2), **fields}
+        line = self.launcher_line(event)
+        if line:
+            with self.lock:
+                self.out.write(line + '\n')
+                self.out.flush()
+        self.log(self.describe(event))
+        return event
+
+    def launcher_line(self, e):
+        kind = e['type']
+        if kind == 'plan':
+            self.plan = list(e['run'])
+            return None
+        if kind == 'step' and e['state'] == 'started':
+            return self.line(e['step'], 0.0, render(self.catalog, 'step.' + e['step']))
+        if kind == 'progress':
+            within = e['done'] / e['total'] if e.get('total') else 0.0
+            return self.line(e['step'], within, render(self.catalog, f'phase.{e["step"]}.{e["phase"]}'))
+        if kind == 'error':
+            return self.line(None, 0.0, render(self.catalog, e['id'], e.get('params')))
+        if kind == 'end' and e['result'] == 'ok':
+            self.fraction = 1.0
+            return self.line(None, 0.0, render(self.catalog, 'ui.state_done'))
+        return None
+
+    def line(self, step, within, text):
+        """The bar only moves forward: a step that runs a second phase from 0 does not pull it back."""
+        if step in self.plan:
+            share = (self.plan.index(step) + min(within, 1.0)) / len(self.plan)
+            self.fraction = max(self.fraction, share)
+        text = ' '.join(text.split())   # one line, whatever the catalog text holds
+        return f'progress {self.fraction:.3f} {text}'

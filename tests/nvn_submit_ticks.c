@@ -108,7 +108,7 @@ static void complete_one(void) {
 }
 // Vulkan queue adapter. The real vk_sync_submit forwarding hop is also checked by vk_resource_frontier_test.py.
 #if BY_VALUE_API
-uint64_t vk_sync_submit(const uint64_t *h,int n,uint64_t stamp) {
+uint64_t vk_sync_submit_guest(const uint64_t *h,int n,uint64_t stamp) {
     uint64_t f=++issued;vk_exec_record((VkCommandBuffer)1,h,n,f,stamp);
 #else
 uint64_t vk_sync_submit(const uint64_t *h,int n) {

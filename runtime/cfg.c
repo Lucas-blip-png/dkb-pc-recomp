@@ -47,8 +47,8 @@ static const char *const known[] = {
     "RENDER_SCALE", "REPLAY_ASYNC", "REPLAY_HELPERS", "REPLAY_PAR", "REPLAY_THREADS",
     "REPLAY_CHECK", "RESOLVE_CHECK", "ROMFS", "ROMFS_INDEX", "ROMFS_MMAP", "ROMFS_MODS", "ROMFS_PATCHES",
     "ROMFS_PROOF_DIR", "ROMFS_VERIFY", "RUMBLE", "RUMBLE_CURVE", "RUMBLE_STRENGTH", "RUMBLE_TRIGGERS", "SHADER_CACHE",
-    "SHADER_MEMO", "SHARED_FONTS", "SHARPNESS", "SHOTS", "SHOTS_DIR", "SHOTS_FULL", "SMAA", "SPEED_PROBE", "SPIN", "SPIN_HANDOFF_US", "SPLIT_DRAWS", "SPLIT_US", "STICK_DEADZONE", "SVC_SLOW", "SWKBD_ANSWER",
-    "SWKBD_TEST", "TEST_PAD", "TEST_PREPARE_SHADERS", "TEX_ALIAS", "TEX_HASH", "TEX_MEMO", "TEX_VRAM_PRESSURE", "TIMER_1MS", "REC_BATCH", "TRACE", "UBO_SNAPSHOT", "UPSCALER", "VK_DYN_A2C", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
+    "SHADER_MEMO", "SHARED_FONTS", "SHARPNESS", "SHOTS", "SHOTS_DIR", "SHOTS_FULL", "SMAA", "SPARSE_MIRROR_COPY", "SPEED_PROBE", "SPIN", "SPIN_HANDOFF_US", "SPLIT_DRAWS", "SPLIT_US", "STICK_DEADZONE", "SVC_SLOW", "SWKBD_ANSWER",
+    "SWKBD_TEST", "TEST_PAD", "TEST_PREPARE_SHADERS", "TEX_ALIAS", "TEX_HASH", "TEX_MEMO", "TEX_REPEAT", "TEX_VRAM_PRESSURE", "TIMER_1MS", "REC_BATCH", "TRACE", "UBO_SNAPSHOT", "UPSCALER", "VK_DYN_A2C", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
     "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "VS_OUTS",
     "ULTRAWIDE", "HUD_POSITION", "WB_ASYNC", "WB_EXACT", "WB_FENCE_LIMIT", "WINDOW_MODE", "WINDOW_SIZE", "XLATE", "XLATE_ID", "XLATE_PROCS", "ZSTD_CHECK", "ZSTD_NATIVE",
 };
@@ -83,7 +83,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"REC_BATCH", "performance"},
     {"TEX_ALIAS", "performance"}, {"TEX_VRAM_PRESSURE", "performance"}, {"ASTC_BC", "performance"}, {"LOD_GUARD", "performance"}, {"FIX_C0", "performance"}, {"FIX_INDIRECT_RESET", "performance"}, {"FIX_VS_FAULT", "performance"}, {"FIX_ZERO", "performance"}, {"FIX_SCREEN_UV", "performance"}, {"LIST_RESTART", "performance"},
     {"BIND_SKIP", "performance"}, {"SHADER_MEMO", "performance"}, {"PIPE_MEMO", "performance"}, {"TEX_MEMO", "performance"}, {"DESC_KEEP", "performance"}, {"DESC_TEMPLATE", "performance"},
-    {"DESC_C0_SERIAL", "performance"}, {"DESC_SAMP_GEN", "performance"}, {"DESC_TD_HASH", "performance"}, {"DESC_STAGE_ORIGIN", "performance"},
+    {"DESC_C0_SERIAL", "performance"}, {"DESC_SAMP_GEN", "performance"}, {"DESC_TD_HASH", "performance"}, {"DESC_STAGE_ORIGIN", "performance"}, {"TEX_REPEAT", "performance"},
     {"TEX_HASH", "performance"}, {"ZSTD_NATIVE", "performance"}, {"ZSTD_CHECK", "performance"}, {"MVK_UPSCALE_BLIT", "performance"},
     {"PUSH_SKIP", "performance"}, {"SPLIT_DRAWS", "performance"}, {"SPLIT_US", "performance"}, {"VK_VALIDATION", "performance"},
     {"VK_DYN_VERTEX", "performance"}, {"VK_DYN_A2C", "performance"}, {"VK_SUBGROUP_PIN", "performance"},
@@ -137,7 +137,7 @@ static const CfgMeta metas[] = {
     {"MENU_LANG", "", "en|ru", LIVE}, {"MENU_THEME", "dk", "dk|classic", LIVE},
     // Advanced: scheduling
     {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "0", "0|1", RESTART},
-    {"REPLAY_THREADS", "0", "0..16", RESTART},   // sliced passes (vk_exec.c par_start): 0 off, else the recording threads
+    {"REPLAY_THREADS", "", "0..16", RESTART},     // sliced passes (vk_exec.c par_threads): 0 off, else the recording threads; unset: 4 from 8 logical processors except on AMD, else 0
     {"FREE_CORES", "0", "0|1", RESTART}, {"TIMER_1MS", "1", "0|1", RESTART}, {"REC_BATCH", "0", "0..64", RESTART},
     // shaders and pipelines
     {"PIPE_WAIT", "default", "default|draw", RESTART}, {"PIPE_SKIP", "fullscreen", "strict|any|fullscreen", RESTART},
@@ -153,6 +153,7 @@ static const CfgMeta metas[] = {
     {"BIND_SKIP", "1", "0|1", RESTART}, {"SHADER_MEMO", "1", "0|1", RESTART}, {"PIPE_MEMO", "1", "0|1", RESTART}, {"TEX_MEMO", "1", "0|1", RESTART},
     {"DESC_KEEP", "1", "0|1|ab", RESTART}, {"DESC_TEMPLATE", "1", "0|1", RESTART},
     {"DESC_C0_SERIAL", "0", "0|1|ab", RESTART}, {"DESC_SAMP_GEN", "0", "0|1|ab", RESTART}, {"DESC_TD_HASH", "0", "0|1|ab", RESTART},
+    {"TEX_REPEAT", "1", "0|1|ab", RESTART},
     {"DESC_STAGE_ORIGIN", "0", "0|1|ab", RESTART},
     {"PUSH_SKIP", "1", "0|1", RESTART}, {"SPLIT_DRAWS", "64", "0..1000", RESTART},
     {"SPLIT_US", "1000", "0..20000", RESTART},
@@ -160,7 +161,7 @@ static const CfgMeta metas[] = {
     {"VK_VALIDATION", "0", "0|1", RESTART}, {"VK_DYN_VERTEX", "", "0|1", RESTART},
     {"VK_DYN_A2C", "", "0|1", RESTART}, {"VK_SUBGROUP_PIN", "1", "0|1", RESTART},
     // diagnostics
-    {"TRACE", "", NULL, RESTART}, {"MEM_REPORT", "0", "0..1000000", RESTART}, {"HEAP_LAZY", "0", "0|1", RESTART}, {"FLIGHT", "0", "0|1", RESTART}, {"FLIGHT_SPIKE_MS", "100", "0..60000", RESTART},
+    {"TRACE", "", NULL, RESTART}, {"MEM_REPORT", "0", "0..1000000", RESTART}, {"HEAP_LAZY", "1", "0|1", RESTART}, {"FLIGHT", "0", "0|1", RESTART}, {"FLIGHT_SPIKE_MS", "100", "0..60000", RESTART},
     {"WB_FENCE_LIMIT", "65536", "0..1073741824", RESTART}, {"WB_EXACT", "1", "0|1", RESTART},
     {"NX2_READ_NOWAIT", "0", "0|1", RESTART},
     {"NVN2_MODE_TRACE", "0", "0|1", RESTART},

@@ -1,6 +1,8 @@
 // CPU fixture for vk_resource_frontier_test.py. Production functions/types are inserted at the markers below.
 // Every driver entry is redirected to an explicitly synthetic adapter. No window, loader, Vulkan device or GPU runs.
 #include <windows.h>
+
+void vk_texture_new_submit(void) {}
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -17,6 +19,9 @@
 #define vkWaitForFences synthetic_wait_fences
 #define vkDestroyImage synthetic_destroy_image
 #define vkDestroyImageView synthetic_destroy_view
+#define vkDestroyPipeline synthetic_destroy_pipeline
+#define vkDestroyPipelineLayout synthetic_destroy_pipeline_layout
+#define vkDestroyDescriptorSetLayout synthetic_destroy_set_layout
 #define vmaDestroyImage synthetic_vma_destroy_image
 #define vmaDestroyBuffer synthetic_vma_destroy_buffer
 #define vkBeginCommandBuffer synthetic_begin
@@ -176,6 +181,17 @@ static VkResult synthetic_device_idle(VkDevice d) {
 }
 void vk_texture_shutdown(void) { check(scenario == SHUTDOWN, "shutdown uses an empty synthetic texture cache"); }
 
+// vk_memory.c's compute copy of small write-back ranges (TOTK_SPARSE_MIRROR_COPY): never made in this fixture, so
+// vk_mem_shutdown finds nothing to destroy.
+static struct { VkPipeline pipeline; VkPipelineLayout layout; VkDescriptorSetLayout set; } sparse_copy;
+static void synthetic_destroy_pipeline(VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)p; (void)a; check(0, "no sparse copy pipeline"); }
+static void synthetic_destroy_pipeline_layout(VkDevice d, VkPipelineLayout l, const VkAllocationCallbacks *a) { (void)d; (void)l; (void)a; check(0, "no sparse copy layout"); }
+static void synthetic_destroy_set_layout(VkDevice d, VkDescriptorSetLayout l, const VkAllocationCallbacks *a) { (void)d; (void)l; (void)a; check(0, "no sparse copy set layout"); }
+// The sparse mirror cache and the slice threads' write-back lists (vk_memory.c) stay empty in this fixture.
+static int mirror_sparse;
+static void sparse_cache_close(void) {}
+typedef struct WbLocal { void *a; int n, cap; struct WbLocal *next; } WbLocal;
+static WbLocal *wb_locals;
 #define cmd_pool memory_cmd_pool
 @MEMORY_FUNCTIONS@
 #undef cmd_pool
