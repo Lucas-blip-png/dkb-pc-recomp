@@ -175,28 +175,38 @@ static uint32_t *nan_guard(const GfxShader *src, const uint32_t *w, uint64_t wor
 //    a texture coordinate (Location 3) by up to 0.5 in about 46% of the captured invocations; Position and the layer stay.
 // A rule applies only to the stage its NVN 2 origin names and only if the module has exactly the expected pattern;
 // otherwise the module is left alone and the light-quad skip (vk_exec_draw.c light_quad_fault_skip) still covers its
-// draws. A folded stage is drawn instead of skipped. TOTK_FIX_LQ_FOLD=0 turns the fold off.
-static const struct { uint64_t origin; int construct; } lq_fold_rules[] = {
-    {0x67a23e6f132386f9ull, -1}, {0xe2bf75f927acd249ull, -1}, {0x3a10ce1a4f3cdf0bull, -1}, {0x8475bd9dadb18f45ull, -1},
-    {0x4645f0dd7b4502a2ull, -1}, {0x7a76ae8de5016fd9ull, -1}, {0x1ee77eac998beea5ull, 31},
+// draws. A folded stage is drawn instead of skipped.
+// TOTK_FIX_LQ_FOLD: 1 (default) folds Tower's three stages only. Tower lost the device in 3 of 3 runs without the fold
+// (32 to 38 s in) and passed 2 of 2 with it; the #9 faults also came minutes in, so the other stages, which the skip
+// already keeps from faulting, stay skipped until longer runs show the fold holds there. "all" folds every stage of the
+// table (Ground, Ice and Fort too, which draws their light quads again); 0 turns the fold off.
+static const struct { uint64_t origin; int construct, by_default; } lq_fold_rules[] = {
+    {0x67a23e6f132386f9ull, -1, 0}, {0xe2bf75f927acd249ull, -1, 0}, {0x3a10ce1a4f3cdf0bull, -1, 1},
+    {0x8475bd9dadb18f45ull, -1, 1}, {0x4645f0dd7b4502a2ull, -1, 1}, {0x7a76ae8de5016fd9ull, -1, 0},
+    {0x1ee77eac998beea5ull, 31, 0},
 };
 #define LQ_RULES (int)(sizeof lq_fold_rules / sizeof *lq_fold_rules)
-static int lq_platform;   // gfx_spirv_set_lq_fold_platform: Bananza on NVIDIA
+static int lq_platform;   // gfx_spirv_set_lq_fold_platform: Bananza on NVIDIA; 1 Tower's stages, 2 every rule
+// Per rule: 0 not checked, 1 the pattern is there (its draws are drawn, folded), 2 it is not, or the fold failed on the
+// module that was compiled (its draws are skipped again). Racing threads compute the same; a 2 is never undone.
+static int8_t lq_state[LQ_RULES];
 
 void gfx_spirv_set_lq_fold_platform(int nvidia) {
-    lq_platform = nvidia && !rt_game_version && cfg_bool("TOTK_FIX_LQ_FOLD");
+    const char *v = cfg_value("TOTK_FIX_LQ_FOLD");
+    int mode = !strcmp(v, "all") ? 2 : !strcmp(v, "0") || !*v ? 0 : 1;
+    lq_platform = nvidia && !rt_game_version ? mode : 0;
 }
 
 static int lq_rule(const GfxShader *src) {
     if (!lq_platform || !src || gfx_shader_stage(src) != GFX_STAGE_VS) return -1;
     uint64_t o = gfx_shader_origin(src);
     for (int i = 0; o && i < LQ_RULES; i++)
-        if (lq_fold_rules[i].origin == o) return i;
+        if (lq_fold_rules[i].origin == o) return lq_platform == 2 || lq_fold_rules[i].by_default ? i : -1;
     return -1;
 }
 
 int gfx_spirv_lq_folded(const GfxShader *vs) {
-    static int8_t state[LQ_RULES];   // 0 not checked, 1 the pattern is there, 2 it is not (racing threads compute the same)
+    int8_t *state = lq_state;
     int i = lq_rule(vs);
     if (i < 0) return 0;
     int s = __atomic_load_n(&state[i], __ATOMIC_RELAXED);
@@ -215,7 +225,14 @@ static uint32_t *lq_fold(const GfxShader *src, const uint32_t *w, uint64_t words
     if (i < 0) return NULL;
     uint32_t *o = NULL;
     unsigned nulled = 0;
-    if (spirv_lq_fold(w, words, lq_fold_rules[i].construct, &o, out_n, &nulled) != 1) return NULL;
+    if (spirv_lq_fold(w, words, lq_fold_rules[i].construct, &o, out_n, &nulled) != 1) {
+        // The module compiled here is not the one gfx_spirv_lq_folded checked (a later rewrite changed it): it would run
+        // unfolded, the device-loss case, so its draws go back to being skipped.
+        if (__atomic_exchange_n(&lq_state[i], (int8_t)2, __ATOMIC_RELAXED) != 2)
+            rt_log("vk: vs origin %016llx: light-quad fold failed on the compiled module; its draws are skipped again",
+                   (unsigned long long)lq_fold_rules[i].origin);
+        return NULL;
+    }
     static volatile int32_t lines;
     if (plat_inc32(&lines) <= 16)
         rt_log("vk: vs origin %016llx: light-quad fold applied (%u `& 3` results set to 0)", (unsigned long long)lq_fold_rules[i].origin, nulled);
