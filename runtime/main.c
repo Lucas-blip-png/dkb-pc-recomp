@@ -241,7 +241,8 @@ static void crash_handler(const PlatCrash *x) {
     if (lazy_err)
         rt_logf("  lazy heap commit failed: error %u at %#llx, commit limit reached?\n", lazy_err, (unsigned long long)lazy_at);
 #endif
-    if (x->dump) rt_logf("  minidump: %s\n", x->dump);
+    // The dump holds game-derived memory (thread stacks): the line says so, since players copy this log into issues.
+    if (x->dump) rt_logf("  minidump: %s (keep it on this PC: send it only privately, when asked for)\n", x->dump);
     uint64_t f = x->module ? 0 : lifted_function(rip);
     if (f) rt_logf("  in lifted function f_%llx = %s\n", (unsigned long long)f, ldr_describe(f, d, sizeof d));
     for (int i = 0; i < x->nframes; i++) {   // abort and invalid parameter: where the host code called it

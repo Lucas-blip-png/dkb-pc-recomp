@@ -222,3 +222,6 @@ Open an issue with the issue form, or comment on [#3](https://github.com/Lucas-b
   again: the next run renames it to `dkb.1.log`.
 
 Never attach game files, keys, builds or the shader cache, and never paste key values into a log or an issue.
+A crash also writes a minidump, `logs\crash-<pid>-<tick>.dmp` (the log's `minidump:` line names it; the newest five
+are kept). It holds memory of the game's threads, so it stays on your PC: never attach it to an issue, and send it only
+privately when a developer asks for it.

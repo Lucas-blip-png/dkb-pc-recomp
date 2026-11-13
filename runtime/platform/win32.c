@@ -680,9 +680,14 @@ static void (*crash_fn)(const PlatCrash *c);
 
 // ---- minidumps of crashes
 // logs\crash-<pid>-<tick>.dmp beside the executable: thread stacks, registers and the module list, no heap (a few MiB).
-// MiniDumpWriteDump runs on a thread of its own, so a crash with a used-up stack (stack overflow) still gets one, and
-// dbghelp.dll is loaded only then. The dump holds stack memory of the game: it stays on this machine like the logs.
+// MiniDumpWriteDump runs on a thread of its own, so a crash with a used-up stack (stack overflow) still gets one.
+// dbghelp.dll is loaded when the crash handler is installed (plat_crash_hook), not at the crash: a crash under the
+// loader lock (in a driver's DllMain, say) would block a LoadLibrary there. The dump holds stack memory with
+// game-derived data: it stays on this machine like the logs, and is only ever sent privately, when asked for.
 typedef BOOL(WINAPI *MiniDumpWriteDumpFn)(HANDLE, DWORD, HANDLE, int, void *, void *, void *);
+static MiniDumpWriteDumpFn dump_write;   // MiniDumpWriteDump, or NULL when dbghelp.dll is missing
+#define DUMP_WAIT_MS 5000                // how long the crashing thread waits for its dump before it logs the report
+#define DUMP_KEEP 5                      // crash dumps kept in logs\ (the newest), counting the next one
 typedef struct {
     DWORD thread_id;
     EXCEPTION_POINTERS *ep;    // NULL for abort and invalid parameter, which raise no exception
@@ -703,8 +708,7 @@ _Static_assert(sizeof(DumpExceptionInfo) == 16, "MINIDUMP_EXCEPTION_INFORMATION 
 
 static DWORD WINAPI dump_thread(void *arg) {
     DumpJob *j = arg;
-    HMODULE dbg = LoadLibraryW(L"dbghelp.dll");
-    MiniDumpWriteDumpFn write = dbg ? (MiniDumpWriteDumpFn)(void *)GetProcAddress(dbg, "MiniDumpWriteDump") : NULL;
+    MiniDumpWriteDumpFn write = dump_write;
     if (!write) return 0;
     HANDLE f = CreateFileW(j->path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return 0;
@@ -736,7 +740,7 @@ static const char *write_crash_dump(EXCEPTION_POINTERS *ep) {
     job.ep = ep;
     HANDLE t = CreateThread(NULL, 1 << 20, dump_thread, &job, 0, NULL);
     if (!t) return NULL;
-    WaitForSingleObject(t, 60000);
+    WaitForSingleObject(t, DUMP_WAIT_MS);   // a dump not written by then is given up: the report must still be logged
     CloseHandle(t);
     if (!job.ok || !WideCharToMultiByte(CP_UTF8, 0, job.path, -1, path8, sizeof path8, NULL, NULL)) return NULL;
     return path8;
@@ -827,8 +831,42 @@ static void invalid_parameter(const wchar_t *expr, const wchar_t *func, const wc
     crash_from_runtime("invalid parameter to a C runtime function", 0xc0000417u);   // STATUS_INVALID_CRUNTIME_PARAMETER
 }
 
+// Deletes the oldest crash-*.dmp in logs\ beside the executable until DUMP_KEEP - 1 are left, so the next crash's
+// dump makes DUMP_KEEP. Run at start, never during a crash.
+static void prune_crash_dumps(void) {
+    wchar_t dir[MAX_PATH], pat[MAX_PATH], path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, dir, MAX_PATH);
+    wchar_t *slash = n && n < MAX_PATH ? wcsrchr(dir, L'\\') : NULL;
+    if (!slash) return;
+    *slash = 0;
+    _snwprintf(pat, MAX_PATH, L"%ls\\logs\\crash-*.dmp", dir);
+    pat[MAX_PATH - 1] = 0;
+    for (;;) {
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(pat, &fd);
+        if (h == INVALID_HANDLE_VALUE) return;
+        int count = 0;
+        FILETIME oldest = {0};
+        wchar_t name[MAX_PATH] = L"";
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            count++;
+            if (!name[0] || CompareFileTime(&fd.ftLastWriteTime, &oldest) < 0)
+                oldest = fd.ftLastWriteTime, wcsncpy(name, fd.cFileName, MAX_PATH - 1), name[MAX_PATH - 1] = 0;
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        if (count < DUMP_KEEP) return;
+        _snwprintf(path, MAX_PATH, L"%ls\\logs\\%ls", dir, name);
+        path[MAX_PATH - 1] = 0;
+        if (!DeleteFileW(path)) return;
+    }
+}
+
 void plat_crash_hook(void (*fn)(const PlatCrash *c)) {
     crash_fn = fn;
+    HMODULE dbg = LoadLibraryW(L"dbghelp.dll");
+    dump_write = dbg ? (MiniDumpWriteDumpFn)(void *)GetProcAddress(dbg, "MiniDumpWriteDump") : NULL;
+    prune_crash_dumps();
     AddVectoredExceptionHandler(0, crash_veh);
     SetUnhandledExceptionFilter(crash_unhandled);
     signal(SIGABRT, abort_signal);
