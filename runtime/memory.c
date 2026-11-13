@@ -252,8 +252,12 @@ void mem_init(void) {
     const char *ran = cfg_get("TOTK_REEXEC");
     if (ran && *ran && atoi(ran)) rt_log("mem: re-ran the process %d time%s for a free address space", atoi(ran),
                                           atoi(ran) == 1 ? "" : "s");
-    // Fixed window: modules, kernel region, host-function addresses.
-    mods_lo = MOD_MAIN_BASE;
+    // Fixed window: modules, kernel region, host-function addresses. The window's ends come from rt_layout, never from
+    // layout.h's MOD_<NAME>_BASE/_SIZE: modules.c is generated for the machine the game is installed on, while this
+    // library is compiled ahead of it (tools/ci/stub does it without a dump), so a compile-time base would reserve the
+    // space of a layout the process does not have. rt_layout is in layout order, base ascending (tools/build_game.py
+    // module_glue), so its first entry is the window's bottom and its last the window's top.
+    mods_lo = rt_layout[0].base;
     mods_hi = align_up(rt_layout[rt_layout_count - 1].base + rt_layout[rt_layout_count - 1].size, 0x10000);
     if (mods_hi > RT_KERNEL_BASE) rt_fatal("memory: modules end at %#llx, inside the kernel region",
                                            (unsigned long long)mods_hi);

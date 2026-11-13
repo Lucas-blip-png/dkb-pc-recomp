@@ -2,8 +2,10 @@ name: DKB Linux (compile gate + self-contained AppImage)
 
 # Compiles the runtime without game files and builds the self-contained Linux AppImage
 # (tools/make_release_linux.py --game dkb) in the pinned container of tools/linux/Dockerfile.
-# The image is built with --stub, so it carries a runtime library compiled against the stub layout;
-# it is a CI artifact, not the by-hand release (which needs a lifted game and runs --prove).
+# The image is built with --stub, so it carries a runtime library compiled without a game dump; that library
+# takes the module layout from the modules.c generated at install time (tests/layout_neutral_runtime_test.py
+# keeps it that way), so the image is a CI artifact, not the by-hand release (which needs a lifted game and
+# runs --prove).
 
 on:
   workflow_dispatch:
@@ -28,6 +30,8 @@ jobs:
         run: sh tools/fetch_refs.sh
       - name: Fetch the release toolchain
         run: python tools/make_release_linux.py --fetch-toolchain --out build/ci-toolchain
+      - name: Runtime library stays layout-neutral
+        run: python tests/layout_neutral_runtime_test.py
       - name: Compile gate
         run: |
           python tools/ci/compile_gate.py \
