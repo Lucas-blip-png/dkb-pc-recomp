@@ -11,5 +11,11 @@
 // replacement. Returns a malloc'd module the caller frees and its size in *out_words, or NULL when nothing changed
 // and the caller compiles w as it is (*out_words is words then). src may be NULL: the steps that need the stage are
 // skipped.
+// The light-quad fold (gfx_spirv.c lq_fold_rules) runs first, on Bananza vertex stages its rules name, on NVIDIA.
+// gfx_spirv_set_lq_fold_platform is told once whether the device is NVIDIA; gfx_spirv_lq_folded(vs) is 1 when vs is a
+// stage gfx_spirv_final folds, so its draws need not be skipped (vk_exec_draw.c light_quad_fault_skip).
+void gfx_spirv_set_lq_fold_platform(int nvidia);
+int gfx_spirv_lq_folded(const GfxShader *vs);
+
 uint32_t *gfx_spirv_final(const GfxShader *src, const uint32_t *w, uint64_t words, int geometry_chain,
                           uint32_t clip_cull_limit, uint64_t *out_words);
