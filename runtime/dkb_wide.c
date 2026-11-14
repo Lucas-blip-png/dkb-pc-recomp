@@ -1,5 +1,6 @@
 // Bananza's virtual display and camera defaults are game state, separate from
 // Vulkan's presentation rectangle. The generated dkbwide sites read this page.
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -39,6 +40,14 @@ static float dkb_scene_ratio(void) {
     return ratio;
 }
 
+// WORKAROUND, not a fix: the largest render-target pool scene_res grows. A larger one crashes the game before it shows
+// anything (access violation reading 0xa0 in main+0x128d40 on 3.2.0, an allocation that comes back null), whatever the
+// scene size: a 5760x3240 output on auto, an 800 MiB pool and a small scene, crashes the same way. At a 3840x2160
+// output, pools of 452 and 474 MiB ran, 514 MiB and up crashed; the limit is likely the heap the pool is carved from,
+// still to be found, and this cap should go once it is. A ratio whose pool would pass it is raised to the smallest
+// ratio whose pool fits, so the scene keeps the sizes the pool is grown for.
+#define DKB_SCENE_POOL_MAX (474u << 20)
+
 static void dkb_wide_scene(uint8_t *page, float ratio) {
     int set = rt_patch_set("dkbscene");
     if (set < 0) {
@@ -47,12 +56,25 @@ static void dkb_wide_scene(uint8_t *page, float ratio) {
     }
     uint32_t pool;
     memcpy(&pool, page + 0x110, 4);
+    // The pool grows by (1.5 / ratio)^2, so the smallest ratio that keeps it within the cap is 1.5 * sqrt(pool / cap).
+    // At 1.5 it does not grow, so the ratio is not raised past that: an output whose own pool is past the cap (5760x3240
+    // and up) is the open crash above, and a smaller scene would not help it.
+    float floor_ratio = (float)(1.5 * sqrt((double)pool / DKB_SCENE_POOL_MAX));
+    if (floor_ratio > 1.5f) floor_ratio = 1.5f;
+    if (ratio < floor_ratio) {
+        rt_log("Bananza resolution: scene_res ratio %.3f would grow the render-target pool to %u MiB, past the %u MiB "
+               "the game was seen to run with; using %.3f",
+               ratio, (unsigned)((double)pool * (1.5 / ratio) * (1.5 / ratio)) >> 20, DKB_SCENE_POOL_MAX >> 20,
+               floor_ratio);
+        ratio = floor_ratio;
+    }
     float grow = (1.5f / ratio) * (1.5f / ratio);
     if (grow > 1.0f) {
         const uint64_t align = 2u << 20;
         uint64_t bytes = (uint64_t)((double)pool * grow + 0.999);
         bytes = (bytes + align - 1) / align * align;
-        pool = (uint32_t)(bytes < 0x80000000u ? bytes : 0x80000000u);   // 2 GiB at most (7680x4320 at ratio 1.0 would ask 3.1)
+        if (bytes > DKB_SCENE_POOL_MAX) bytes = DKB_SCENE_POOL_MAX;   // the rounding up to 2 MiB can pass it by one step
+        pool = (uint32_t)bytes;
         memcpy(page + 0x110, &pool, 4);
     }
     memcpy(page + 0x118, &ratio, 4);
