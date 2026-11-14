@@ -42,7 +42,7 @@ static const char *network_symbols[] = {
 void rt_log(const char *fmt, ...) { (void)fmt; }
 void rt_fatal(const char *fmt, ...) { (void)fmt; abort(); }
 const int rt_game_version;
-const char rt_game_target[] = "dkb458752";   // update 3.2.0: GetDisplayVersion still reports "unknown" for it
+const char rt_game_target[] = "dkb458752";
 const char rt_game_display[] = "3.2.0";
 const char *cfg_value(const char *key) { (void)key; abort(); }
 const char *cfg_get(const char *key) { (void)key; abort(); }
@@ -113,8 +113,8 @@ int main(void) {
     c.x[0] = (uintptr_t)out.value;
     for (int i = 1; i < 31; i++) c.x[i] = 0x1900 + i;
     display_version.fn(&c);
-    assert(!strcmp(out.value, "unknown"));
-    for (size_t i = sizeof "unknown"; i < sizeof out.value; i++) assert(out.value[i] == 0);
+    assert(!strcmp(out.value, "3.2.0"));
+    for (size_t i = sizeof "3.2.0"; i < sizeof out.value; i++) assert(out.value[i] == 0);
     assert(out.before == 0xa5 && out.after == 0xa5);
     for (int i = 1; i < 31; i++) assert(c.x[i] == (uint64_t)(0x1900 + i));
     if (!count_content.fn) {

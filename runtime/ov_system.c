@@ -156,11 +156,9 @@ static void ov_bcat_mount(Cpu *c) {
 }
 
 static void ov_display_version(Cpu *c) {
-    // The validated loose dump has no control metadata; do not invent a release version from its title version.
     char *out = arg_p(c, 0);
     memset(out, 0, 16);
-    // Base 1.0.0 has a validated release name (expected-dkb100.json display_version); the update's is unverified.
-    if (!strcmp(rt_game_target, "dkb100") && strlen(rt_game_display) < 16) {
+    if (*rt_game_display && strlen(rt_game_display) < 16) {
         memcpy(out, rt_game_display, strlen(rt_game_display));
         return;
     }
