@@ -1,9 +1,9 @@
-"""Generate Bananza 1.0.0 ultrawide background and HUD overlays from the user's RomFS.
+"""Generate Bananza 1.0.0/3.2.0 ultrawide background and HUD overlays from the user's RomFS.
 
 The camera patches retain a centered UI. These named background panes extend to
 the wider edges without stretching text, controls, logos, or guide movie panes.
 The optional edge HUD moves named corner containers and their animation keys.
-Output contains game data and must remain under the repository's ignored build/.
+Output contains game data and stays under build/, or an installer's owned build staging directory.
 """
 import argparse
 import hashlib
@@ -12,7 +12,10 @@ import math
 from pathlib import Path
 import struct
 
-import zstandard
+try:
+    from compression import zstd
+except ImportError:  # Python 3.12/3.13 development environments.
+    import zstandard as zstd
 from ultrawide_layout import anim_keys
 
 # Stretch captures of the already-wide framebuffer horizontally. Flat colour
@@ -75,6 +78,8 @@ HUD_ANCHORS = {
 }
 
 TITLE_EFFECT_PATH = 'Effect/static.Nin_Ounce_NVN2.esetb.byml.zs'
+TITLE_EFFECT_PATHS = {'dkb100': TITLE_EFFECT_PATH,
+                      'dkb458752': 'Effect/static.Product.200.Nin_Ounce_NVN2.esetb.byml.zs'}
 
 
 def patch_title_effect(raw, factor):
@@ -88,7 +93,7 @@ def patch_title_effect(raw, factor):
     """
     if not math.isfinite(factor) or factor < 1:
         raise ValueError('title background factor must be finite and at least one')
-    data = bytearray(zstandard.ZstdDecompressor().decompress(raw))
+    data = bytearray(zstd.decompress(raw))
     if data[:4] != b'YB\x05\x00':
         raise ValueError('title effects: expected little-endian BYML version 5')
     # The name also occurs in BYML's string table. Accept only the ESET header
@@ -129,7 +134,7 @@ def patch_title_effect(raw, factor):
         pos += sibling
     if found != {b'Wall', b'Atmos'}:
         raise ValueError('title effects: missing wall or atmosphere')
-    return zstandard.ZstdCompressor(level=9).compress(data)
+    return zstd.compress(data, level=9)
 
 
 def members(data):
@@ -151,10 +156,14 @@ def members(data):
         yield name, start + lo, start + hi
 
 
-def patch_archive(raw, layout, factor, hud_edges=False):
-    data = bytearray(zstandard.ZstdDecompressor().decompress(raw))
+def patch_archive(raw, layout, factor, hud_edges=False, version='dkb100'):
+    data = bytearray(zstd.decompress(raw))
     entries = list(members(data))
     backgrounds = BACKGROUNDS.get(layout, {})
+    # 3.2.0's DialogConfirm removed this duplicate light background. Keep the other panes and their geometry
+    # mandatory; accepting a missing pane globally would hide an unsupported 1.0.0 resource revision.
+    if version == 'dkb458752' and layout == 'DialogConfirm':
+        backgrounds = {name: mode for name, mode in backgrounds.items() if name != 'P_LightBgColor_01'}
     anchors = HUD_ANCHORS.get(layout, {}) if hud_edges else {}
     dx = 960 * (factor - 1)
     found = set()
@@ -205,41 +214,38 @@ def patch_archive(raw, layout, factor, hud_edges=False):
                     for key in keys:
                         value, slope = struct.unpack_from('<2f', data, key + 4)
                         struct.pack_into('<2f', data, key + 4, value * factor, slope * factor)
-    return zstandard.ZstdCompressor(level=9).compress(data)
+    return zstd.compress(data, level=9)
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--romfs', type=Path, required=True)
-    ap.add_argument('--out', type=Path, required=True)
-    ap.add_argument('--aspect', required=True, help='e.g. 3440x1440')
-    ap.add_argument('--hud', choices=('centered', 'edges'), default='centered')
-    args = ap.parse_args()
-    w, h = map(int, args.aspect.split('x'))
-    if not (1280 <= w <= 7680 and 720 <= h <= 4320 and w % 2 == h % 2 == 0 and w * 9 > h * 16):
-        ap.error('aspect must be an even output resolution wider than 16:9')
-    build = (Path(__file__).resolve().parents[1] / 'build').resolve()
-    out = args.out.resolve()
-    if not out.is_relative_to(build) or out == build:
-        ap.error('game-derived overlays must be in a dedicated directory under build/')
-    index = json.loads((args.romfs / 'index.json').read_text())
+def generate(romfs, out, w, h, hud, version='dkb100'):
+    index = json.loads((romfs / 'index.json').read_text(encoding='utf-8'))
     if index.get('status') != 'pass':
         raise ValueError('RomFS index has not passed extraction verification')
     files = {e['path']: e for e in index['files']}
     outputs = []
-    with (args.romfs / 'romfs.bin').open('rb') as source:
-        layouts = dict.fromkeys((*BACKGROUNDS, *(HUD_ANCHORS if args.hud == 'edges' else ())))
-        for layout in layouts:
-            path = f'Layout/{layout}.Nin_Ounce_NVN2.blarc.zs'
+    with (romfs / 'romfs.bin').open('rb') as source:
+        def read(path):
             entry = files[path]
+            if entry['offset'] < 0 or entry['size'] < 0 or entry['offset'] + entry['size'] > index['romfs_size']:
+                raise ValueError(f'{path}: packed resource outside image')
             source.seek(entry['offset'])
             raw = source.read(entry['size'])
-            patched = patch_archive(raw, layout, (w / h) / (16 / 9), args.hud == 'edges')
+            # Loose-folder packs record the whole image hash; some extractors also supply individual hashes.
+            if (len(raw) != entry['size'] or
+                    ('sha256' in entry and hashlib.sha256(raw).hexdigest() != entry['sha256'])):
+                raise ValueError(f'{path}: packed resource checksum mismatch')
+            return raw
+
+        layouts = dict.fromkeys((*BACKGROUNDS, *(HUD_ANCHORS if hud == 'edges' else ())))
+        for layout in layouts:
+            path = f'Layout/{layout}.Nin_Ounce_NVN2.blarc.zs'
+            raw = read(path)
+            patched = patch_archive(raw, layout, (w / h) / (16 / 9), hud == 'edges', version)
             outputs.append((path, raw, patched))
-        entry = files[TITLE_EFFECT_PATH]
-        source.seek(entry['offset'])
-        raw = source.read(entry['size'])
-        outputs.append((TITLE_EFFECT_PATH, raw, patch_title_effect(raw, (w / h) / (16 / 9))))
+        # In 3.2.0 BootMenuEnv lives in the Product.200 effect archive, not the general static archive.
+        title_path = TITLE_EFFECT_PATHS[version]
+        raw = read(title_path)
+        outputs.append((title_path, raw, patch_title_effect(raw, (w / h) / (16 / 9))))
     # Validate every requested pane before publishing any replacement files.
     lines = ['# path\tsize\tsha256\toriginal_sha256 (tools/dkb_wide_layout.py)']
     for path, raw, patched in outputs:
@@ -252,7 +258,44 @@ def main():
     temporary = out / 'manifest.tsv.tmp'
     temporary.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     temporary.replace(manifest)
-    print(f'Validated {len(outputs)} UI/background resources for {w}x{h}, HUD {args.hud}: {out}')
+    print(f'Validated {len(outputs)} UI/background resources for {w}x{h}, HUD {hud}: {out}')
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--romfs', type=Path, required=True)
+    ap.add_argument('--version', choices=tuple(TITLE_EFFECT_PATHS), default='dkb100')
+    ap.add_argument('--out', type=Path, required=True)
+    sizes = ap.add_mutually_exclusive_group(required=True)
+    sizes.add_argument('--aspect', help='e.g. 3440x1440')
+    sizes.add_argument('--presets', nargs='+', help='prepare both HUD variants in named subfolders for these sizes')
+    ap.add_argument('--hud', choices=('centered', 'edges'), default='centered')
+    ap.add_argument('--installer-workspace', type=Path, help='owned installer workspace containing build staging')
+    args = ap.parse_args()
+    build = (Path(__file__).resolve().parents[1] / 'build').resolve()
+    if args.installer_workspace:
+        workspace = args.installer_workspace.resolve()
+        owner = json.loads((workspace / '.dkb-setup-owner.json').read_text(encoding='utf-8'))
+        if (Path(owner['temporary']).resolve() != workspace or
+                owner['game'] not in ('dkb100', 'dkb458752')):
+            ap.error('invalid installer workspace owner')
+        build = workspace / 'build'
+    out = args.out.resolve()
+    if not out.is_relative_to(build) or out == build:
+        ap.error('game-derived overlays must be in a dedicated directory under build/')
+    parsed = []
+    for size in args.presets or [args.aspect]:
+        try:
+            w, h = map(int, size.split('x'))
+        except ValueError:
+            ap.error('aspect must be WxH')
+        if not (1280 <= w <= 7680 and 720 <= h <= 4320 and w % 2 == h % 2 == 0 and w * 9 > h * 16):
+            ap.error('aspect must be an even output resolution wider than 16:9')
+        parsed.append((w, h))
+    for w, h in parsed:
+        for hud in ('centered', 'edges') if args.presets else (args.hud,):
+            folder = f'romfs-patches-{w}x{h}' + ('-hud-edges' if hud == 'edges' else '')
+            generate(args.romfs, out / folder if args.presets else out, w, h, hud, args.version)
 
 
 if __name__ == '__main__':

@@ -169,8 +169,15 @@ default when no resolution is selected. These dimensions do not establish the na
 host window separately. Use **Black bars** (`DKB_ASPECT=fit`) to preserve proportions
 when the window and game have different aspect ratios.
 
-Build with `recomp/patches-dkb100.txt` and generate matching overlays from your own packed
-RomFS (requires Python `zstandard`). For a 3440x1440 build, generate both HUD variants:
+The installer prepares matching background overlays and both HUD variants for every wide preset automatically.
+Rerun setup to add them to an older installation or repair missing/changed overlays; this does not change your
+resolution or HUD choice. Select **Centered** under HUD position for the central 16:9 HUD and restart.
+
+For a manual build, use the game's patch table and generate matching overlays from your own packed
+RomFS (Python 3.14+ has built-in zstd; older Python needs `zstandard`). For 3440x1440, generate both HUD variants:
+
+The commands below default to 1.0.0. Add `--version dkb458752` for 3.2.0: its confirmation-dialog layout and
+title-effect archive differ. The installer selects this automatically from the verified ExeFS version.
 
 ```powershell
 python tools/dkb_wide_layout.py --romfs build/extracted/dkb100-packed/romfs --out build/ultrawide/romfs-patches-3440x1440 --aspect 3440x1440
@@ -179,8 +186,9 @@ build/ultrawide/dkb.exe
 ```
 
 Repeat for each installed ultrawide resolution, placing the folders beside `romfs-index.bin`.
-The overlays contain game data and must stay private under `build/`. Regenerate older
-overlays to include the title-background fix; updating the executable alone is insufficient.
+The overlays contain game data and must stay private: manual generation stays under `build/`, while setup uses its
+owned build staging folder and copies validated overlays into the installation. Regenerate older overlays or rerun
+setup to include the title-background fix; updating the executable alone is insufficient.
 Missing edge-HUD overlays fall back to the centered variant with a log message.
 
 Environment equivalents are `DKB_ULTRAWIDE=0|1`, `DKB_OUTPUT_RES=<width>x<height>`,

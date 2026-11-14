@@ -34,6 +34,8 @@ TARGETS = (GAME, 'dkb458752')   # 1.0.0 and 3.2.0 (title version 458752); tools/
 NUP_SELECT = ('latest', 'base')
 EXE = '.exe' if os.name == 'nt' else ''
 CHUNK = 8 << 20
+WIDE_SIZES = ('2560x1080', '3440x1440', '3840x1600', '5120x2160', '3840x1080', '5120x1440')
+WIDE_FOLDERS = tuple(f'romfs-patches-{size}{suffix}' for size in WIDE_SIZES for suffix in ('', '-hud-edges'))
 COMMIT_WARN_GIB = 24   # the game commits about 14 GB; README asks for 16 GB of RAM plus a large page file
 
 
@@ -83,7 +85,7 @@ def plain_destination(dest, dlls=()):
     # profile/ and caches belong to the player and are never traversed or written by setup.
     files = (STATE, STATE + '.tmp', DEST_OWNER, '.dkb-setup.lock', 'dkb.ini', 'dkb.ini.tmp', 'totk.ini',
              'totk.ini.tmp', 'romfs-index.bin', 'seed-nvn2.bin', 'dkb' + EXE, 'totk_xlate' + EXE, 'totk_xlate.id', *(p.name for p in dlls))
-    for name in ('exefs', 'romfs', *files, *(name + '.setup-part' for name in files)):
+    for name in ('exefs', 'romfs', *WIDE_FOLDERS, *files, *(name + '.setup-part' for name in files)):
         plain_tree(dest / name)
 
 
@@ -356,6 +358,7 @@ def preflight(layout, options, dest, temp, rep):
                            layout.recomp / f'patches-{game}.txt', layout.tools / 'dkb_pack_romfs.py',
                            *([layout.tools / 'extract_nup.py'] if nup_arg else []),
                            layout.tools / 'dkb_shader_census.py',
+                           layout.tools / 'dkb_wide_layout.py', layout.tools / 'ultrawide_layout.py',
                            layout.runtime / 'nvn2_lower.cpp', layout.tools / 'data' / f'expected-{game}.json')
                if not p.is_file()]
     if layout.deps:
@@ -754,6 +757,45 @@ class Shaders(Step):
         return {'prepared': True, 'libraries': libraries}
 
 
+class WideLayouts(Step):
+    """Validate both HUD variants for every wide menu preset before publishing any overlay."""
+    id = 'dkb_wide'
+
+    def key(self, ctx):
+        return digest(ctx.keys['dkb_data'], ctx.info['game'], WIDE_SIZES,
+                      source_key(ctx.layout, 'tools/dkb_wide_layout.py', 'tools/ultrawide_layout.py'))
+
+    def current(self, ctx, record):
+        try:
+            return (set(record.get('outputs', {})) == set(WIDE_FOLDERS) and
+                    all((ctx.dest / name / 'manifest.tsv').is_file() and
+                        tree_key(ctx.dest / name) == record['outputs'][name] for name in WIDE_FOLDERS))
+        except OSError:
+            return False
+
+    def verify(self, ctx, record):
+        return self.current(ctx, record)
+
+    def run(self, ctx):
+        plain_outputs(ctx)
+        staged = ctx.temp / 'build' / 'wide-overlays'
+        owned_dir(ctx, staged)
+        run_tool(ctx, self.id, [ctx.layout.python, ctx.layout.tools / 'dkb_wide_layout.py',
+                                '--version', ctx.info['game'],
+                                '--romfs', ctx.dest / 'romfs', '--out', staged,
+                                '--installer-workspace', ctx.temp, '--presets', *WIDE_SIZES])
+        plain_outputs(ctx)
+        # Every preset has been validated. Publish each manifest last, so an interrupted copy is detected by
+        # the runtime's resource hashes and the next install repairs it without recompiling the game.
+        for name in WIDE_FOLDERS:
+            folder = staged / name
+            for source in sorted(folder.rglob('*')):
+                if source.is_file() and source.name != 'manifest.tsv':
+                    copy_file(source, ctx.dest / name / source.relative_to(folder))
+            copy_file(folder / 'manifest.tsv', ctx.dest / name / 'manifest.tsv')
+        return {'outputs': {name: tree_key(ctx.dest / name) for name in WIDE_FOLDERS}}
+
+
 class Prepare(Step):
     id = 'dkb_verify'
 
@@ -777,7 +819,7 @@ class Cleanup(Step):
     def run(self, ctx):
         # Update 458752 keeps generated C and objects so a second install does not relift or recompile.
         keep = ctx.info['game'] != GAME
-        for name in ('data', 'xlate', 'dotnet-home', 'nuget') if keep else ('data', 'gen', 'build', 'xlate', 'dotnet-home', 'nuget'):
+        for name in ('data', 'build/wide-overlays', 'xlate', 'dotnet-home', 'nuget') if keep else ('data', 'gen', 'build', 'xlate', 'dotnet-home', 'nuget'):
             p = ctx.temp / name
             if p.exists():
                 owned_dir(ctx, p)
@@ -785,7 +827,7 @@ class Cleanup(Step):
 
 
 def all_steps():
-    return [Check(), Data(), Translator(), Lift(), Compile(), Shaders(), Prepare(), Cleanup()]
+    return [Check(), Data(), Translator(), Lift(), Compile(), Shaders(), WideLayouts(), Prepare(), Cleanup()]
 
 
 def cancel(*_):
