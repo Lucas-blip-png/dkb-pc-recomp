@@ -61,6 +61,8 @@
 # memory = auto
 # A new texture created over a live texture's memory starts with that content instead of empty.
 # tex_alias = 1
+# Drop or release cached textures when VRAM usage rises above this percentage (e.g. 75 for 4GB VRAM cards). Default: off.
+# tex_vram_pressure = 75
 # Host zstd decoder in place of the game's (0 = the game's), and a check that decodes every call both ways and logs
 # the differences (1 = on; slow).
 # zstd_native = 1

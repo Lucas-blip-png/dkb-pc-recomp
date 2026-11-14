@@ -3,6 +3,8 @@
 Measurements from `tools/lowend_bench.py`, which runs `dkb.exe` on the first N logical processors with the perf trace and
 the draw profile on, and prints one table. This page is the baseline the low-end work is compared against.
 
+For systems with 4 GB of VRAM and gaming laptops, see [4GB VRAM & Laptop Optimization Guide](4gb-vram-optimization.md).
+
 ## Baseline
 
 Bananza 1.0.0, first level, the scripted input of about 2.4 minutes, 70 s per run, RTX 5060 Ti, 16 GB of RAM, before the
