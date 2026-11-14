@@ -381,3 +381,18 @@ each): eight threads 41.9 fps median (41.2-43.8 quartiles) against 40.9 (40.2-41
 worker 1.85 us against 2.03, replay 14.8 ms against 15.4. Six threads did better than eight on this 8-core, 16-thread
 CPU: 44.9 fps, 1.43 us a sliced draw; with `TOTK_DYN_UBO=1`, six threads gave 46.0 fps, five 44.7 and eight 44.4.
 `TOTK_ONE_PER_CORE=1` gave 26 fps: it leaves the process eight logical processors for the game and the slices.
+
+### The pipeline step of a sliced draw (3.2.0, RTX 5090)
+
+Lake Level on 3.2.0 (RTX 5090, Ryzen 7 9800X3D, 3840x2160 DLSS Quality), a recorded route replayed with
+`TOTK_INPUT_SCRIPT` and `TOTK_FIXED_STEP=1`, about 7,000-7,900 draws a frame. `TOTK_CRIT` put the frame's critical
+path in the submitting thread's replay (6.3 of 10.7 ms) and in the main thread's `nvnSyncWait` for it (2.9 ms); the
+game's own code on the path was 0.8 ms, and generated code at -O2 changed nothing measurable. `DKB_DRAW_PROFILE` of the
+slices grew with the thread count, most of all in the pipeline section (`draw_impl` from `geometry_feedback_safe` to
+the pipeline lookup): 134 ns a sliced draw with two threads, 259 with four, 500 with six, a sliced draw 1083, 1446 and
+1944 ns. Every slice thread took two global locks there for each draw: the texture lock in `twin_prepare`, and
+`vk_pipeline.c`'s lock for the lookup whenever the state differed from the previous draw, which it did at the first
+draw of every slice. `twin_prepare` now answers the textures that need no twin from a per-context entry keyed by the
+slot token, and the pipeline memo keeps recent pipelines by shader pair as well as the last one. Pipeline section:
+158 ns with four threads, 221 with six; a sliced draw 1370 and 1647 ns. Replay per draw over three alternating runs of
+each: 0.81-0.83 us against 0.84-0.92; the frame rate stayed within the route's run-to-run spread.

@@ -82,6 +82,8 @@ enum { DESC_TEXTURE = 1, DESC_SAMPLER };
 typedef struct {
     uint32_t kind, serial;
     union { TexSlot tex; SampSlot sampler; } u;
+    VkDescKey key;                // its key in descriptors, for its bucket (desc_bucket_*)
+    uint32_t bpos;                // its index in that bucket
 } DescSlot;
 
 static PlatRMutex tex_lock;
@@ -89,6 +91,13 @@ static PlatOnce tex_once = PLAT_ONCE_INIT;
 static nvn_hmap by_key = {.klen = sizeof(TexKey)};
 static nvn_hmap by_addr = {.klen = 8};
 static nvn_hmap descriptors = {.klen = sizeof(VkDescKey)};
+// The descriptor slots by where they live, for vk_texture_descriptors_retire: a slot keyed by address (storage 0) is
+// in the bucket of its 1 MiB block, one keyed by a storage serial in that serial's bucket (bit 63 set). A released pool
+// visits only the buckets its range or serial names; it used to walk the whole table, once per pool, and a level change
+// releases hundreds (218 ms of a 712 ms frame on 3.2.0 at a level change, all in that walk).
+enum { DESC_BUCKET_SHIFT = 20 };
+typedef struct { uint32_t n, cap; DescSlot **v; } DescBucket;
+static nvn_hmap desc_buckets = {.klen = sizeof(uint64_t)};
 static nvn_hmap samplers = {.klen = sizeof(samp_par)};
 static int nreleased;
 static Tex *rel_head, *rel_tail;   // released entries in release order (sweep_released drops from the head)
@@ -1153,6 +1162,37 @@ static int descriptor_key(const dpool_ref *pool, int id, uint32_t limit, VkDescK
     return vk_mem_descriptor_key(pool->addr + (uint64_t)(uint32_t)id * NVN_DESCRIPTOR_BYTES, NVN_DESCRIPTOR_BYTES, key);
 }
 
+static uint64_t desc_bucket_id(const VkDescKey *k) { return k->storage ? k->storage | 1ull << 63 : k->offset >> DESC_BUCKET_SHIFT; }
+
+// Texture lock held: d joins the bucket of its key.
+static void desc_bucket_add(DescSlot *d) {
+    uint64_t id = desc_bucket_id(&d->key);
+    DescBucket *b = nvn_hm_get(&desc_buckets, &id);
+    if (!b) {
+        if (!(b = calloc(1, sizeof *b))) rt_fatal("vk: out of memory for a descriptor bucket");
+        nvn_hm_put(&desc_buckets, &id, b);
+    }
+    if (b->n == b->cap) {
+        b->cap = b->cap ? b->cap * 2 : 8;
+        if (!(b->v = realloc(b->v, sizeof *b->v * b->cap))) rt_fatal("vk: out of memory for a descriptor bucket");
+    }
+    d->bpos = b->n;
+    b->v[b->n++] = d;
+}
+
+// Texture lock held: d leaves its bucket (the last slot takes its place); an emptied bucket goes.
+static void desc_bucket_del(DescSlot *d) {
+    uint64_t id = desc_bucket_id(&d->key);
+    DescBucket *b = nvn_hm_get(&desc_buckets, &id);
+    if (!b || d->bpos >= b->n || b->v[d->bpos] != d) rt_fatal("vk: a descriptor slot is not in its bucket");
+    DescSlot *last = b->v[--b->n];
+    b->v[d->bpos] = last, last->bpos = d->bpos;
+    if (!b->n) {
+        nvn_hm_del(&desc_buckets, &id);
+        free(b->v), free(b);
+    }
+}
+
 // Texture lock held. Entries are addressed by their bytes, so wrappers and overlapping table views share updates.
 static DescSlot *descriptor_slot(const dpool_ref *pool, int id, uint32_t limit, int create) {
     VkDescKey key;
@@ -1161,7 +1201,9 @@ static DescSlot *descriptor_slot(const dpool_ref *pool, int id, uint32_t limit, 
     if (!d && create) {
         d = calloc(1, sizeof *d);
         if (!d) rt_fatal("vk: out of memory for a descriptor");
+        d->key = key;
         nvn_hm_put(&descriptors, &key, d);
+        desc_bucket_add(d);
     }
     return d;
 }
@@ -1175,7 +1217,10 @@ static void descriptor_registered(DescSlot *d, uint32_t kind) {
     if (mode < 0) mode = rt_knob("DESC_SAMP_GEN", "0");
     int samplers = kind == DESC_SAMPLER || d->kind == DESC_SAMPLER;
     rgen_bump(d);   // before the slot changes: a token checked against the old generation is no longer taken
+    VkDescKey key = d->key;   // the slot's identity in descriptors and desc_buckets outlives a registration
+    uint32_t bpos = d->bpos;
     memset(d, 0, sizeof *d);
+    d->key = key, d->bpos = bpos;
     if (!++reg_serial) ++reg_serial;
     d->serial = reg_serial, d->kind = kind;
     slots_gen++;   // a registration can replace bytes previously used by either kind
@@ -2129,26 +2174,42 @@ int vk_sampler_params(const dpool_ref *pool, int id, samp_par *out) {
 
 // A backing lifetime ended. Keep imported entries while another live imported alias still maps the same bytes.
 // pool_lock is not held by the caller; taking it through descriptor_key while holding tex_lock preserves lock order.
+// The candidates are the slots of the buckets the range or the serial names (desc_buckets); each is checked as the
+// whole table's slots were.
 void vk_texture_descriptors_retire(uint64_t addr, uint64_t size, uint64_t storage) {
     lock();
-    VkDescKey *gone = malloc(sizeof *gone * (size_t)(descriptors.n + 1));
+    uint64_t first, last;   // bucket ids; a slot keyed at addr - NVN_DESCRIPTOR_BYTES + 1 still overlaps the range
+    if (storage) first = last = storage | 1ull << 63;
+    else {
+        first = (addr >= NVN_DESCRIPTOR_BYTES ? addr - NVN_DESCRIPTOR_BYTES + 1 : 0) >> DESC_BUCKET_SHIFT;
+        last = (size && addr <= UINT64_MAX - size ? addr + size - 1 : addr) >> DESC_BUCKET_SHIFT;
+    }
+    uint32_t cand = 0;
+    for (uint64_t id = first; id <= last; id++) {
+        const DescBucket *b = nvn_hm_get(&desc_buckets, &id);
+        if (b) cand += b->n;
+        if (id == UINT64_MAX) break;
+    }
+    VkDescKey *gone = malloc(sizeof *gone * (size_t)(cand + 1));
     if (!gone) rt_fatal("vk: out of memory retiring descriptors");
     uint32_t n = 0;
-    for (uint32_t i = 0; i < descriptors.cap; i++) {
-        if (!descriptors.vals[i]) continue;
-        VkDescKey key;
-        memcpy(&key, descriptors.keys + (size_t)i * descriptors.klen, sizeof key);
-        if (key.storage != storage) continue;
-        if (!storage) {
-            if (key.offset >= addr ? key.offset - addr >= size : addr - key.offset >= NVN_DESCRIPTOR_BYTES) continue;
-            VkDescKey live;
-            if (vk_mem_descriptor_key(key.offset, NVN_DESCRIPTOR_BYTES, &live) && !memcmp(&live, &key, sizeof key)) continue;
+    for (uint64_t id = first; id <= last; id++) {
+        const DescBucket *b = nvn_hm_get(&desc_buckets, &id);
+        for (uint32_t j = 0; b && j < b->n; j++) {
+            VkDescKey key = b->v[j]->key;
+            if (key.storage != storage) continue;
+            if (!storage) {
+                if (key.offset >= addr ? key.offset - addr >= size : addr - key.offset >= NVN_DESCRIPTOR_BYTES) continue;
+                VkDescKey live;
+                if (vk_mem_descriptor_key(key.offset, NVN_DESCRIPTOR_BYTES, &live) && !memcmp(&live, &key, sizeof key)) continue;
+            }
+            gone[n++] = key;
         }
-        gone[n++] = key;
+        if (id == UINT64_MAX) break;
     }
     for (uint32_t i = 0; i < n; i++) {
         DescSlot *d = nvn_hm_del(&descriptors, &gone[i]);
-        if (d) rgen_bump(d);
+        if (d) desc_bucket_del(d), rgen_bump(d);
         free(d);
     }
     if (n) slots_gen++, samp_gen++;
@@ -2205,6 +2266,10 @@ void vk_texture_shutdown(void) {
     for (uint32_t i = 0; i < descriptors.cap; i++) free(descriptors.vals[i]);
     free(descriptors.keys), free(descriptors.vals);
     descriptors = (nvn_hmap){.klen = sizeof(VkDescKey)};
+    for (uint32_t i = 0; i < desc_buckets.cap; i++)
+        if (desc_buckets.vals[i]) free(((DescBucket *)desc_buckets.vals[i])->v), free(desc_buckets.vals[i]);
+    free(desc_buckets.keys), free(desc_buckets.vals);
+    desc_buckets = (nvn_hmap){.klen = sizeof(uint64_t)};
     nreleased = 0;
     rel_head = rel_tail = NULL;
     unlock();

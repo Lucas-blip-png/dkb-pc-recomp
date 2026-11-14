@@ -81,7 +81,7 @@ The Bananza steps are:
    generated.
 5. Build the target (`dkb100` or `dkb458752`) from the current runtime sources with `tools/build_game.py`, without `--runtime-lib`, then copy the
    executable, runtime libraries and RomFS index into place. The default worker limit is six; `--jobs` changes it.
-6. Translate the game's shaders: `tools/dkb_shader_census.py` lists the shader stages in the packed RomFS into
+6. Translate the game's shaders: `tools/dkb_shader_census.py` writes the list of shader stages in the packed RomFS into
    `seed-nvn2.bin`, `dkb.exe --translate-shaders` lowers and translates them into the shader cache beside the executable
    (a few minutes, about 3 GB), and the pack is deleted. Without this step the first visit to each area waits for its
    shaders. Then `dkb.exe --warm-shaders` builds the driver's pipeline libraries; if that fails or the driver crashes

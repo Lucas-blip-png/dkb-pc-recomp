@@ -21,9 +21,11 @@ of the 2 MiB-aligned module slot free); the runtime commits it and owns its cont
 +0..15 the frame-rate step (runtime/frame_rate.c), +16..55 the output, swapchain and scene sizes
 (runtime/resolution.c res_init), +56..59 the camera's aspect ratio (runtime/resolution.c res_init, set aspect), +60..63
 the field-of-view factor (runtime/resolution.c res_fov_live, set fov), +0x100..0x113 the Bananza display
-size and aspect (runtime/dkb_wide.c), +0x118..0x11b the Bananza 3D scene ratio (runtime/dkb_wide.c), +0x200..0x24f the five Bananza mouse-camera host dispatch slots
-(runtime/dkb_camera.c), and +0x250..0x25f the Bananza 3.2.0 radial blur lifetime slot (runtime/frame_rate.c
-blur_frames). A new set takes words outside these.
+size and aspect (runtime/dkb_wide.c), +0x118..0x11b the Bananza 3D scene ratio (runtime/dkb_wide.c), +0x120..0x127 the Bananza 3.2.0 3D image scale
+(runtime/dkb_wide.c dkb_wide_scene), +0x200..0x24f the five Bananza mouse-camera host dispatch slots
+(runtime/dkb_camera.c), +0x250..0x25f the Bananza 3.2.0 radial blur lifetime slot (runtime/frame_rate.c
+blur_frames), and +0x260..0x26f the Bananza damped velocity slot (runtime/frame_rate.c damped_sum). A new set
+takes words outside these.
 
 The replacement words are lifted at the site's address in place of the original instruction, and the generated C reads
 `if (rt_patch_on[<set>]) { replacement } else { original }`: one byte load and a branch per executed site. Replacement

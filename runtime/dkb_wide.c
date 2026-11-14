@@ -57,16 +57,30 @@ static void dkb_wide_scene(uint8_t *page, float ratio) {
     }
     memcpy(page + 0x118, &ratio, 4);
     rt_patch_switch(set, 1);
-    rt_log("Bananza resolution: 3D scene ratio %.3f (scene drawn at 1/%.3f of the virtual display, render-target pool %u MiB)",
-           ratio, ratio, pool >> 20);
+    // Update 3.2.0 makes each display's 3D image a scale from its render parameters times the display size, 2/3, read
+    // at main+79024/79028 (patches-dkb458752.txt, set render3d); the controller's ratio divides that image, so the
+    // scene is display x scale / ratio. With the controller alone, scene_res = full at a 2880x1620 display drew the
+    // scene at 1920x1080 (the upscaler no longer ran, and the image was stretched). The render3d sites read a scale of
+    // 1.0 from page +0x120/+0x124, which makes the scene display / ratio, as on 1.0.0, and its sizes those 1.0.0 has
+    // at that ratio, which the pool above is grown for.
+    int scale_set = rt_patch_set("render3d");
+    if (scale_set >= 0) {
+        const float one = 1.0f;
+        memcpy(page + 0x120, &one, 4);
+        memcpy(page + 0x124, &one, 4);
+        rt_patch_switch(scale_set, 1);
+    }
+    rt_log("Bananza resolution: 3D scene ratio %.3f (scene drawn at 1/%.3f of the virtual display%s, render-target pool %u MiB)",
+           ratio, ratio, scale_set >= 0 ? ", the 3.2.0 image scale at 1.0" : "", pool >> 20);
 }
 
 void dkb_wide_init(void) {
     wide_enabled = 0;
     wide_output[0] = 2880;
     wide_output[1] = 1620;
-    int scene_set = rt_patch_set("dkbscene");
+    int scene_set = rt_patch_set("dkbscene"), scale_set = rt_patch_set("render3d");
     if (scene_set >= 0) rt_patch_switch(scene_set, 0);   // on only once dkb_wide_scene has written the ratio
+    if (scale_set >= 0) rt_patch_switch(scale_set, 0);   // and the 3.2.0 image scale
     int set = rt_patch_set("dkbwide");
     if (set < 0) {
         // The output resolution, ultrawide and frame-rate settings all work through code patches (recomp/patches-dkb100.txt

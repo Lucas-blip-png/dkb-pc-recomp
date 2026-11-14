@@ -721,14 +721,15 @@ static void rows_render_options(const MenuTarget &target) {
         static const UiTextId scene[] = {UI_MENU_SCENE_RES_AUTO, UI_MENU_SCENE_RES_FULL};
         opt_choice("TOTK_SCENE_RES", UI_MENU_SCENE_RES, scene, 2, UI_MENU_SCENE_RES_DESC);
     }
-    static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR};
+    // DLSS (runtime/vk_dlss.c) takes effect at the next start: NGX adds its Vulkan extensions when the device is made.
+    static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR, UI_MENU_UPSCALER_DLSS};
     int fitted[4];
     gfx_fit_rect(target.image_w, target.image_h, target.width, target.height, fitted);
     bool no_upscale = target.image_w > 0 && target.image_h > 0 &&
                       fitted[2] <= target.image_w && fitted[3] <= target.image_h;
     // DLSS can run inside the game's renderer, even if the final image fits the display.
     if (no_upscale && strcmp(cfg_value("TOTK_UPSCALER"), "dlss")) opt_disable_next(UI_MENU_NO_UPSCALING);
-    opt_choice("TOTK_UPSCALER", UI_MENU_UPSCALER, up, 2, UI_MENU_UPSCALER_DESC);
+    opt_choice("TOTK_UPSCALER", UI_MENU_UPSCALER, up, 3, UI_MENU_UPSCALER_DESC);
     if (no_upscale) opt_disable_next(UI_MENU_NO_UPSCALING);
     else if (!strcmp(cfg_value("TOTK_UPSCALER"), "bilinear")) opt_disable_next(UI_MENU_SHARPNESS_NEEDS_FSR);
     opt_slider("TOTK_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");

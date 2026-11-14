@@ -54,6 +54,18 @@ static uint64_t now_ns(void) { return plat_now_ns(); }
 
 static void exec_packet(uint32_t op, void *p);
 
+// Publishes how far the recorder got. The driver may write command buffers through a write-combined mapping (RADV
+// does, and AMD's Windows driver is the other place the recorder lost the device), and on x86 a release store does not
+// wait for write-combined stores: the producer could see tail, end and submit the part while its last commands are
+// still in the CPU's write-combining buffers. SFENCE drains them first; on ARM64 the release store already orders them.
+// Lead from mkw-recomp de006fc (vk_rec.c publish_tail), reported in #204.
+static inline void publish_tail(uint64_t t) {
+#if defined(__x86_64__) || defined(_M_X64)
+    __builtin_ia32_sfence();
+#endif
+    __atomic_store_n(&tail, t, __ATOMIC_RELEASE);
+}
+
 static void rec_main(void *arg) {
     (void)arg;
     plat_thread_priority(rec_prio);
@@ -75,9 +87,9 @@ static void rec_main(void *arg) {
             uint32_t op = (uint32_t)(w & 0xffff), n = (uint32_t)(w >> 32);
             if (op != R_PAD) exec_packet(op, &ring[t % RING_WORDS + 1]);
             t += n;
-            if ((k & 63) == 63) __atomic_store_n(&tail, t, __ATOMIC_RELEASE);
+            if ((k & 63) == 63) publish_tail(t);
         }
-        __atomic_store_n(&tail, t, __ATOMIC_RELEASE);
+        publish_tail(t);
     }
     return;
 }

@@ -31,6 +31,19 @@ site realtime main 6b8260 1e201820 f81f0fe9 @page:x9 bd400920 f84107e9  # second
 # The function saves LR in its prologue (main+426e94), so the BL keeps its return.
 site realtime main 426f54 1e380008 948fa4bf  # fcvtzs w8, s0 in the blur entry update  [3.2.0 only]
 
+# The player's damped velocity update (main+13fad60; its eight callers are the player's movers, the wall and ceiling
+# climbs among them) steps v = r^step * v + sum of r^i * target for i = 1 .. step: it adds the target once per whole
+# 60 Hz frame. A step under 1.0 (any rate above 60 fps) adds nothing, so the climb velocity decays to 0 and DK stops on
+# walls and ceilings (#201). runtime/frame_rate.c damped_sum (patch page +0x260) stands in for the fmov s12, #1.0 that
+# bounds the loop: on a fractional step it puts the closed form of the sum in s9..s11 and +inf in s12, so the loop does
+# not run; on a whole step it leaves s12 = 1.0 and the game's loop. The three movi that clear s9..s11 on the path that
+# skips the loop become nops so the sum reaches the store. At the BL x0, x1 and s8 hold the mover, the target and r; the
+# function saves LR in its prologue (main+13fad70), so the BL keeps its return.
+site realtime main 13fad88 1e2e100c 94505536  # fmov s12, #1.0, the loop bound  [3.2.0 only]
+site realtime main 13fad9c 2f00e40b d503201f  # movi d11, #0 on the path that skips the loop
+site realtime main 13fada0 2f00e40a d503201f  # movi d10, #0
+site realtime main 13fada4 2f00e409 d503201f  # movi d9, #0
+
 # Optional Bananza virtual display and camera aspect. Values are supplied by
 # runtime/dkb_wide.c at page +0x100 (width), +0x104 (height), +0x108 (aspect),
 # +0x10c (aspect / 16:9), +0x110 (render-target pool bytes).
@@ -121,3 +134,13 @@ spin main 4c0b6c 4c0b80   # recursive spin lock
 set dkbscene DKB_SCENE 0
 site dkbscene main 38de2c f9407a69 @page:x9 bd411928 f9407a69  # 1.0.0 3c1548, s8
 site dkbscene main 38df08 bd400120 @page:x9 bd411920  # 1.0.0 3c1624
+
+# 3D image scale (runtime/dkb_wide.c dkb_wide_scene, scene_res). Each display's 3D image is a scale from the game's
+# render parameters (copied into the config at main+58760, read at config +0x1b0/+0x1b4) times the display size: 2/3
+# on 3.2.0, which 1.0.0 does not have, and the dynamic-resolution ratio (dkbscene) divides that image. With scene_res
+# set, the two loads read a scale of 1.0 from patch page +0x120/+0x124, so the scene is the display divided by the
+# ratio, as on 1.0.0. The image is allocated at the larger of the display size and its own (main+958c8), so a scale of
+# 1.0 needs no larger image. x10 is free here: nothing reads it before main+79034 writes it.
+set render3d DKB_RENDER3D 0
+site render3d main 79024 bd41b100 @page:x10 bd412140  # ldr s0, [x10, #0x120] in place of ldr s0, [x8, #0x1b0]
+site render3d main 79028 bd41b501 bd412541  # ldr s1, [x10, #0x124] in place of ldr s1, [x8, #0x1b4]
