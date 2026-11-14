@@ -169,21 +169,24 @@ static uint32_t *nan_guard(const GfxShader *src, const uint32_t *w, uint64_t wor
 // `& 3` results that feed branch conditions are replaced by 0. Every value-preserving rewrite of the same code that was
 // tried still faulted, so THE FOLD IS NOT EXACT:
 //  - whole fold (construct -1): Ground's 67a23e6f132386f9 and e2bf75f927acd249, Tower's 3a10ce1a4f3cdf0b, 8475bd9dadb18f45
-//    and 4645f0dd7b4502a2, Ice's 7a76ae8de5016fd9. r becomes 0, so the per-instance value the fragment stage uses as a
+//    and 4645f0dd7b4502a2, Ice's 7a76ae8de5016fd9 and ba1dd1e7ae8abb33. r becomes 0, so the per-instance value the fragment stage uses as a
 //    texture array layer is layer 0 for every instance (r was 0 to 3 in captured draws; the other outputs were the same).
 //  - Fort's 1ee77eac998beea5 (construct 31): only the `& 3` results that decide selection construct 31 become 0. That moves
 //    a texture coordinate (Location 3) by up to 0.5 in about 46% of the captured invocations; Position and the layer stay.
 // A rule applies only to the stage its NVN 2 origin names and only if the module has exactly the expected pattern;
 // otherwise the module is left alone and the light-quad skip (vk_exec_draw.c light_quad_fault_skip) still covers its
 // draws. A folded stage is drawn instead of skipped.
-// TOTK_FIX_LQ_FOLD: 1 (default) folds Tower's three stages only. Tower lost the device in 3 of 3 runs without the fold
-// (32 to 38 s in) and passed 2 of 2 with it; the #9 faults also came minutes in, so the other stages, which the skip
-// already keeps from faulting, stay skipped until longer runs show the fold holds there. "all" folds every stage of the
+// TOTK_FIX_LQ_FOLD: 1 (default) folds Tower's three stages and Ice's ba1dd1e7ae8abb33. Tower lost the device in 3 of 3
+// runs without the fold (32 to 38 s in) and passed 2 of 2 with it. Ice's ba1dd1e7ae8abb33 escapes the light-quad skip
+// (it reads no lights buffer at c0+0x530) and lost the device about 50 to 70 s into Ice in every walked run that drew it;
+// a bisection of the light-quad draws by vertex stage named it, and skipping it alone kept Ice running. The #9 faults
+// also came minutes in, so the other stages, which the skip already keeps from faulting, stay skipped until longer
+// runs show the fold holds there. "all" folds every stage of the
 // table (Ground, Ice and Fort too, which draws their light quads again); 0 turns the fold off.
 static const struct { uint64_t origin; int construct, by_default; } lq_fold_rules[] = {
     {0x67a23e6f132386f9ull, -1, 0}, {0xe2bf75f927acd249ull, -1, 0}, {0x3a10ce1a4f3cdf0bull, -1, 1},
     {0x8475bd9dadb18f45ull, -1, 1}, {0x4645f0dd7b4502a2ull, -1, 1}, {0x7a76ae8de5016fd9ull, -1, 0},
-    {0x1ee77eac998beea5ull, 31, 0},
+    {0x1ee77eac998beea5ull, 31, 0}, {0xba1dd1e7ae8abb33ull, -1, 1},
 };
 #define LQ_RULES (int)(sizeof lq_fold_rules / sizeof *lq_fold_rules)
 static int lq_platform;   // gfx_spirv_set_lq_fold_platform: Bananza on NVIDIA; 1 Tower's stages, 2 every rule
