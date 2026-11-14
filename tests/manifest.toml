@@ -468,6 +468,12 @@ area = "os"
 cmd = ["{python}", "tests/input_script_test.py", "--cc", "{cc}"]
 
 [[test]]
+name = "controller-hold"
+tier = 1
+area = "os"
+cmd = ["{python}", "tests/controller_hold_test.py", "--cc", "{cc}"]
+
+[[test]]
 name = "jcms-abi"
 tier = 1
 area = "os"

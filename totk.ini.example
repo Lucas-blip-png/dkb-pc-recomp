@@ -222,6 +222,9 @@
 # audio_channels = auto
 
 [input]
+# Choose the controller in F1 > Controls > Controller Device. The saved device key is opaque.
+# Auto keeps the first available controller while connected; an absent manual selection waits for reconnection.
+# pad_device = auto
 # Gamepad motion controls (0 = off) and vibration (0 = off).
 # motion = 1
 # rumble = 1
