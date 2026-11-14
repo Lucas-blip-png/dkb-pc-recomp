@@ -3,11 +3,13 @@
 #include <ctype.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cfg.h"
 #include "host.h"
 #include "input_map.h"
+#include "input.h"
 
 #define STICK_MAX 32767
 #define DIAGONAL 23170   // STICK_MAX / sqrt(2)
@@ -334,10 +336,7 @@ void input_pad_stick(int32_t x, int32_t y, float dead, int32_t out[2]) {
     out[1] = (int32_t)lrint(fmax(-1, fmin(1, fy * k)) * STICK_MAX);
 }
 
-// Minus and Plus held together open or close the menu. *held: latched from the poll where both go down until neither is
-// down (the caller keeps it). Every poll of the latch reports neither to the game, so releasing one button first does not
-// leak the other; Minus alone before Plus reaches the game unchanged. With the menu open the game sees a neutral pad.
-// Returns 1 in the poll where both go down: the caller toggles the menu once.
+// Once-per-hold latch for the existing overlay chord; a partial release does not leak the other button.
 static int chord(int *held, uint64_t *buttons, uint64_t combo) {
     uint64_t raw = *buttons & combo;
     int edge = 0;
@@ -351,17 +350,83 @@ static int chord(int *held, uint64_t *buttons, uint64_t combo) {
     return edge;
 }
 
-int input_menu_gate(int *held, int menu_open, uint64_t *buttons, int32_t sticks[4]) {
-    int edge = chord(held, buttons, 1ull << B_MINUS | 1ull << B_PLUS);
-    if (menu_open) {
-        *buttons = 0;
-        sticks[0] = sticks[1] = sticks[2] = sticks[3] = 0;
+static int pad_list_has(const InputPadDevice *devices, int count, uint32_t id) {
+    for (int i = 0; i < count; i++) if (devices[i].id == id) return 1;
+    return 0;
+}
+
+uint32_t input_pad_choose(InputPadSelection *s, const InputPadDevice *devices, int count,
+                          const char *preferred, uint32_t current) {
+    uint32_t *ids = count ? malloc((size_t)count * sizeof *ids) : NULL;
+    if (count && !ids) return pad_list_has(devices, count, current) ? current : devices[0].id;
+    uint32_t wanted = 0;
+    if (!s->initialized || s->force || strcmp(preferred, s->preferred)) {
+        // Initial inventory is a baseline, not a batch of new connections. An explicit menu choice wins
+        // over simultaneous arrivals and cancels a pending automatic takeover.
+        for (int i = 0; i < count; i++)
+            if (!strcmp(devices[i].key, preferred)) wanted = devices[i].id;
+        s->automatic = !wanted;
+        if (!wanted && count) wanted = devices[0].id;
+        s->pending = wanted != current ? wanted : 0;
+        snprintf(s->preferred, sizeof s->preferred, "%s", preferred);
+        s->force = 0;
+    } else {
+        if (s->pending == current || !pad_list_has(devices, count, s->pending)) s->pending = 0;
+        for (int i = 0; i < count; i++) {
+            int known = 0;
+            for (int j = 0; j < s->count; j++) if (devices[i].id == s->ids[j]) known = 1;
+            if (!known) {
+                // If several devices arrive in one poll, the last enumerated arrival wins.
+                s->pending = devices[i].id;
+                s->automatic = 1;
+            }
+        }
+        if (s->pending) wanted = s->pending;   // retry a takeover whose SDL open has not succeeded yet
+        else if (pad_list_has(devices, count, current)) wanted = current;
+        else {
+            if (count) wanted = devices[0].id;
+            s->automatic = 1;
+        }
     }
+    for (int i = 0; i < count; i++) ids[i] = devices[i].id;
+    free(s->ids);
+    s->ids = ids;
+    s->count = count;
+    s->initialized = 1;
+    return wanted;
+}
+
+int input_hold_gate(InputHoldGate *gate, uint32_t device, uint64_t now_ns, uint64_t *buttons) {
+    const uint64_t combo = 1ull << B_MINUS | 1ull << B_PLUS;
+    uint64_t raw = *buttons & combo;
+    if (device != gate->device) {
+        // A hold cannot continue across selection changes or reconnects. Do not mistake
+        // buttons already down on the newly selected device for a fresh shortcut.
+        *gate = (InputHoldGate){.device = device, .consumed = raw == combo, .fired = raw == combo};
+    }
+    int edge = 0;
+    if (!device || !raw) {
+        gate->timing = gate->consumed = gate->fired = 0;
+    } else if (raw == combo) {
+        gate->consumed = 1;
+        if (!gate->fired) {
+            if (!gate->timing || now_ns < gate->since_ns) {
+                gate->since_ns = now_ns;
+                gate->timing = 1;
+            } else if (now_ns - gate->since_ns >= 500000000ull) {
+                gate->fired = 1;
+                edge = 1;
+            }
+        }
+    } else {
+        gate->timing = 0;   // an interrupted hold must start a new continuous half-second
+    }
+    if (gate->consumed) *buttons &= ~combo;
     return edge;
 }
 
 // Both stick clicks held together step the performance overlay as F10 does (a gamepad has no F10: the Steam Deck in
-// Game Mode). The same latch as the menu's above; the game sees neither click while it holds.
+// Game Mode). The game sees neither click while its existing immediate latch holds.
 int input_overlay_gate(int *held, uint64_t *buttons) {
     return chord(held, buttons, 1ull << B_STICK_L | 1ull << B_STICK_R);
 }

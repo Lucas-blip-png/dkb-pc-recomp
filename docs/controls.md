@@ -5,7 +5,32 @@
 > names are written below with the TotK Recomp names. In the Bananza build read `TOTK_*` as `DKB_*` (both work, `DKB_`
 > wins) and `totk.ini` as `dkb.ini` (a `totk.ini` is copied to it on the first run).
 
-Input comes from the first SDL3 gamepad, the keyboard and the mouse, merged into one Switch controller (`runtime/input_win.c`). Buttons are ORed; each stick takes the source with the larger deflection. Keys and mouse buttons count only while the game window is in the foreground. `TOTK_INPUT=none` disables both (automated runs). `TOTK_*` settings can also be set in `totk.ini` next to `totk.exe` (`input = none`, `motion = 0`, `rumble = 0`); the environment overrides the file. `TOTK_RUMBLE_STRENGTH` is the rumble strength in percent (0 to 300, default 130; 0 is the same as `rumble = 0`). `TOTK_RUMBLE_CURVE` is the exponent applied to the amplitude before the strength (0.2 to 1.5, default 0.6; lower makes weak pulses stronger, 1 is linear). `TOTK_RUMBLE_TRIGGERS=1` also drives the impulse triggers of an Xbox pad.
+Input comes from the selected SDL3 gamepad, the keyboard and the mouse, merged into one Switch controller (`runtime/input.c`). Buttons are ORed; each stick takes the source with the larger deflection. Keys and mouse buttons count only while the game window is in the foreground. `TOTK_INPUT=none` disables both (automated runs). `TOTK_*` settings can also be set in `totk.ini` next to `totk.exe` (`input = none`, `motion = 0`, `rumble = 0`); the environment overrides the file. `TOTK_RUMBLE_STRENGTH` is the rumble strength in percent (0 to 300, default 130; 0 is the same as `rumble = 0`). `TOTK_RUMBLE_CURVE` is the exponent applied to the amplitude before the strength (0.2 to 1.5, default 0.6; lower makes weak pulses stronger, 1 is linear). `TOTK_RUMBLE_TRIGGERS=1` also drives the impulse triggers of an Xbox pad.
+
+## Controller device
+
+Choose **Controller Device** in F1 > Controls > Controller. Changes apply to gameplay and the menu without restarting.
+At startup, a saved manual choice is used when available; otherwise the first available controller is used.
+A newly connected controller takes over automatically, including after a manual choice. If the active controller
+disconnects, another available controller takes over. With no controllers, keyboard and mouse remain available.
+Only the currently active controller controls gameplay and the controller shortcuts.
+
+A manual menu choice applies immediately and is saved for the next startup. Automatic takeovers and fallbacks
+show **Auto: controller name** and do not overwrite that saved startup preference. Choosing Auto explicitly
+resets startup selection to the first available controller. Refreshing the list, opening the menu or changing
+an unrelated setting does not count as a new connection. Devices already connected at launch are a baseline;
+if several arrive between polls, the last enumerated new device is chosen. Discovery may take about one second.
+
+Identities are cached per connected SDL instance ID: routine scans do not repeatedly initialize USB/Bluetooth
+controllers. A new/reconnected device can still cause a brief initialization hitch.
+
+The selection is saved as `pad_device` in `totk.ini` (`dkb.ini` in Bananza). Set it to `auto` to reset it, or use
+`TOTK_PAD_DEVICE` / `DKB_PAD_DEVICE` to override it. The other values are opaque device keys written by the menu.
+Devices with serial numbers can be identified across sessions; otherwise identical devices use fallback ordinals,
+which can become ambiguous if their connection order changes. Duplicate names have numbered menu labels.
+
+Motion and vibration use the selected controller's existing capabilities. Switching devices keeps the existing
+button mappings and button-layout setting.
 
 `TOTK_PAD_LAYOUT` (`pad_layout`, the *Button layout* row on the Controls tab, live) picks which face button is Switch A:
 
@@ -53,11 +78,15 @@ Without the folder (an install made by an older setup, or one where the setup co
 
 | Key | Gamepad | Action |
 |---|---|---|
-| F1 or Esc | Guide (Xbox, PS) button, or Minus and Plus together | open or close the settings menu; the game gets no input while it is open |
+| F1 or Esc | Guide / Home button | open or close the settings menu; the game gets no input while it is open |
 | F10 | L3 + R3 (both stick clicks) | performance overlay: off, frame rate, full panel |
-| F11 | | windowed, or back to the last full-screen mode (`window_mode`), saved to `totk.ini` |
+| F11 | Hold Start + Back (Plus + Minus) for 0.5 seconds | windowed, or back to the last full-screen mode (`window_mode`), saved to `totk.ini` |
 
-The Minus+Plus combo never reaches the game. In the menu the arrow keys, the D-pad or the left stick move, Enter or A selects, Q and E or L and R switch tabs, Esc or B goes back (Switch button names, as in the table above).
+The fullscreen hold uses the selected controller's physical SDL Start and Back buttons (Options + Create on DualSense), independently of button remapping. It fires once per hold; release both buttons before repeating. Once the buttons overlap, neither reaches the game until both are released. An individual button pressed before the combination forms still works normally. Switching or reconnecting controllers does not inherit a held shortcut. The former instant Minus + Plus settings shortcut is replaced by this fullscreen hold; Guide / Home and F1 retain their existing settings behavior.
+
+The read-only **Shortcuts** section above **Buttons** shows settings, fullscreen and performance shortcuts using the selected controller's button labels. Performance data follows the current stick-click bindings, as before. Guide / Home must be forwarded by the operating system or streaming client.
+
+In the menu the arrow keys, the D-pad or the left stick move, Enter or A selects, Q and E or L and R switch tabs, Esc or B goes back (Switch button names, as in the table above).
 
 ## Remapping
 

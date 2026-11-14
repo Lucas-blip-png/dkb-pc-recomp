@@ -49,6 +49,7 @@ int gfx_window_vk_presentable(VkInstance inst, VkPhysicalDevice pd, uint32_t fam
 
 // ---- window thread
 #define WND_STYLE WS_OVERLAPPEDWINDOW
+#define WM_APP_TOGGLE_FULLSCREEN (WM_APP + 3)
 #define WM_APP_SETTINGS (WM_APP + 1)
 #define WM_APP_FULLSCREEN (WM_APP + 2)   // the fullscreen setting, held back until the window is first activated
 
@@ -158,6 +159,11 @@ void gfx_window_apply_settings(void) {
 }
 
 
+// Never resize from the input/present thread: F11 and this request share the window-thread handler.
+void gfx_window_toggle_fullscreen(void) {
+    if (g_hwnd) PostMessageW(g_hwnd, WM_APP_TOGGLE_FULLSCREEN, 0, 0);
+}
+
 void gfx_window_request_close(void) {
     if (g_hwnd) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
 }
@@ -211,6 +217,18 @@ int gfx_window_monitor_size(int *w, int *h) {
     return 1;
 }
 
+
+static void toggle_window_mode(HWND h) {
+    // the real window decides, so a mode forced by the environment cannot stick F11
+    int cur = is_fullscreen(h) ? (g_applied_mode ? g_applied_mode : 1) : 0, mode = cur ? 0 : last_fs;
+    set_mode(h, mode);
+    // the menu shows these; the next start keeps them
+    cfg_set("TOTK_WINDOW_MODE", mode == 2 ? "fullscreen" : mode == 1 ? "borderless" : "windowed");
+    cfg_set("TOTK_FULLSCREEN", mode ? "1" : "0");
+    cfg_save();
+    note_applied();   // what cfg_get reads now (the environment may still override it)
+}
+
 static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     LRESULT input_res;
     if (input_window_msg(h, m, w, l, &input_res)) return input_res;
@@ -219,16 +237,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_KEYDOWN:
         if (w == VK_F9 && !(l & (1 << 30))) gfx_backend()->dump_request();   // TOTK_DUMP=key; F10 is the system menu key
         if (w == VK_F11 && !(l & (1 << 30))) {   // bit 30: auto-repeat
-            // the real window decides, so a mode forced by the environment cannot stick F11
-            int cur = is_fullscreen(h) ? (g_applied_mode ? g_applied_mode : 1) : 0, mode = cur ? 0 : last_fs;
-            set_mode(h, mode);
-            // the menu shows these; the next start keeps them
-            cfg_set("TOTK_WINDOW_MODE", mode == 2 ? "fullscreen" : mode == 1 ? "borderless" : "windowed");
-            cfg_set("TOTK_FULLSCREEN", mode ? "1" : "0");
-            cfg_save();
-            note_applied();   // what cfg_get reads now (the environment may still override it)
+            toggle_window_mode(h);
         }
         break;
+    case WM_APP_TOGGLE_FULLSCREEN:
+        toggle_window_mode(h);
+        return 0;
     case WM_APP_SETTINGS:
         apply_settings(h);
         return 0;

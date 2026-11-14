@@ -49,7 +49,7 @@ bool opt_choice(const char *key, UiTextId label, const UiTextId *names, int n, U
 // A choice over a list the caller builds (devices, window sizes): values[i] is written, names[i] shown; "" means the key
 // unset. cur: the index in effect, -1 to find cfg_value(key) in values (no match: the value shown as it is).
 bool opt_choice_list(const char *key, UiTextId label, const char *const *values, const char *const *names, int n,
-                     UiTextId desc, int cur = -1, const char *note = nullptr);
+                     UiTextId desc, int cur = -1, const char *note = nullptr, const char *status = nullptr);
 // A row that runs an action: true on A or a click. id: unique on the page and not a setting ("##copy_info"); value:
 // shown on the right ("" none).
 bool opt_button(const char *id, UiTextId label, UiTextId desc, const char *value = "");
@@ -57,6 +57,9 @@ bool opt_button(const char *id, UiTextId label, UiTextId desc, const char *value
 bool opt_slider(const char *key, UiTextId label, float lo, float hi, UiTextId desc, float step = 1,
                 const char *fmt = "%g");
 
+// Informational binding-style row: focusable for navigation/help, never rebinds or clears.
+void opt_shortcut_row(const char *id, UiTextId title, UiTextId desc, const char *key_hint,
+                      const char *const *buttons, int count);
 // Binding rows show either key cells 0 and 1 or controller cell 2. The key has no TOTK_ prefix (e.g. BIND_A).
 // Returns the activated cell, 10 + the cleared cell (Delete, Backspace or X), or -1. A note follows the description.
 // opt_focus_key("<key>#<cell>") returns the cursor to a cell after remapping.

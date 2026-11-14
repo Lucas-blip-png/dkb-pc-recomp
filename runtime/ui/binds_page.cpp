@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "imgui.h"
+#include <SDL3/SDL_gamepad.h>
 #include "ui/binds_page.h"
 #include "ui/option_rows.h"
 
@@ -104,6 +105,47 @@ static const char *pad_label(int p) {
     case PAD_LABEL_TRIANGLE: return menu_text(UI_PAD_TRIANGLE);
     }
     return menu_text((UiTextId)(UI_PAD_SOUTH + (p - PAD_SOUTH)));
+}
+
+// Remember only UI presentation across disconnects, and discard it when a different absent preference is chosen.
+static int shortcut_device_type(void) {
+    static int remembered = SDL_GAMEPAD_TYPE_UNKNOWN;
+    static char preference[128];
+    const char *now = cfg_value("TOTK_PAD_DEVICE");
+    InputPadInfo info;
+    if (input_pad_info(&info)) remembered = info.type;
+    else if (strcmp(preference, now)) remembered = SDL_GAMEPAD_TYPE_UNKNOWN;
+    snprintf(preference, sizeof preference, "%s", now);
+    return remembered;
+}
+
+static const char *shortcut_label(int button, int type) {
+    bool ps = type == SDL_GAMEPAD_TYPE_PS3 || type == SDL_GAMEPAD_TYPE_PS4 || type == SDL_GAMEPAD_TYPE_PS5;
+    bool xbox = type == SDL_GAMEPAD_TYPE_XBOX360 || type == SDL_GAMEPAD_TYPE_XBOXONE;
+    bool nintendo = type >= SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO && type <= SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR;
+    if (button == PAD_NONE) return "-";
+    if (button == PAD_COUNT) return ps ? "PS" : xbox ? "Xbox" : nintendo ? "Home" : type == SDL_GAMEPAD_TYPE_STEAM ? "Steam" : "Guide/Home";
+    if (button == PAD_START) return ps ? (type == SDL_GAMEPAD_TYPE_PS3 ? "Start" : "Options") : type == SDL_GAMEPAD_TYPE_XBOXONE ? "Menu" : nintendo ? "+" : "Start";
+    if (button == PAD_BACK) return type == SDL_GAMEPAD_TYPE_PS5 ? "Create" : type == SDL_GAMEPAD_TYPE_PS4 ? "Share" : type == SDL_GAMEPAD_TYPE_PS3 ? "Select" : type == SDL_GAMEPAD_TYPE_XBOXONE ? "View" : nintendo ? "-" : "Back";
+    if (button == PAD_LSTICK) return ps ? "L3" : xbox ? "LS" : "L Stick";
+    if (button == PAD_RSTICK) return ps ? "R3" : xbox ? "RS" : "R Stick";
+    return pad_label(button);
+}
+
+static void shortcut_rows(const InputMap &m, int layout) {
+    int type = shortcut_device_type();
+    opt_group(UI_MENU_SHORTCUTS);
+    opt_text(UI_MENU_SHORTCUT_READONLY);
+    const char *guide[] = {shortcut_label(PAD_COUNT, type)};
+    opt_shortcut_row("##shortcut_settings", UI_MENU_SHORTCUT_SETTINGS, UI_MENU_SHORTCUT_SETTINGS_DESC, "F1", guide, 1);
+    const char *fullscreen[] = {shortcut_label(PAD_START, type), shortcut_label(PAD_BACK, type)};
+    opt_shortcut_row("##shortcut_fullscreen", UI_MENU_SHORTCUT_FULLSCREEN, UI_MENU_SHORTCUT_FULLSCREEN_DESC, "F11  |  Hold 0.5 s", fullscreen, 2);
+    uint8_t left[INPUT_PAD_BINDING_MAX], right[INPUT_PAD_BINDING_MAX];
+    int l = input_map_pads_of(&m, B_STICK_L, layout, left, INPUT_PAD_BINDING_MAX);
+    int r = input_map_pads_of(&m, B_STICK_R, layout, right, INPUT_PAD_BINDING_MAX);
+    const char *performance[] = {shortcut_label(l ? left[0] : PAD_NONE, type), shortcut_label(r ? right[0] : PAD_NONE, type)};
+    opt_shortcut_row("##shortcut_performance", UI_MENU_SHORTCUT_PERFORMANCE, UI_MENU_SHORTCUT_PERFORMANCE_DESC, "F10", performance, 2);
+    ImGui::Dummy(ImVec2(0, 6));
 }
 
 // The layout the gamepad cells show: the one in effect, or without a gamepad the one the setting names (Xbox for auto).
@@ -237,6 +279,7 @@ void binds_rows(float scale, bool controller) {
     InputMap m;
     input_map_snapshot(&m);
     int layout = controller ? shown_layout() : 0;
+    if (controller) shortcut_rows(m,layout);
     opt_group(UI_BINDS_GROUP_BUTTONS);
     opt_text(controller ? UI_BINDS_HELP_PAD : UI_BINDS_HELP_KEYS);
     if (!controller) opt_bind_key_header();

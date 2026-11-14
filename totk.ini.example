@@ -222,6 +222,10 @@
 # audio_channels = auto
 
 [input]
+# Choose the controller in F1 > Controls > Controller Device. The saved device key is opaque.
+# Saved manual choices apply at startup, with first-available fallback. New connections take over automatically.
+# Disconnecting the active controller falls back to another device. Automatic changes do not overwrite this preference.
+# pad_device = auto
 # Gamepad motion controls (0 = off) and vibration (0 = off).
 # motion = 1
 # rumble = 1

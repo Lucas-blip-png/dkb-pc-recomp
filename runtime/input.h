@@ -17,12 +17,39 @@ void input_menu(int open);
 void input_file_opened(const char *path);
 // Exit: if TOTK_INPUT_SCRIPT was loaded and events are still pending, logs "input: script ended ..." once. Safe without a script.
 void input_script_report(void);
-// The gamepad alone, for the menu: Switch button bits and the left stick (up +y). 0 without a connected gamepad.
-// Minus+Plus combo and the neutral pad while the menu is open (input_map.c, window-system free): *held is the caller's memory
-// of the combo, sticks are lx, ly, rx, ry. Returns 1 in the poll where the combo goes down (toggle the menu once).
-int input_menu_gate(int *held, int menu_open, uint64_t *buttons, int32_t sticks[4]);
+// Physical Start/Back hold (input_map.c, window-system free). buttons contains B_PLUS/B_MINUS from the selected pad
+// before remapping, not keyboard input. Consumes those bits once both overlap, until both are released. Returns 1
+// after 500 ms continuously together, once per hold. A newly selected device already holding both must release first.
+typedef struct {
+    uint64_t since_ns;
+    uint32_t device;
+    int timing, consumed, fired;
+} InputHoldGate;
+int input_hold_gate(InputHoldGate *gate, uint32_t device, uint64_t now_ns, uint64_t *buttons);
 int input_overlay_gate(int *held, uint64_t *buttons);   // L3+R3: 1 in the poll both go down
+// The gamepad alone, for the menu: Switch button bits and the left stick (up +y). 0 without a connected gamepad.
 int input_pad_read(uint64_t *buttons, int32_t *lx, int32_t *ly);
+// Device snapshots are allocated with malloc; caller frees *devices. Calls are input-lock protected.
+// key persists GUID/name/serial identity, or an ordinal when the device has no serial number.
+typedef struct { uint32_t id; char key[128], name[256]; } InputPadDevice;
+int input_pad_devices(InputPadDevice **devices);
+// Window-system-free hot-swap policy (input_map.c). ids is owned by the state; free it when discarding a test state.
+// Only input polling advances this history. Menu enumeration must not consume arrival notifications.
+typedef struct {
+    uint32_t *ids, pending;
+    int count, initialized, automatic, force;
+    char preferred[128];
+} InputPadSelection;
+uint32_t input_pad_choose(InputPadSelection *s, const InputPadDevice *devices, int count,
+                          const char *preferred, uint32_t current);
+// The menu calls this after an explicit choice, including reselecting the saved preference after an auto takeover.
+void input_pad_selection_changed(void);
+int input_pad_automatic(void);   // read-only UI status: automatic takeover/fallback is currently in effect
+// Read-only UI metadata for the actual selected handle. Does not initialize, rescan, switch or poll input.
+// type is SDL_GamepadType; 0/disconnected returns an empty snapshot. No SDL dependency in this public header.
+typedef struct { uint32_t id; int type; char name[256]; } InputPadInfo;
+int input_pad_info(InputPadInfo *info);
+
 // The gamepad layout in effect (PAD_LAYOUT_*, input_map.h; TOTK_PAD_LAYOUT, live); -1 without a gamepad. Any thread.
 int input_pad_layout(void);
 // The label on a face button of the open gamepad (input_map.h PAD_SOUTH..PAD_NORTH, as SDL reports it); PAD_LABEL_NONE for another

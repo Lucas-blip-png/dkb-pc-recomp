@@ -24,6 +24,23 @@ typedef struct { const char *lang; const char *const *text; } Row;
     [UI_SWKBD_CANCEL] = cancel, [UI_SWKBD_PAD_HINT] = hint, LANG_NAMES
 
 static const char *const text_en[UI_TEXT_COUNT] = {
+    [UI_MENU_PAD_DEVICE] = "Controller Device",
+    [UI_MENU_PAD_DEVICE_DESC] = "Choose which controller to use. Changes take effect immediately.\n\n"
+        "Newly connected controllers take over automatically. If the active controller disconnects, another available controller takes over.\n\n"
+        "Manual choices apply immediately and are saved for startup. Auto starts with the first available controller. Later connections can still take over.\n\n"
+        "Keyboard and mouse remain available.",
+    [UI_MENU_SHORTCUTS] = "Shortcuts",
+    [UI_MENU_SHORTCUT_READONLY] = "Read-only shortcuts",
+    [UI_MENU_SHORTCUT_SETTINGS] = "Open settings menu",
+    [UI_MENU_SHORTCUT_SETTINGS_DESC] = "Press the Guide or Home button to open or close settings.\n\nKeyboard equivalent: F1.\n\nThe client or operating system must pass this button to the game.",
+    [UI_MENU_SHORTCUT_FULLSCREEN] = "Toggle fullscreen",
+    [UI_MENU_SHORTCUT_FULLSCREEN_DESC] = "Hold both displayed buttons together for 0.5 seconds to toggle fullscreen.\n\nRelease both before repeating.\n\nKeyboard equivalent: F11.",
+    [UI_MENU_SHORTCUT_PERFORMANCE] = "Toggle performance data",
+    [UI_MENU_SHORTCUT_PERFORMANCE_DESC] = "Press both stick-click bindings together to cycle performance data: Off, FPS, then Full.\n\nThis shortcut follows the current stick-click bindings.\n\nKeyboard equivalent: F10.",
+    [UI_MENU_PAD_CONNECTED] = "Connected",
+    [UI_MENU_PAD_WAITING] = "Connect a controller to resume",
+    [UI_MENU_PAD_NONE] = "No controller connected",
+    [UI_MENU_PAD_SAVED] = "Saved controller",
     SWKBD("Text entry", "Enter a name", "Horse", "OK", "Cancel", "Controller: A = OK, B = Cancel"),
 
     [UI_MENU_TITLE] = "Settings",
