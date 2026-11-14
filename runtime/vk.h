@@ -492,6 +492,8 @@ int vk_dlss_wanted(void);
 int vk_dlss_instance_exts(const char **out, int max);
 int vk_dlss_device_exts(const char **out, int max);
 int vk_dlss_record(VkCommandBuffer cb, uint64_t fence, const VkTexImage *in, const VkTexImage *out);
+int vk_dlss_warm(VkCommandBuffer cb, uint64_t fence);   // once, at the first compute dispatch: NGX and the model
+                                                      // load; 1 when it recorded into cb (rebind after it)
 void vk_dlss_release(void);   // device idle, before it goes away
 
 // ---- submission, synchronisation, completion (vk_sync.c, vk_backend.c)
