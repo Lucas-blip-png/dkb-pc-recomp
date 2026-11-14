@@ -2227,8 +2227,9 @@ static void twin_prepare(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
                 if (!h) continue;
                 // Most compare-sampled textures need no twin, and whether one does follows from the image its slot
                 // resolves to, which stays while the slot's token does: those are answered here without the texture
-                // lock, which the slices of the same pass take for their own draws (part of the 6% of the replay
-                // thread's replay spent waiting for that lock, eight threads, 3.2.0). The token is read before the lookup.
+                // lock, which every slice of the pass takes here for each of its draws. The token is read before the
+                // lookup, so a slot registered again in between leaves an entry under the old token, which never
+                // comes back.
                 uint32_t id = (uint32_t)(h & 0xfffff);
                 uint64_t tok = token_of(ex, h);
                 typeof(dc->tw[0]) *w = &dc->tw[(id ^ id >> 6) & 63];
