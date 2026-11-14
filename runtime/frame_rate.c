@@ -281,13 +281,20 @@ static uint64_t read_ptr(uint64_t a) {
     uint64_t p = 0;
     return read_guest(a, &p, 8) ? p : 0;
 }
+// Where main sits in this process, from rt_layout and not from layout.h: the layout is the one modules.c generated
+// for this install (tools/build_game.py), while the runtime library is compiled ahead of it.
+static uint64_t main_base(void) {
+    for (int i = 0; i < rt_layout_count; i++)
+        if (!strcmp(rt_layout[i].name, "main")) return rt_layout[i].base;
+    return 0;
+}
 // 1.2.1: [main+0x4728538] (1.1.1: [main+0x4630a68], 1.4.3: [main+0x3add238]) +0x1e8 scene, its component 13 lists the
 // resident actors; the one named "Player" has its position at +0x2b4 (MacNativeGames world_survey.c, game_version.h
 // TOTK_GAME_V121/V143). The 1.1.1 slot was measured from its own dereference chain: 181 scene accesses in that build
 // read it, and one of them reproduces this walk (the 14-component check, component 13, the 0x70 stride and the name
 // compare) instruction for instruction.
 static int player_pos(float xyz[3]) {
-    uint64_t module = read_ptr(MOD_MAIN_BASE + (RT_V143 ? 0x3add238 : RT_V111 ? 0x4630a68 : 0x4728538)),
+    uint64_t module = read_ptr(main_base() + (RT_V143 ? 0x3add238 : RT_V111 ? 0x4630a68 : 0x4728538)),
              scene = module ? read_ptr(module + 0x1e8) : 0;
     int32_t count = 0;
     if (!scene || !read_guest(scene + 0x50, &count, 4) || count < 14 || count > 256) return 0;

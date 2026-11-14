@@ -1,0 +1,75 @@
+name: DKB Linux (compile gate + self-contained AppImage)
+
+# Compiles the runtime without game files and builds the self-contained Linux AppImage
+# (tools/make_release_linux.py --game dkb) in the pinned container of tools/linux/Dockerfile.
+# The image is built with --stub, so it carries a runtime library compiled without a game dump; that library
+# takes the module layout from the modules.c generated at install time (tests/layout_neutral_runtime_test.py
+# keeps it that way), so the image is a CI artifact, not the by-hand release (which needs a lifted game and
+# runs --prove).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [appimage-totkrecompstyle]
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch refs
+        run: sh tools/fetch_refs.sh
+      - name: Fetch the release toolchain
+        run: python tools/make_release_linux.py --fetch-toolchain --out build/ci-toolchain
+      - name: Runtime library stays layout-neutral
+        run: python tests/layout_neutral_runtime_test.py
+      - name: Compile gate
+        run: |
+          python tools/ci/compile_gate.py \
+            --cc build/ci-toolchain/llvm/bin/clang \
+            --sysroot build/ci-toolchain/llvm/sysroot \
+            --deps build/ci-toolchain/runtime/deps \
+            --undefined \
+            --out build/ci-gate
+
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: [gate]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch refs
+        run: sh tools/fetch_refs.sh
+      - name: Fetch the release toolchain (cached)
+        run: python tools/make_release_linux.py --fetch-toolchain --out build/ci-toolchain
+      - name: Build the self-contained AppImage in the pinned container
+        run: |
+          python tools/make_release_linux.py --game dkb --stub \
+            --out build/release/DKB-Setup-linux \
+            --appimage build/release/DKB-Setup-x86_64.AppImage \
+            --ci-container
+      - name: Smoke-test the AppImage
+        env:
+          DKB_SETUP_HOME: ${{ runner.temp }}/dkb-setup
+        run: xvfb-run -a ./build/release/DKB-Setup-x86_64.AppImage --appimage-extract-and-run --selftest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DKB-Setup-linux-selfcontained
+          path: |
+            build/release/DKB-Setup-x86_64.AppImage
+            build/release/DKB-Setup-x86_64.AppImage.zsync
+          if-no-files-found: ignore

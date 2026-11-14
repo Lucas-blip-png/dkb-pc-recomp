@@ -281,6 +281,7 @@ change passes these, all run with `.venv`:
 | `tests\aoc_romfs_test.py --cc <clang>` | the add-on content reader on synthetic TOTKRFS1 packs: bad and unsorted indexes, EOF reads, handle table, unmount and remount, `ListAddOnContent` paging | no |
 | `tests\texture_written_late_test.py --cc <clang> --deps <runtime deps>` | the texture marking a helper part defers to its join (`vk_texture_gpu_written_late`), with a game thread's release before and after it, and the pending mirror copy count (`range_add`, `vk_mem_mirror_pending`); `--source-root <checkout>` runs it on another tree | no |
 | `tests\lowend_bench_test.py` | `tools\lowend_bench.py` `parse_log` on a synthetic perf log (the tool itself runs `dkb.exe` pinned to N cores and prints a before/after table) | no |
+| `tests\layout_neutral_runtime_test.py` | no file under `runtime\` names a module base or size: the prebuilt library is linked at install time against the `modules.c` generated for the user's game (`--runtime-lib`), so the layout must come from `rt_layout`, never from `layout.h` | no |
 | `tests\jumptables_check.py` | `recomp/jumptables.py` against a Unicorn oracle; must report 0 disagreements, on 1.4.3 too | yes |
 
 Runtime probes, each a mode of `totk.exe` (the list is at the top of `runtime/main.c`): `--probe-kernel`,

@@ -199,6 +199,12 @@ def tree_key(base):
                    if p.is_file() and '__pycache__' not in p.parts])
 
 
+def prebuilt_runtime(layout):
+    """The release's runtime/libtotkrt.a, built with the folder's toolchain and sysroot, or None: a checkout compiles
+    runtime/ from source, and so does a source package that carries no library."""
+    return layout.runtime_lib if not layout.dev and layout.runtime_lib.is_file() else None
+
+
 def tool_module(layout, name):
     spec = importlib.util.spec_from_file_location('_dkb_' + name.removesuffix('.py'), layout.tools / name)
     module = importlib.util.module_from_spec(spec)
@@ -356,8 +362,11 @@ def preflight(layout, options, dest, temp, rep):
                            layout.recomp / f'patches-{game}.txt', layout.tools / 'dkb_pack_romfs.py',
                            *([layout.tools / 'extract_nup.py'] if nup_arg else []),
                            layout.tools / 'dkb_shader_census.py',
-                           layout.runtime / 'nvn2_lower.cpp', layout.tools / 'data' / f'expected-{game}.json')
+                           layout.tools / 'data' / f'expected-{game}.json')
                if not p.is_file()]
+    # The release compiles nvn2_lower.cpp into libtotkrt.a, so it is not needed when the library is present.
+    if prebuilt_runtime(layout) is None and not (layout.runtime / 'nvn2_lower.cpp').is_file():
+        missing.append(layout.runtime / 'nvn2_lower.cpp')
     if layout.deps:
         missing += [p for p in (layout.deps / 'include', layout.deps / 'lib') if not p.is_dir()]
     if os.name == 'nt':
@@ -682,11 +691,13 @@ class Compile(Step):
     id = 'compile'
 
     def key(self, ctx):
+        lib = prebuilt_runtime(ctx.layout)
         return digest(ctx.keys['lift'], source_key(ctx.layout, 'runtime', 'tools/build_game.py', 'tools/romfs_index.py'),
                       str(ctx.layout.llvm), str(ctx.layout.deps),
                       sha256(ctx.layout.clang), sha256(ctx.layout.ninja),
                       tree_key(ctx.layout.deps) if ctx.layout.deps else 'system-libraries',
-                      [(str(p), sha256(p)) for p in ctx.layout.dlls])
+                      [(str(p), sha256(p)) for p in ctx.layout.dlls],
+                      sha256(lib) if lib else 'runtime-from-source')
 
     def current(self, ctx, record):
         exe = ctx.dest / ('dkb' + EXE)
@@ -705,6 +716,9 @@ class Compile(Step):
                 '--modules', 'main,sdk', '--exefs', ctx.dest / 'exefs', '--romfs', ctx.dest / 'romfs',
                 '--profile', ctx.dest / 'profile', '--runtime', ctx.layout.runtime, '--toolchain', ctx.layout.llvm,
                 '--ninja', ctx.layout.ninja, '--jobs', ctx.options.jobs, '--full-build']
+        lib = prebuilt_runtime(ctx.layout)
+        if lib:
+            args += ['--runtime-lib', lib]
         if ctx.layout.deps:
             args += ['--deps', ctx.layout.deps]
         if ctx.layout.sysroot:
