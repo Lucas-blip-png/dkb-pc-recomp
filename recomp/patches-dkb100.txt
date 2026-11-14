@@ -27,6 +27,16 @@ site realtime main 34ec1c 1e201828 f81f0fe9 @page:x9 bd400928 f84107e9  # same c
 site realtime main 34ec68 1e201860 f81f0fe9 @page:x9 bd400920 f84107e9  # time-scale transition
 site realtime main 69fc60 1e201820 f81f0fe9 @page:x9 bd400920 f84107e9  # secondary scene clock
 
+# The player's damped velocity update (main+1241c50, 3.2.0 main+13fad60) adds its target once per whole 60 Hz frame, so
+# above 60 fps the climb velocity decays to 0 and DK stops on walls and ceilings (#201). runtime/frame_rate.c damped_sum
+# (patch page +0x260) stands in for the fmov s12, #1.0 that bounds the loop; the three movi that clear the sum on the
+# path that skips the loop become nops. patches-dkb458752.txt explains the sites. The BL assumes the patch page is at
+# main+0x2450000 (recomp/layout.py), as the mousecamera sites do.
+site realtime main 1241c78 1e2e100c 9448397a  # fmov s12, #1.0, the loop bound
+site realtime main 1241c8c 2f00e40b d503201f  # movi d11, #0 on the path that skips the loop
+site realtime main 1241c90 2f00e40a d503201f  # movi d10, #0
+site realtime main 1241c94 2f00e409 d503201f  # movi d9, #0
+
 # Optional Bananza virtual display and camera aspect. Values are supplied by
 # runtime/dkb_wide.c at page +0x100 (width), +0x104 (height), +0x108 (aspect),
 # +0x10c (aspect / 16:9), +0x110 (render-target pool bytes).
