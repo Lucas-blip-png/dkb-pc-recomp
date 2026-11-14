@@ -1,12 +1,14 @@
 """Synthetic layout/animation regression tests; no extracted game content."""
 from pathlib import Path
+import json
 import struct
+import subprocess
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-import zstandard
-from dkb_wide_layout import HUD_ANCHORS, members, patch_archive, patch_title_effect
+from dkb_wide_layout import BACKGROUNDS, HUD_ANCHORS, TITLE_EFFECT_PATHS, members, patch_archive, patch_title_effect, zstd
 
 
 def archive(entries):
@@ -21,7 +23,7 @@ def archive(entries):
     header = b'SARC' + struct.pack('<HHIII', 20, 0xfeff, start + len(payload), start, 0x100)
     raw = header + b'SFAT' + struct.pack('<HHI', 12, len(entries), 0x65) + nodes
     raw += b'SFNT' + struct.pack('<HH', 8, 0) + names + payload
-    return zstandard.ZstdCompressor().compress(raw)
+    return zstd.compress(raw)
 
 
 def layout_header(magic, sections):
@@ -68,11 +70,22 @@ def fixture(omit=None, wrong=False):
 
 
 def unpack(raw):
-    d = zstandard.ZstdDecompressor().decompress(raw)
+    d = zstd.decompress(raw)
     return {name: d[lo:hi] for name, lo, hi in members(d)}
 
 
 class LayoutTests(unittest.TestCase):
+    def test_updated_dialog_accepts_only_the_version_specific_missing_pane(self):
+        path = 'Layout/DialogConfirm.Nin_Ounce_NVN2.blarc.zs'
+        raw = resource_files('dkb458752')[path]
+        with self.assertRaisesRegex(ValueError, 'missing panes'):
+            patch_archive(raw, 'DialogConfirm', 3440 / 2560)
+        changed = unpack(patch_archive(raw, 'DialogConfirm', 3440 / 2560, version='dkb458752'))
+        self.assertNotEqual(changed, unpack(raw))
+        missing = archive([('blyt/DialogConfirm.bflyt', layout_header(b'FLYT', []))])
+        with self.assertRaisesRegex(ValueError, 'missing panes'):
+            patch_archive(missing, 'DialogConfirm', 3440 / 2560, version='dkb458752')
+
     def test_edges_translate_without_scaling_or_changing_animation_tangents(self):
         original = unpack(fixture())
         moved = unpack(patch_archive(fixture(), 'HudStatus', 3440 / 1440 / (16 / 9), True))
@@ -140,9 +153,9 @@ def title_effect():
 class TitleEffectTests(unittest.TestCase):
     def test_only_wall_and_haze_scale_uniformly(self):
         original, start = title_effect()
-        raw = zstandard.ZstdCompressor().compress(original)
+        raw = zstd.compress(original)
         for factor in (1, 3440 / 2560, 2):
-            changed = zstandard.ZstdDecompressor().decompress(patch_title_effect(raw, factor))
+            changed = zstd.decompress(patch_title_effect(raw, factor))
             expected = original.copy()
             for i in (0, 2):
                 struct.pack_into('<2f', expected, start + 0x80 + i * 0x1000 + 0x20 + 0xfa0,
@@ -162,7 +175,75 @@ class TitleEffectTests(unittest.TestCase):
             else:
                 data[first + 0x2000 + 0x30] = ord('X')
             with self.subTest(fault=fault), self.assertRaises(ValueError):
-                patch_title_effect(zstandard.ZstdCompressor().compress(data), 2)
+                patch_title_effect(zstd.compress(data), 2)
+
+
+def resource_files(version='dkb100'):
+    """Complete synthetic RomFS inputs for the installer/generator integration test."""
+    files = {}
+    for name in dict.fromkeys((*BACKGROUNDS, *HUD_ANCHORS)):
+        panes = []
+        for key in dict.fromkeys((*BACKGROUNDS.get(name, {}), *HUD_ANCHORS.get(name, {}))):
+            if version == 'dkb458752' and name == 'DialogConfirm' and key == 'P_LightBgColor_01':
+                continue
+            p = pane(key, HUD_ANCHORS.get(name, {}).get(key, (0, 0))[0])
+            if key in BACKGROUNDS.get(name, {}):
+                struct.pack_into('<2f', p, 44, 0, 0)
+                struct.pack_into('<2f', p, 76, 1920, 1080)
+            panes.append(p)
+        files[f'Layout/{name}.Nin_Ounce_NVN2.blarc.zs'] = archive([
+            (f'blyt/{name}.bflyt', layout_header(b'FLYT', panes))])
+    files[TITLE_EFFECT_PATHS[version]] = zstd.compress(title_effect()[0])
+    return files
+
+
+class GeneratorTests(unittest.TestCase):
+    def command(self, romfs, out, *args):
+        return subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / 'tools/dkb_wide_layout.py'),
+                               '--romfs', str(romfs), '--out', str(out), *map(str, args)],
+                              capture_output=True, text=True)
+
+    def test_installer_workspace_does_not_allow_unowned_or_outside_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary).resolve()
+            marker = work / '.dkb-setup-owner.json'
+            marker.write_text(json.dumps({'game': 'dkb100', 'temporary': str(work / 'other')}))
+            staged = work / 'build' / 'overlays'
+            result = self.command(work / 'romfs', staged, '--installer-workspace', work, '--presets', '3440x1440')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('invalid installer workspace owner', result.stderr)
+            self.assertFalse(staged.exists())
+            marker.write_text(json.dumps({'game': 'dkb100', 'temporary': str(work)}))
+            outside = work / 'outside'
+            result = self.command(work / 'romfs', outside, '--installer-workspace', work, '--presets', '3440x1440')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('dedicated directory under build/', result.stderr)
+            self.assertFalse(outside.exists())
+
+    def test_manual_single_aspect_and_recorded_resource_hash_validation(self):
+        root = Path(__file__).resolve().parents[1]
+        build = root / 'build'
+        build.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=build) as temporary:
+            work = Path(temporary)
+            loose, packed = work / 'loose', work / 'packed'
+            for name, raw in resource_files().items():
+                path = loose / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(raw)
+            result = subprocess.run([sys.executable, str(root / 'tools/dkb_pack_romfs.py'), '--dir', str(loose),
+                                     '--out', str(packed)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = self.command(packed, work / 'centered', '--aspect', '3440x1440')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((work / 'centered' / 'manifest.tsv').is_file())
+            index = json.loads((packed / 'index.json').read_text())
+            index['files'][0]['sha256'] = '0' * 64
+            (packed / 'index.json').write_text(json.dumps(index))
+            result = self.command(packed, work / 'bad', '--aspect', '3440x1440')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('checksum mismatch', result.stderr)
+            self.assertFalse((work / 'bad').exists())
 
 
 if __name__ == '__main__':

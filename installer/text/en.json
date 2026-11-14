@@ -225,6 +225,7 @@
  "step.dkb_data": "Copying ExeFS and verifying packed RomFS",
  "step.dkb_translator": "Preparing the shader translator",
  "step.dkb_shaders": "Translating the game's shaders (once, a few minutes)",
+ "step.dkb_wide": "Preparing ultrawide backgrounds and HUD layouts",
  "step.dkb_verify": "Checking the completed installation",
  "phase.check.dkb_base": "Checking the ExeFS checksums",
  "phase.check.dkb_hash": "Checking the RomFS source files",
@@ -234,5 +235,6 @@
  "phase.lift.dkb_run": "Translating main and sdk with the Bananza patches",
  "phase.compile.dkb_run": "Compiling dkb.exe",
  "phase.dkb_shaders.dkb_run": "Translating the shader stages found in the game files",
- "phase.dkb_verify.dkb_run": "Running the installed program's self-checks"
+ "phase.dkb_verify.dkb_run": "Running the installed program's self-checks",
+ "phase.dkb_wide.dkb_run": "Preparing centered and edge HUD layouts for each ultrawide resolution"
 }
