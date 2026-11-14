@@ -3,8 +3,8 @@
 // (vk_present.c). The menu core calls no window system: events come in through menu_event_*, the drawing happens in the
 // present path's command buffer.
 //
-// F1 or Esc on the keyboard and Minus and Plus held together (consumed in poll_merged, input_menu_gate in input.h) open it;
-// F1, Esc, B or "Continue" close it. While it is open the game gets no input (input_menu, input.h) and keeps running; the
+// F1 or Esc on the keyboard and the controller Guide/Home button open the menu;
+// F1, Guide/Home, Esc, B or "Continue" close it. While it is open the game gets no input (input_menu, input.h) and keeps running; the
 // cursor is released from the mouse camera. Tabs Screen, Game, Sound, Controls and Menu (L / R or Q / E switch them) hold
 // option rows (ui/option_rows.h) over the cfg settings; the bottom row has "Continue" and "Quit game".
 // Test hooks (ui/menu.cpp): TOTK_MENU_TEST=<frame>[:<frames per page>] opens the menu at that presented frame and saves
@@ -59,6 +59,7 @@ int menu_font_check(void);
 
 // ---- what the menu asks of the platform side (gfx_window_win.c, gfx_window_sdl.c)
 void gfx_window_apply_settings(void);     // TOTK_FULLSCREEN or TOTK_WINDOW_SIZE changed: the window follows
+void gfx_window_toggle_fullscreen(void); // any thread: post the same window-mode toggle as F11
 void gfx_window_request_close(void);      // as the window's close button: the process ends
 int gfx_cfg_window_mode(void);               // 0 windowed, 1 borderless, 2 fullscreen
 int gfx_cfg_fullscreen(void);                // the window covers the monitor: mode 1 or 2

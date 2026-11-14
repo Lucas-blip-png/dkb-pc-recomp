@@ -32,7 +32,7 @@
 
 static SDL_Window *g_win;
 static uint32_t g_ev_base;               // SDL_RegisterEvents: the user events below
-enum { EV_RUN, EV_SETTINGS, EV_CLOSE, EV_COUNT };
+enum { EV_RUN, EV_SETTINGS, EV_CLOSE, EV_TOGGLE_FULLSCREEN, EV_COUNT };
 static PlatEvent g_video_ready = {.m = PLAT_MUTEX_INIT, .c = PLAT_COND_INIT, .manual = 1};   // SDL video is up
 static int g_video_ok;
 static PlatOnce g_thread_once = PLAT_ONCE_INIT;
@@ -141,6 +141,10 @@ void gfx_window_apply_settings(void) {
     if (g_win) post(EV_SETTINGS);
 }
 
+void gfx_window_toggle_fullscreen(void) {
+    if (g_win) post(EV_TOGGLE_FULLSCREEN);
+}
+
 void gfx_window_request_close(void) {
     if (g_win) post(EV_CLOSE);
 }
@@ -168,6 +172,18 @@ static void density_update(void) {
     __atomic_store_n(&g_density_milli, (int32_t)((d > 0 ? d : 1) * 1000 + 0.5f), __ATOMIC_RELAXED);
 }
 
+
+static void toggle_window_mode(void) {
+    // the real window decides, so a mode forced by the environment cannot stick F11
+    int cur = is_fullscreen() ? (g_applied_mode ? g_applied_mode : 1) : 0, mode = cur ? 0 : last_fs;
+    set_mode(mode);
+    // the menu shows these; the next start keeps them
+    cfg_set("TOTK_WINDOW_MODE", mode == 2 ? "fullscreen" : mode == 1 ? "borderless" : "windowed");
+    cfg_set("TOTK_FULLSCREEN", mode ? "1" : "0");
+    cfg_save();
+    note_applied();
+}
+
 // ---- the window thread
 static void handle(const SDL_Event *e) {
     if (e->type == g_ev_base + EV_RUN) {
@@ -180,6 +196,10 @@ static void handle(const SDL_Event *e) {
         if (g_win) apply_settings();
         return;
     }
+    if (e->type == g_ev_base + EV_TOGGLE_FULLSCREEN) {
+        if (g_win) toggle_window_mode();
+        return;
+    }
     if (e->type == g_ev_base + EV_CLOSE) gfx_window_closed();
     if (!g_win) return;
     input_sdl_event(e);
@@ -188,14 +208,7 @@ static void handle(const SDL_Event *e) {
     case SDL_EVENT_KEY_DOWN:
         if (e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) gfx_backend()->dump_request();   // TOTK_DUMP=key
         if (e->key.scancode == SDL_SCANCODE_F11 && !e->key.repeat) {
-            // the real window decides, so a mode forced by the environment cannot stick F11
-            int cur = is_fullscreen() ? (g_applied_mode ? g_applied_mode : 1) : 0, mode = cur ? 0 : last_fs;
-            set_mode(mode);
-            // the menu shows these; the next start keeps them
-            cfg_set("TOTK_WINDOW_MODE", mode == 2 ? "fullscreen" : mode == 1 ? "borderless" : "windowed");
-            cfg_set("TOTK_FULLSCREEN", mode ? "1" : "0");
-            cfg_save();
-            note_applied();
+            toggle_window_mode();
         }
         break;
     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:

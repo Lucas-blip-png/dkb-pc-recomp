@@ -29,6 +29,10 @@ static PlatMutex lock = PLAT_MUTEX_INIT;
 static int state;                    // 0 not started, 1 running, -1 disabled or SDL failed
 static SDL_Gamepad *pad;
 static uint64_t next_scan;
+static unsigned pad_device_seen;
+static InputHoldGate pad_fullscreen_gate;
+static int pad_fullscreen_pending;   // taken under lock; fullscreen request is posted after unlocking
+static void start(void);
 static int pad_rumble;               // the open gamepad has rumble motors
 static volatile int32_t pad_labels[4];  // ... and the labels of its south, east, west, north buttons (PAD_LABEL_*), any thread
 static int pad_east_a;               // ... and labels its east face button A (Nintendo layout under TOTK_PAD_LAYOUT=auto)
@@ -387,18 +391,116 @@ static void stick(SDL_GamepadAxis ax, SDL_GamepadAxis ay, float dead, int32_t ou
     input_pad_stick(SDL_GetGamepadAxis(pad, ax), -(int32_t)SDL_GetGamepadAxis(pad, ay), dead, out);
 }
 
-// Open the first gamepad when none is open or the open one went away; logs once per change.
+// Stable across sessions for devices with serial numbers. Without a serial, identical devices
+// use their enumeration ordinal (SDL instance IDs themselves are only valid for this session).
+static uint64_t device_hash(const char *s) {
+    uint64_t h = UINT64_C(14695981039346656037);
+    for (; s && *s; s++) { h ^= (unsigned char)*s; h *= UINT64_C(1099511628211); }
+    return h;
+}
+
+// Retain fallback ordinals for connected instance IDs. Removing another identical
+// controller must not renumber the one the player is still using.
+static InputPadDevice *device_cache;
+static int device_cache_count;
+
+// Under input lock. Opening temporarily only adds an SDL reference; no mappings or sensors change.
+static int devices_locked(InputPadDevice **devices) {
+    *devices = NULL;
+    int n = 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&n);
+    InputPadDevice *out = n > 0 ? calloc((size_t)n, sizeof *out) : NULL;
+    if (!out) { SDL_free(ids); return 0; }
+    for (int i = 0; i < n; i++) {
+        const char *name = SDL_GetGamepadNameForID(ids[i]);
+        char guid[33], base[80];
+        SDL_GUIDToString(SDL_GetGamepadGUIDForID(ids[i]), guid, sizeof guid);
+        snprintf(base, sizeof base, "%s:%016llx", guid, (unsigned long long)device_hash(name));
+        SDL_Gamepad *ref = SDL_OpenGamepad(ids[i]);
+        const char *serial = ref ? SDL_GetGamepadSerial(ref) : NULL;
+        out[i].id = ids[i];
+        if (serial && *serial)
+            snprintf(out[i].key, sizeof out[i].key, "%s:s%016llx", base, (unsigned long long)device_hash(serial));
+        else {
+            snprintf(out[i].key, sizeof out[i].key, "%s:n0", base);
+            for (int j = 0; j < device_cache_count; j++)
+                if (device_cache[j].id == ids[i] && !strncmp(device_cache[j].key, base, strlen(base))) {
+                    snprintf(out[i].key, sizeof out[i].key, "%s", device_cache[j].key);
+                    break;
+                }
+        }
+        if (ref) SDL_CloseGamepad(ref);
+    }
+    for (int i = 0; i < n; i++) {
+        char *suffix = strrchr(out[i].key, ':');
+        int ordinal = suffix && suffix[1] == 'n' ? atoi(suffix + 2) : 0;
+        if (suffix && suffix[1] == 'n' && !ordinal) {
+            char candidate[128];
+            int used;
+            do {
+                ++ordinal;
+                snprintf(candidate, sizeof candidate, "%.*s:n%d", (int)(suffix - out[i].key), out[i].key, ordinal);
+                used = 0;
+                for (int j = 0; j < n; j++) if (!strcmp(candidate, out[j].key)) used = 1;
+            } while (used);
+            snprintf(out[i].key, sizeof out[i].key, "%s", candidate);
+        }
+        const char *name = SDL_GetGamepadNameForID(ids[i]);
+        if (ordinal)
+            snprintf(out[i].name, sizeof out[i].name, "%s (#%d, ID %u)", name ? name : "Unknown controller", ordinal, ids[i]);
+        else snprintf(out[i].name, sizeof out[i].name, "%s (ID %u)", name ? name : "Unknown controller", ids[i]);
+    }
+    InputPadDevice *cache = malloc((size_t)n * sizeof *cache);
+    if (cache) {
+        memcpy(cache, out, (size_t)n * sizeof *cache);
+        free(device_cache);
+        device_cache = cache;
+        device_cache_count = n;
+    }
+    SDL_free(ids);
+    *devices = out;
+    return n;
+}
+
+int input_pad_devices(InputPadDevice **devices) {
+    plat_mutex_lock(&lock);
+    if (!state) start();
+    *devices = NULL;
+    int n = state == 1 ? devices_locked(devices) : 0;
+    plat_mutex_unlock(&lock);
+    return n;
+}
+
+// A missing explicit preference waits for that controller; keyboard/mouse remain usable.
+// Auto retains a connected pad, exactly as before. All handle changes share the motion/rumble lock.
 static void scan_pads(void) {
-    if (pad && SDL_GamepadConnected(pad)) return;
+    pad_device_seen = cfg_version();
+    const char *preferred = cfg_value("TOTK_PAD_DEVICE");
+    int automatic = !strcmp(preferred, "auto");
+    if (automatic && pad && SDL_GamepadConnected(pad)) return;
+    SDL_JoystickID wanted = 0;
+    if (!automatic) {
+        InputPadDevice *devices;
+        int n = devices_locked(&devices);
+        for (int i = 0; i < n; i++)
+            if (!strcmp(devices[i].key, preferred)) { wanted = devices[i].id; break; }
+        free(devices);
+        if (pad && SDL_GamepadConnected(pad) && SDL_GetGamepadID(pad) == wanted) return;
+    }
     if (pad) {
+        SDL_RumbleGamepad(pad, 0, 0, 0);
+        SDL_RumbleGamepadTriggers(pad, 0, 0, 0);
         SDL_CloseGamepad(pad); pad = NULL; sensor_pad = 0; sensor_ok = 0;
+        pad_rumble = 0;
+        motion_restart(motion_global());
         plat_xchg32(&pad_layout_shown, -1);
         for (int i = 0; i < 4; i++) plat_xchg32(&pad_labels[i], PAD_LABEL_NONE);
         rt_log("input: gamepad disconnected");
     }
     int n = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
-    for (int i = 0; ids && i < n && !pad; i++) pad = SDL_OpenGamepad(ids[i]);
+    for (int i = 0; ids && i < n && !pad; i++)
+        if (automatic || ids[i] == wanted) pad = SDL_OpenGamepad(ids[i]);
     SDL_free(ids);
     if (!pad) return;
     pad_rumble = SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
@@ -516,14 +618,33 @@ static void pick(int32_t *x, int32_t *y, int32_t kx, int32_t ky) {
 
 // Under lock, state 1: the open gamepad's inputs by position (pd[PAD_*] != 0 held); 0 without a connected gamepad.
 static int pad_physical(uint8_t pd[PAD_COUNT]) {
-    if ((!pad || !SDL_GamepadConnected(pad)) && plat_now_ns() / 1000000u >= next_scan) { next_scan = plat_now_ns() / 1000000u + RESCAN_MS; scan_pads(); }
+    if (pad_device_seen != cfg_version() || plat_now_ns() / 1000000u >= next_scan) { next_scan = plat_now_ns() / 1000000u + RESCAN_MS; scan_pads(); }
     SDL_UpdateGamepads();
-    if (!pad || !SDL_GamepadConnected(pad)) return 0;
+    if (!pad || !SDL_GamepadConnected(pad)) {
+        uint64_t empty = 0;
+        input_hold_gate(&pad_fullscreen_gate, 0, plat_now_ns(), &empty);
+        pad_fullscreen_pending = 0;
+        return 0;
+    }
     for (int p = PAD_SOUTH; p < PAD_ZL; p++) pd[p] = SDL_GetGamepadButton(pad, pad_sdl[p]);
     pd[PAD_ZL] = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > TRIGGER_ON;
     pd[PAD_ZR] = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > TRIGGER_ON;
     for (int p = PAD_ZR + 1; p < PAD_COUNT; p++) pd[p] = SDL_GetGamepadButton(pad, pad_sdl[p]);   // false without paddles
+    SDL_JoystickID id = SDL_GetGamepadID(pad);
+    if (pad_fullscreen_gate.device != id) pad_fullscreen_pending = 0;
+    uint64_t shortcut = (pd[PAD_START] ? 1ull << B_PLUS : 0) | (pd[PAD_BACK] ? 1ull << B_MINUS : 0);
+    pad_fullscreen_pending |= input_hold_gate(&pad_fullscreen_gate, id, plat_now_ns(), &shortcut);
+    // Consume physical buttons before remapping: the fixed shortcut neither depends on
+    // the player's bindings nor swallows another controller's or the keyboard's inputs.
+    if (!(shortcut & (1ull << B_PLUS))) pd[PAD_START] = 0;
+    if (!(shortcut & (1ull << B_MINUS))) pd[PAD_BACK] = 0;
     return 1;
+}
+
+static int pad_fullscreen_take(void) {
+    int toggle = pad_fullscreen_pending;
+    pad_fullscreen_pending = 0;
+    return toggle;
 }
 
 // Under lock, state 1: the open gamepad's buttons (Switch bits after TOTK_PAD_LAYOUT and the TOTK_BIND_* lines) and
@@ -582,15 +703,18 @@ static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx
     }
     script_apply(&b, sl, sr);
     rec_apply(b, sl, sr);
-    // Minus and Plus held together (gamepad or keys) open or close the menu and never reach the game
-    static int combo_held;
+    int toggle = pad_fullscreen_take();
     int32_t st[4] = {sl[0], sl[1], sr[0], sr[1]};
-    int toggle = input_menu_gate(&combo_held, menu_is_open(), &b, st);
+    if (menu_is_open()) {
+        b = 0;
+        st[0] = st[1] = st[2] = st[3] = 0;
+    }
     static int overlay_held;   // L3+R3 step the performance overlay (F10)
     int overlay = input_overlay_gate(&overlay_held, &b);
     sl[0] = st[0], sl[1] = st[1], sr[0] = st[2], sr[1] = st[3];
     plat_mutex_unlock(&lock);
-    if (toggle || guide_toggle) menu_toggle();
+    if (toggle) gfx_window_toggle_fullscreen();
+    if (guide_toggle) menu_toggle();
     if (overlay) menu_perf_cycle();
     stick_bits(&b, sl[0], sl[1], B_SL_LEFT);
     stick_bits(&b, sr[0], sr[1], B_SR_LEFT);
@@ -678,7 +802,9 @@ int input_pad_read(uint64_t *buttons, int32_t *lx, int32_t *ly) {
     if (!state) start();
     if (state > 0) binds_refresh();
     int ok = state == 1 && pad_read(&b, sl, sr);
+    int toggle = pad_fullscreen_take();
     plat_mutex_unlock(&lock);
+    if (toggle) gfx_window_toggle_fullscreen();
     *buttons = b;
     *lx = sl[0];
     *ly = sl[1];
@@ -718,7 +844,9 @@ int input_capture(int reset, int *id) {
     plat_mutex_lock(&lock);
     if (!state) start();
     if (state == 1) pad_physical(p);
+    int toggle = pad_fullscreen_take();
     plat_mutex_unlock(&lock);
+    if (toggle) gfx_window_toggle_fullscreen();
     int got = INPUT_CAPTURE_NONE;
     if (!reset) {
         if (esc && !prev_esc) got = INPUT_CAPTURE_CANCEL;
@@ -831,4 +959,18 @@ void input_motion_start(void) {
         }
     }
     plat_mutex_unlock(&lock);
+}
+
+int input_pad_info(InputPadInfo *info) {
+    memset(info, 0, sizeof *info);
+    plat_mutex_lock(&lock);
+    int connected = pad && SDL_GamepadConnected(pad);
+    if (connected) {
+        info->id = SDL_GetGamepadID(pad);
+        info->type = SDL_GetGamepadType(pad);
+        const char *name = SDL_GetGamepadName(pad);
+        snprintf(info->name, sizeof info->name, "%s", name ? name : "Controller");
+    }
+    plat_mutex_unlock(&lock);
+    return connected;
 }
