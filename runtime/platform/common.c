@@ -21,6 +21,18 @@ void plat_rmutex_unlock(PlatRMutex *m) {
     plat_mutex_unlock(&m->m);
 }
 
+uint32_t plat_rmutex_release(PlatRMutex *m) {
+    uint32_t depth = m->depth;
+    m->depth = 1;
+    plat_rmutex_unlock(m);
+    return depth;
+}
+
+void plat_rmutex_retake(PlatRMutex *m, uint32_t depth) {
+    plat_rmutex_lock(m);
+    m->depth = depth;
+}
+
 // ---- once: state 0 not run, 1 running, 2 done. Waiters for a running initialiser sleep on one process-wide
 // condition variable; initialisers are rare and short.
 

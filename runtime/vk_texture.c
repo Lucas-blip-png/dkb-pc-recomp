@@ -170,6 +170,38 @@ static void lock(void) {
 }
 static void unlock(void) { plat_rmutex_unlock(&tex_lock); }
 
+// A pass end held back (vk_exec.c par_defer) leaves its slices recording on the workers while the walk goes on, and
+// those slices look the cache up as their pass would have seen it. So before the walk changes what a slice reads (it
+// creates, takes back into use or re-describes an entry, marks one GPU-written for the first time or uploads into
+// one) it waits for the held slices: hold_barrier lets tex_lock go entirely for the wait, since the slices take it on
+// their misses, and takes it back as deep as it was held. The walk's frames up the stack keep the entries and slots
+// they found under the lock, so nothing moves or goes while it waits (tex_frozen): the slices' entry_of keeps the
+// released entries it would replace, the released sweeps wait, and the game threads' calls that free or rewrite
+// entries or slots (lock_unfrozen) wait until the walk has the lock back. The slices themselves never take that path,
+// so they never wait for the walk.
+static int tex_frozen;   // tex_lock
+
+static void hold_barrier(void) {   // tex_lock held
+    if (!vk_exec_held_pending()) return;
+    tex_frozen++;
+    uint32_t depth = plat_rmutex_release(&tex_lock);
+    vk_exec_held_wait();
+    plat_rmutex_retake(&tex_lock, depth);
+    tex_frozen--;
+}
+
+void vk_texture_hold_barrier(void) {
+    if (!vk_exec_held_pending()) return;
+    lock();
+    hold_barrier();
+    unlock();
+}
+
+static void lock_unfrozen(void) {   // a game thread's call that frees or rewrites entries or descriptor slots
+    lock();
+    while (tex_frozen && tex_lock.depth == 1) unlock(), plat_yield(), lock();
+}
+
 static uint32_t umax(uint32_t a, uint32_t b) { return a > b ? a : b; }
 static uint32_t mip(uint32_t v, unsigned lv) { return umax(v >> lv, 1); }
 
@@ -552,6 +584,7 @@ static void destroy_tex(Tex *e) {
 // frames every 40-50 s on a GTX 1050 Ti, then the textures still in use were created and uploaded again.
 #define RELEASED_MAX 2048
 static void sweep_released(void) {
+    if (tex_frozen) return;
     while (nreleased > RELEASED_MAX && rel_head) destroy_tex(rel_head);
 }
 
@@ -572,7 +605,7 @@ static void sweep_pressure(void) {   // tex_lock held
         if (vram_pressure < 0 || vram_pressure > 100) vram_pressure = 90;
         rt_log("vk: released textures under VRAM pressure: %s%d%%", vram_pressure ? "dropped above " : "off", vram_pressure);
     }
-    if (!vram_pressure || !rel_head || submit_epoch & 7) return;   // the budget query every 8 submits
+    if (!vram_pressure || !rel_head || submit_epoch & 7 || tex_frozen) return;   // the budget query every 8 submits
     uint64_t used, budget;
     int exact;
     if (!vk_mem_vram(&used, &budget, &exact) || used <= budget / 100 * (uint64_t)vram_pressure) return;
@@ -658,6 +691,7 @@ static void astc_check(const Tex *e, const uint8_t *raw, const VkAstcRegion *ar,
 // Copies the whole storage into the image (every level and layer the image has).
 static void upload(Tex *e) {
     static volatile int32_t n_bad, n_undecoded;
+    hold_barrier();   // the copy goes to the queue ahead of a held part (vk_sync_split_finish), whose slices may sample e
     const tex_t *t = &e->t;
     const nvn_texdesc *d = &t->d;
     int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
@@ -965,6 +999,8 @@ static Tex *entry_of(const tex_t *t) {
     TexKey k;
     make_key(t, &k);
     Tex *e = nvn_hm_get(&by_key, &k);
+    if ((!e || e->released || memcmp(&e->t, t, sizeof *t)) && vk_exec_held_pending())
+        hold_barrier(), e = nvn_hm_get(&by_key, &k);   // a held slice may have made it meanwhile
     if (vk_spec_helper()) {
         // The helper thread only reads: an entry to create, to take back into use or to describe anew is the replay
         // thread's to change, at its own position in the submission.
@@ -984,7 +1020,10 @@ static Tex *entry_of(const tex_t *t) {
         Tex *src = NULL;
         for (Tex *p = nvn_hm_get(&by_addr, &k.addr), *nx; p; p = nx) {
             nx = p->next_at;
-            if (p->released) { destroy_tex(p); continue; }
+            if (p->released) {
+                if (!tex_frozen) destroy_tex(p);   // else kept: the walk may hold it (hold_barrier)
+                continue;
+            }
             alias = 1;
             if (tex_alias && (!src || (same_but_swizzle(&p->key, &k) && !same_but_swizzle(&src->key, &k))) &&
                 alias_compatible(e, p) && alias_has_gpu_content(p))
@@ -1106,7 +1145,7 @@ void vk_texture_gpu_written(const tex_t *t) {
 
 static void gpu_written_entry(Tex *e) {
     {
-        if (!e->pub.gpu_owned) vk_spec_world_changed();   // a helper part may have checked or uploaded it as CPU-owned
+        if (!e->pub.gpu_owned) hold_barrier(), vk_spec_world_changed();   // a helper part or a held slice may have checked or uploaded it as CPU-owned
         e->pub.gpu_owned = 1;
         uint64_t f = vk_exec_recording_fence();
         if (f > e->wr_fence) e->wr_fence = f;
@@ -1130,7 +1169,7 @@ void vk_texture_release(const tex_t *t) {
     if (!t || !t->mem) return;
     TexKey k;
     make_key(t, &k);
-    lock();
+    lock_unfrozen();
     Tex *e = nvn_hm_get(&by_key, &k);
     if (e && !e->released) {
         e->released = 1;
@@ -1143,7 +1182,7 @@ void vk_texture_release(const tex_t *t) {
 }
 
 void vk_texture_range_gone(uint64_t lo, uint64_t size, VmaAllocation alloc) {
-    lock();
+    lock_unfrozen();
     Tex **list = malloc(sizeof *list * (size_t)(by_key.n + 1));
     int n = 0;
     for (uint32_t i = 0; i < by_key.cap; i++) {
@@ -1230,7 +1269,7 @@ static void descriptor_registered(DescSlot *d, uint32_t kind) {
 void vk_texture_register(const dpool_ref *pool, int id, const tex_t *t, const view_t *v) {
     static volatile int32_t n_unbacked;
     if (!pool || id < 0 || id >= (1 << 20) || (uint32_t)id >= pool->count) rt_fatal("vk: texture slot %d out of pool range", id);
-    lock();
+    lock_unfrozen();
     DescSlot *d = descriptor_slot(pool, id, 1u << 20, 1);
     if (!d) {
         log_limited(&n_unbacked, "texture descriptor slot %d has no mapped backing: not registered", id);
@@ -2091,7 +2130,7 @@ static VkSampler make_sampler(VkCtx *c, const samp_par *d) {
 void vk_sampler_register(const dpool_ref *pool, int id, const samp_par *s) {
     static volatile int32_t n_unbacked;
     if (!pool || id < 0 || id >= (1 << 12) || (uint32_t)id >= pool->count) rt_fatal("vk: sampler slot %d out of pool range", id);
-    lock();
+    lock_unfrozen();
     DescSlot *d = descriptor_slot(pool, id, 1u << 12, 1);
     if (!d) {
         log_limited(&n_unbacked, "sampler descriptor slot %d has no mapped backing: not registered", id);
@@ -2177,7 +2216,7 @@ int vk_sampler_params(const dpool_ref *pool, int id, samp_par *out) {
 // The candidates are the slots of the buckets the range or the serial names (desc_buckets); each is checked as the
 // whole table's slots were.
 void vk_texture_descriptors_retire(uint64_t addr, uint64_t size, uint64_t storage) {
-    lock();
+    lock_unfrozen();
     uint64_t first, last;   // bucket ids; a slot keyed at addr - NVN_DESCRIPTOR_BYTES + 1 still overlaps the range
     if (storage) first = last = storage | 1ull << 63;
     else {

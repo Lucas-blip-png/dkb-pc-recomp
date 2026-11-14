@@ -40,13 +40,14 @@ typedef struct Arena {
 } Arena;
 
 typedef struct { uint64_t lo, hi; } Rng;
-typedef struct { uint64_t lo, hi, off; int dropped; } Reg;
+typedef struct { uint64_t lo, hi, off, dropped; } Reg;   // dropped: the drop's number (U.dseq), 0 while kept
 typedef struct { uint64_t lo, hi, fence; } Wrote;
 
 static struct {
     int mode;                   // rt_knob: 0 off, 1 on, 2 ab
     int on;                     // this submission has a snapshot
     uint64_t fence, gen;
+    uint64_t dseq;              // drops made so far (vk_usnap_drops)
     Arena *arena;
     Rng *col;                   // collected ranges
     int ncol, ccol;
@@ -288,15 +289,24 @@ static int first_above(uint64_t a) {
 }
 
 static _Thread_local int find_quiet;
+static _Thread_local uint64_t find_upto;   // vk_usnap_view: only drops up to this number count; 0 every drop
 
 void vk_usnap_quiet(int on) { find_quiet = on; }
+
+// A slice of a sliced pass whose end is held back (vk_exec.c par_defer) may be recorded after the walk has gone on
+// past its pass and dropped copies with the GPU writes of later ops (a dispatch's storage buffer, an inline update):
+// the slice then bound live memory, which the game rewrites for its next frame, and models flickered black. Its
+// bindings follow the drops made before its pass started, as the walk's did.
+uint64_t vk_usnap_drops(void) { return __atomic_load_n(&U.dseq, __ATOMIC_ACQUIRE); }
+void vk_usnap_view(uint64_t upto) { find_upto = upto; }
 
 int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferInfo *out) {
     if (!U.on || !n) return 0;
     int i = first_above(addr);
     if (i >= U.nreg) return 0;
     const Reg *r = &U.reg[i];
-    if (__atomic_load_n(&r->dropped, __ATOMIC_ACQUIRE) || addr < r->lo || addr + n > r->hi) return 0;
+    uint64_t d = __atomic_load_n(&r->dropped, __ATOMIC_ACQUIRE);
+    if ((d && (!find_upto || d <= find_upto)) || addr < r->lo || addr + n > r->hi) return 0;
     uint64_t off = r->off + (addr - r->lo);
     if (off % align) return 0;
     *out = (VkDescriptorBufferInfo){U.arena->buf, off, n};
@@ -330,7 +340,9 @@ void vk_usnap_drop(uint64_t addr, uint64_t n) {
     U.wr[U.nwr++] = (Wrote){addr, addr + n, U.fence};
     if (U.on)
         for (int i = first_above(addr); i < U.nreg && U.reg[i].lo < addr + n; i++)
-            if (!U.reg[i].dropped) __atomic_store_n(&U.reg[i].dropped, 1, __ATOMIC_RELEASE), U.drops++, gen_bump();
+            if (!U.reg[i].dropped)
+                __atomic_store_n(&U.reg[i].dropped, __atomic_add_fetch(&U.dseq, 1, __ATOMIC_ACQ_REL), __ATOMIC_RELEASE), U.drops++,
+                    gen_bump();
     plat_mutex_unlock(&drop_lock);
 }
 

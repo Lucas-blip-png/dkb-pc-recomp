@@ -2004,6 +2004,7 @@ void vk_mem_use(VkMemSpan *sp) {
         // thread, and a part that ran while one was made is dropped (vk_mem_mirror_gen). The workers of sliced passes
         // make it under mirror_lock, and the first of them to get the lock does.
         if (vk_spec_helper()) { vk_spec_fail(VK_SPEC_MIRROR); return; }
+        vk_texture_hold_barrier();   // the walk, with a pass end held back: its slices resolve the pool as it was
         int locked = mirror_lock_if_shared();
         if (ms_get(r) == MS_NONE) mirror_create(r);
         mirror_unlock(locked);

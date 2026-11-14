@@ -67,6 +67,10 @@ void vk_exec_pool_counts(uint64_t *c, uint64_t *t) { *c = *t = 0; }
 _Thread_local int vk_spec_here;
 int vk_spec_fail(int why) { rt_fatal("unexpected helper failure %d in the frontier fixture", why); }
 void vk_spec_world_changed(void) {}
+// No pass end is held back (vk_exec.c par_defer): the texture cache's barrier never waits and nothing is frozen.
+static int tex_frozen;
+static int vk_exec_held_pending(void) { return 0; }
+static void hold_barrier(void) {}
 void vk_spec_event(void) {}
 // The actual shared split helper also contains the ordered-readback branch. Retirement scenarios must keep using
 // the nonwaiting branch; reaching any of these new dependencies is a fixture failure, not a simulated success.
@@ -222,6 +226,7 @@ void vk_mem_shadow_sync(void) {}
 static void ts_begin(VkCommandBuffer cb) { (void)cb; }
 static void ts_end(VkCommandBuffer cb, uint64_t fence) { (void)cb; check(fence == 2, "split keeps its final fence"); }
 static void ts_drop(void) {}
+static void held_none(const char *where) { (void)where; }   // no split part held back (vk_sync_split_defer)
 void rec_begin(VkCommandBuffer cb) { (void)cb; }
 int rec_end_cb(VkCommandBuffer cb, int crumb, uint64_t fence) { (void)cb; (void)crumb; (void)fence; return 0; }
 // The recorder ends no command buffer above, so split_impl submits every part itself and never hands one over.
