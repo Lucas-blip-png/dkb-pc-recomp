@@ -1691,6 +1691,9 @@ uint64_t vk_texture_dirty_fence(uint64_t addr, uint64_t size) {
 // a stale map or stale resource bytes (wrong textures in the distance). Every hit is checked before any is written
 // back, since a write-back is itself a CPU write to storage another hit may share; the hits then go back oldest render
 // first, so where two descriptors share storage the newer render wins.
+static int wb_copies(Tex **hit, int k);
+static void wb_land(void);
+
 void vk_texture_write_back(uint64_t addr, uint64_t size) {
     lock();
     Tex **hit = malloc(sizeof *hit * (size_t)(nowned + 1));
@@ -1706,11 +1709,11 @@ void vk_texture_write_back(uint64_t addr, uint64_t size) {
             Tex *x = hit[j];
             hit[j] = hit[j - 1], hit[j - 1] = x;
         }
-    for (int i = 0; i < k; i++) write_back(hit[i]);
-    for (int i = 0; i < k; i++) perf_count(PERF_CNT_WB);
+    int queued = wb_copies(hit, k);
     for (int i = k; i < n; i++) perf_count(PERF_CNT_WB_SKIP);
     free(hit);
     unlock();
+    if (queued) wb_land();
 }
 
 // ---- asynchronous write-back (TOTK_WB_ASYNC=1; off by default: the replay waits as before)
@@ -1923,6 +1926,45 @@ void vk_texture_wb_poll(void) {
     unlock();
 }
 
+// A waited write-back (vk_texture_write_back, vk_texture_write_back_small) of the textures hit[0..k), oldest render
+// first, texture lock held. Done under the lock, the GPU wait (image_texels: vk_upload_flush(1), the copy behind all
+// the work queued so far) kept the lock for about 0.35 ms, some 340 times a second in Bananza's Lake Level (3.2.0), and
+// the replay's texture lookups waited for it: slot tokens, bind_resources and shader_for in the replay's slices, and
+// vk_texture_new_submit and vk_texture_gpu_written on the submitting thread. TOTK_WB_UNLOCKED (default 1) queues the
+// copies here as the asynchronous write-back does (wb_queue) and has the caller wait without the lock (wb_land); the
+// copies then land through vk_texture_wb_poll's checks: an entry destroyed meanwhile only frees its staging, a CPU
+// write to the storage after the render keeps the CPU's bytes, and a render recorded meanwhile leaves the texture
+// GPU-dirty. A texture the copy cannot take (ASTC, packed depth-stencil) is written back here as before. 0: every
+// texture as before, under the lock. 1 when copies were queued: the caller unlocks, then calls wb_land.
+static int wb_unlocked = -1;
+static int wb_copies(Tex **hit, int k) {
+    if (wb_unlocked < 0) {
+        wb_unlocked = rt_knob("WB_UNLOCKED", "1");
+        rt_log("vk: waited write-backs wait for the GPU %s (TOTK_WB_UNLOCKED=%s)",
+               wb_unlocked == 2 ? "without the texture lock in the B blocks" : wb_unlocked ? "without the texture lock" : "under the texture lock",
+               wb_unlocked == 2 ? "ab" : wb_unlocked ? "1" : "0");
+    }
+    int on = RT_KNOB_ON(wb_unlocked), first = nwbp;
+    for (int i = 0; i < k; i++) {
+        int before = nwbp;
+        if (on && wb_queue(hit[i])) {
+            if (nwbp == before) hit[i]->gpu_dirty = 0;   // no region to copy: as write_back leaves it
+            continue;
+        }
+        write_back(hit[i]);
+        perf_count(PERF_CNT_WB);
+    }
+    if (nwbp == first) return 0;
+    uint64_t seq = vk_upload_flush(0);
+    for (int i = first; i < nwbp; i++) wbp[i].seq = seq;
+    return 1;
+}
+
+static void wb_land(void) {   // texture lock not held
+    vk_upload_flush(1);       // every batch so far, the copies just queued among them
+    vk_texture_wb_poll();     // they land in their storage
+}
+
 // TotK's grass system renders a 128x128 RGBA8 map of cut and trampled grass into a CPU-cached pool every frame and its
 // CPU code reads the pool bytes without nvnMemoryPoolInvalidateMappedRange (cut reactions: blades, insects, the cut
 // itself). On the Switch the bytes are there once the frame's fence has passed. So when the
@@ -1988,11 +2030,11 @@ void vk_texture_write_back_small(uint64_t fence) {
             Tex *x = hit[j];
             hit[j] = hit[j - 1], hit[j - 1] = x;
         }
-    for (int i = 0; i < k; i++) write_back(hit[i]);
-    for (int i = 0; i < k; i++) perf_count(PERF_CNT_WB);
+    int queued = wb_copies(hit, k);
     for (int i = k; i < n; i++) perf_count(PERF_CNT_WB_SKIP);
     free(hit);
     unlock();
+    if (queued) wb_land();
 }
 
 // ---------------------------------------------------------------- samplers (LAS textures.c)
