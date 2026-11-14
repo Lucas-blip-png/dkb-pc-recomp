@@ -146,6 +146,9 @@ typedef struct { PlatMutex m; uint32_t owner, depth; } PlatRMutex;
 #define PLAT_RMUTEX_INIT {PLAT_MUTEX_INIT, 0, 0}
 void plat_rmutex_lock(PlatRMutex *m);
 void plat_rmutex_unlock(PlatRMutex *m);
+// The holder lets the mutex go however deep it holds it, and later takes it back to that depth.
+uint32_t plat_rmutex_release(PlatRMutex *m);
+void plat_rmutex_retake(PlatRMutex *m, uint32_t depth);
 
 // One-time initialisation: the first caller runs fn(arg), every other caller waits until it returned. Zero-initialised
 // (PLAT_ONCE_INIT) has not run.

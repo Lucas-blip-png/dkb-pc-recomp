@@ -60,6 +60,7 @@ void vk_mem_dirty_submit(void) {}
 void vk_mem_protect_until(uint64_t f) { NEED(f == cur_fence); }
 void rec_stats_log(void) {}
 static void ts_drop(void) {}
+static void held_none(const char *where) { (void)where; }   // no split part held back (vk_sync_split_defer)
 static void state_reset(VkExec *ex) { memset(ex, 0, sizeof *ex); }
 void vk_dump_init(void) {}
 void vk_mem_mirror_begin(void) { NEED(x_here); mirror_begin++; }
@@ -70,6 +71,10 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t f) {
 void vk_usnap_end(uint64_t f) { NEED(!x_here && f == X.fence); snapshot_end++; }
 void vk_exec_pass_end(VkExec *ex) { NEED(ex == &X); ex->in_pass = 0; }
 static void par_flush(VkExec *ex) { (void)ex; }
+// No pass end is held back (TOTK_PAR_DEFER off): nothing to settle, and no slice contexts wait for their merge.
+static void par_settle_all(VkExec *ex) { (void)ex; }
+static int par_no_defer __attribute__((unused)), par_unmerged, par_nworkers;
+void vk_exec_draw_slices_end(int n) { (void)n; }
 static int par_mode;
 static int par_threads(void) { return par_mode; }
 static int npiece __attribute__((unused));   // vk_exec.c only assigns it now

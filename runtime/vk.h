@@ -293,6 +293,9 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence);
 void vk_usnap_end(uint64_t fence);
 int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferInfo *out);
 void vk_usnap_quiet(int on);   // the calling thread's finds are not counted while on (slices of a parallel pass)
+// The number of drops made so far, and, on a recording thread, the drops its lookups follow: those up to upto (0 all).
+uint64_t vk_usnap_drops(void);
+void vk_usnap_view(uint64_t upto);
 const void *vk_usnap_bytes(uint64_t addr, uint64_t n);   // the copy's bytes for the CPU; NULL: not copied or dropped
 int vk_usnap_covers(uint64_t addr, uint64_t n);   // a copy of this submission overlaps the range
 void vk_usnap_drop(uint64_t addr, uint64_t n);   // the replay makes the GPU write [addr, addr+n) of guest memory
@@ -424,6 +427,10 @@ typedef struct {
 // read it before the store is dropped: the store is followed by vk_spec_world_changed.
 static inline int vk_tex_fb_learned(const VkTexImage *img) { return __atomic_load_n(&img->fb_learned, __ATOMIC_ACQUIRE); }
 static inline void vk_tex_fb_learn(VkTexImage *img) { __atomic_store_n(&img->fb_learned, 1, __ATOMIC_RELEASE); }
+// The walk with a pass end held back (vk_exec.c par_defer) waits here for the held slices before it changes something
+// they read outside the texture cache's own calls (a learned feedback target, a new mirror); a texture lock it holds
+// is let go for the wait (vk_texture.c hold_barrier). Any other thread, or no held slice left: returns at once.
+void vk_texture_hold_barrier(void);
 const VkTexImage *vk_texture_get(const tex_t *t);   // created and made current; NULL for BUFFER or unmapped formats
 // A texture slot; a slot whose texture was finalized follows the live texture at the same storage (hle_nvn.c).
 const VkTexImage *vk_texture_by_id(const dpool_ref *pool, int id, view_t *view, int *has_view);
@@ -526,6 +533,14 @@ void vk_sync_split_insert(VkCommandBuffer cb);
 // Submit the recorded prefix and wait for its dedicated fence, without advancing the full submission's timeline.
 // Replay thread, outside a render pass. Returns a fresh recording command buffer; old resources keep their lifetime.
 VkCommandBuffer vk_sync_split_wait(void);
+// A split whose part cannot go to the queue yet (vk_exec.c par_defer: the end of a sliced pass whose slices are still
+// being recorded): the recorder finishes the part's queued calls and the part stays open, and a new begun one is
+// returned for the rest of the submission. Up to 8 parts may be held. vk_sync_split_finish then has tail make the
+// held-back calls into the oldest held part on the calling thread, ends it and submits it ahead of every later part:
+// the replay finishes every held part before any other split and before its submission ends, and does nothing in
+// between that needs a held part on the GPU.
+VkCommandBuffer vk_sync_split_defer(void);
+void vk_sync_split_finish(void (*tail)(VkCommandBuffer cb, void *arg), void *arg);
 // TOTK_TRACE=perf: the replay notes each draw or dispatch of the part being timed (kind 0 draw, 1 indirect draw, 2
 // dispatch, 3 indirect dispatch; a, b: the NVN 2 names of its vertex and fragment stages, or its compute stage and 0;
 // work: vertices x instances or groups, 0 when indirect), so a slow part can name its work. vk_sync_noting: 1 while

@@ -231,6 +231,11 @@ enum { DP_PASS, DP_SHADER, DP_PIPE, DP_STATE, DP_SIG, DP_UBO, DP_SSBO, DP_TEX, D
 // rewrites its pointer block this way before every draw, all at one address, so ubo_ptr reads the latest update that
 // covers the pointer, else memory. Payloads stay in the recorded command buffer for the whole replay.
 #define UPD_N 4096
+typedef struct {
+    uint64_t fence;                      // the submission the entries belong to
+    uint32_t n;                          // updates noted in it
+    struct { uint64_t lo, hi; const uint8_t *data; } u[UPD_N];
+} UpdList;
 
 // The image and the levels [l0, l1) and layers [a0, a1) a texture's view covers.
 typedef struct { VkImage image; uint32_t l0, l1, a0, a1; } SubRange;
@@ -378,11 +383,8 @@ typedef struct DrawCtx {
     struct {
         uint64_t n, hdr, body, forced, field[BSF_N], pipe_chg, gen_chg, cls[7];   // cls[]: which bound state differed first
     } BSF;
-    struct {
-        uint64_t fence;                      // the submission the entries belong to
-        uint32_t n;                          // updates noted in it
-        struct { uint64_t lo, hi; const uint8_t *data; } u[UPD_N];
-    } UPD;
+    UpdList UPD;
+    const UpdList *updv;                     // what upd_read reads when set: a slice's pass's snapshot (vk_exec_draw_slice_view)
     struct {
         int on;
         uint32_t n;                        // draws closed
@@ -1636,9 +1638,10 @@ static void upd_note(const VkExec *ex, const p_update_ub *u) {
 // 1 when an update of this submission supplied [a, a+n).
 static int upd_read(const VkExec *ex, uint64_t a, void *out, size_t n) {
     DrawCtx *const dc = DC_OF(ex);
-    if (dc->UPD.fence != ex->fence) return 0;
-    for (uint32_t i = dc->UPD.n, end = dc->UPD.n > UPD_N ? dc->UPD.n - UPD_N : 0; i-- > end;) {
-        const typeof(dc->UPD.u[0]) *e = &dc->UPD.u[i % UPD_N];
+    const UpdList *L = dc->updv ? dc->updv : &dc->UPD;
+    if (L->fence != ex->fence) return 0;
+    for (uint32_t i = L->n, end = L->n > UPD_N ? L->n - UPD_N : 0; i-- > end;) {
+        const typeof(L->u[0]) *e = &L->u[i % UPD_N];
         if (a >= e->hi || a + n <= e->lo) continue;
         if (a < e->lo || a + n > e->hi) return 0;   // partly covered: memory
         memcpy(out, e->data + (a - e->lo), n);
@@ -1871,6 +1874,7 @@ static uint32_t feedback_prepare(VkExec *ex, const GfxShader *fs) {
                 const VkExecTarget *t = i < 8 ? &ex->color[i] : &ex->depth;
                 if (!((d >> i & 1) && t->img && t->img->fb_usage) || vk_tex_fb_learned(t->img)) continue;
                 if (IS_HELPER(dc) && vk_spec_fail(VK_SPEC_FEEDBACK)) return 0;   // the replay thread's open pass would begin differently
+                vk_texture_hold_barrier();   // a held slice of an earlier pass reads the mark (vk_exec.c par_defer)
                 vk_tex_fb_learn((VkTexImage *)t->img);
                 vk_spec_world_changed();
             }
@@ -4320,10 +4324,16 @@ static DrawCtx *ctx_new(void) {
 }
 
 // The inline uniform updates the replay thread has noted, for ubo_ptr (only the entries in use are copied).
-static void upd_take(DrawCtx *c) {
+static void upd_copy(UpdList *to) {
     uint32_t n = draw_main.UPD.n < UPD_N ? draw_main.UPD.n : UPD_N;
-    memcpy(&c->UPD, &draw_main.UPD, offsetof(typeof(draw_main.UPD), u) + n * sizeof draw_main.UPD.u[0]);
+    memcpy(to, &draw_main.UPD, offsetof(UpdList, u) + n * sizeof draw_main.UPD.u[0]);
 }
+static void upd_take(DrawCtx *c) { upd_copy(&c->UPD); }
+
+// The inline uniform updates as of the start of a sliced pass, which its slices read (vk_exec_draw_slice_view): with
+// the pass ends held back (vk_exec.c par_defer) the slices of a pass may still be recorded while the next pass is
+// collected, and a copy into the recording threads' own contexts would change under them.
+static UpdList upd_snap[VK_EXEC_UPD_SNAPS];
 
 // Replay thread, before helper k is handed a part (it is idle). The helper's context is made the first time; it takes
 // the inline uniform updates the replay thread has noted (only the entries in use are copied), for ubo_ptr. NULL: the
@@ -4349,7 +4359,7 @@ static DrawCtx *slice_ctx[SLICE_THREADS];
 // Submitting thread, at the start of a sliced pass: contexts for threads 0 to threads-1 (made the first time), each
 // with the inline uniform updates noted so far (no update op is collected into a sliced pass, so they hold for it).
 // The spare descriptor pools grow with the threads that record: each takes pools of its own for every submission.
-void vk_exec_draw_slices_begin(int threads) {
+void vk_exec_draw_slices_begin(int threads, int snap) {
     if (threads > SLICE_THREADS) threads = SLICE_THREADS;
     int made = 0;
     for (int k = 0; k < threads; k++) {
@@ -4358,8 +4368,8 @@ void vk_exec_draw_slices_begin(int threads) {
             c->slice = 1, made = 1;
             memset(c->DP.ticks, 0, sizeof c->DP.ticks), c->DP.draws = c->DP.ops = 0;   // its own profile (dp_log)
         }
-        upd_take(slice_ctx[k]);
     }
+    if (snap >= 0) upd_copy(&upd_snap[snap]);
     if (!made) return;
     int n = SPARE_POOLS + 8 * (threads > 1 ? threads - 1 : 0);
     plat_mutex_lock(&spare_lock);
@@ -4368,6 +4378,8 @@ void vk_exec_draw_slices_begin(int threads) {
 }
 
 struct DrawCtx *vk_exec_draw_slice_ctx(int k) { return k >= 0 && k < SLICE_THREADS ? slice_ctx[k] : NULL; }
+
+void vk_exec_draw_slice_view(struct DrawCtx *c, int snap) { c->updv = &upd_snap[snap]; }
 
 // Submitting thread, every slice of the pass recorded: the slices' frame counters go to vk_exec_frame.
 void vk_exec_draw_slices_end(int threads) {

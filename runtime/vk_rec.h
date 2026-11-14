@@ -34,6 +34,16 @@ void rec_drain(void);                 // waits until the recorder made every cal
 int rec_submit(VkCommandBuffer pro, VkCommandBuffer cb, uint64_t fence);
 void rec_submit_wait(void);           // any thread: returns once every part queued by rec_submit so far is submitted
 void rec_stats_log(void);             // TOTK_TRACE=perf: packets, bytes, drains and waits since the last call
+// The end of a sliced pass whose slices are still being recorded (vk_exec.c par_defer): between rec_capture_begin and
+// rec_capture_end the calls into the part being recorded are held back (both return the capture's position: the
+// capture is [begin, end)), and rec_capture_play makes them into cb on the calling thread once the slices are executed
+// there. The recorder must be idle for the play (rec_drain), and nothing may be captured that has no packet.
+// rec_capture_reset forgets every capture, once none is held.
+uint32_t rec_capture_begin(void);
+uint32_t rec_capture_end(void);
+void rec_capture_play(VkCommandBuffer cb, uint32_t lo, uint32_t hi);
+void rec_capture_reset(void);
+int rec_owns(VkCommandBuffer cb);     // the recorder records cb's calls (the producer's view)
 
 // Extension commands called through device function pointers.
 void rec_crumb(VkCommandBuffer cb, int kind, uint64_t n);   // vk_crumb in order with this command buffer's packets
