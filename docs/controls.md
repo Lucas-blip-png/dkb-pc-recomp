@@ -75,7 +75,7 @@ The fullscreen hold uses the selected controller's physical SDL Start and Back b
 
 The read-only **Shortcuts** section above **Buttons** shows settings, fullscreen and performance shortcuts using the selected controller's button labels. Performance data follows the current stick-click bindings, as before. Guide / Home must be forwarded by the operating system or streaming client.
 
- In the menu the arrow keys, the D-pad or the left stick move, Enter or A selects, Q and E or L and R switch tabs, Esc or B goes back (Switch button names, as in the table above).
+In the menu the arrow keys, the D-pad or the left stick move, Enter or A selects, Q and E or L and R switch tabs, Esc or B goes back (Switch button names, as in the table above).
 
 ## Remapping
 

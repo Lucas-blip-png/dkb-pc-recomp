@@ -595,32 +595,32 @@ void opt_shortcut_row(const char *id, UiTextId title, UiTextId desc, const char 
     float fs = ImGui::GetFontSize(), w = ImGui::GetContentRegionAvail().x;
     float h = floorf(fs * 2.65f), cx[2], cw;
     bind_columns(p.x, w, 1, cx, &cw);
-    ImGui::InvisibleButton("##shortcut", ImVec2(w,h), ImGuiButtonFlags_EnableNav);
+    ImGui::InvisibleButton("##shortcut", ImVec2(w, h), ImGuiButtonFlags_EnableNav);
     bool hovered = ImGui::IsItemHovered();
     bool focused = ImGui::IsItemFocused() && ImGui::GetCurrentContext()->NavCursorVisible;
     bool to_key = g_focus_key[0] && !strcmp(id, g_focus_key);
     if (g_take_first || to_key) {
-        ImGui::SetFocusID(ImGui::GetItemID(),ImGui::GetCurrentWindow());
+        ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
         ImGui::SetNavCursorVisible(true);
         if (to_key) {
             ImGui::ScrollToItem(ImGuiScrollFlags_KeepVisibleEdgeY);
             g_focus_key[0] = 0;
         }
-        g_take_first=false;
+        g_take_first = false;
     }
-    offer_help(ImGui::GetItemID(),hovered,focused,menu_text(title),desc,"##shortcut",nullptr,nullptr,
-               false,menu_text(UI_MENU_SHORTCUT_READONLY));
+    offer_help(ImGui::GetItemID(), hovered, focused, menu_text(title), desc, "##shortcut", nullptr, nullptr,
+               false, menu_text(UI_MENU_SHORTCUT_READONLY));
     ImDrawList *dl = ImGui::GetWindowDrawList();
-    float r=(P->dk?6:8)*g_scale, pad=8*g_scale;
-    if (hovered || focused) dl->AddRect(p,ImVec2(p.x+w,p.y+h),P->border_idle,r);
-    fit_text(dl,p.x+16*g_scale,cx[0]-fs*0.3f,p.y,fs*1.5f,P->label,menu_text(title),false);
-    dl->AddText(ImGui::GetFont(),fs*0.75f,ImVec2(p.x+16*g_scale,p.y+fs*1.55f),kDim,key_hint);
-    float gap=fs*1.2f, cap_w=(cw-gap*(count-1))/count, cap_h=floorf(fs*1.9f), y=p.y+(h-cap_h)*0.5f;
-    for(int i=0;i<count;i++) {
-        float x=cx[0]+i*(cap_w+gap);
-        dl->AddRect(ImVec2(x,y),ImVec2(x+cap_w,y+cap_h),P->border_idle,r);
-        fit_text(dl,x+pad,x+cap_w-pad,y,cap_h,P->cell_text,buttons[i],true);
-        if(i+1<count) fit_text(dl,x+cap_w,x+cap_w+gap,y,cap_h,kDim,"+",true);
+    float r = (P->dk ? 6 : 8)*g_scale, pad = 8*g_scale;
+    if (hovered || focused) dl->AddRect(p, ImVec2(p.x+w, p.y+h), P->border_idle, r);
+    fit_text(dl, p.x+16*g_scale, cx[0]-fs*0.3f, p.y, fs*1.5f, P->label, menu_text(title), false);
+    dl->AddText(ImGui::GetFont(), fs*0.75f, ImVec2(p.x+16*g_scale, p.y+fs*1.55f), kDim, key_hint);
+    float gap = fs*1.2f, cap_w = (cw-gap*(count-1))/count, cap_h = floorf(fs*1.9f), y = p.y+(h-cap_h)*0.5f;
+    for (int i = 0; i<count; i++) {
+        float x = cx[0]+i*(cap_w+gap);
+        dl->AddRect(ImVec2(x, y), ImVec2(x+cap_w, y+cap_h), P->border_idle, r);
+        fit_text(dl, x+pad, x+cap_w-pad, y, cap_h, P->cell_text, buttons[i], true);
+        if (i+1<count) fit_text(dl, x+cap_w, x+cap_w+gap, y, cap_h, kDim, "+", true);
     }
     ImGui::PopID();
 }

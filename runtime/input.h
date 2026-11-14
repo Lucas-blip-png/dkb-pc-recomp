@@ -17,7 +17,6 @@ void input_menu(int open);
 void input_file_opened(const char *path);
 // Exit: if TOTK_INPUT_SCRIPT was loaded and events are still pending, logs "input: script ended ..." once. Safe without a script.
 void input_script_report(void);
-// The gamepad alone, for the menu: Switch button bits and the left stick (up +y). 0 without a connected gamepad.
 // Physical Start/Back hold (input_map.c, window-system free). buttons contains B_PLUS/B_MINUS from the selected pad
 // before remapping, not keyboard input. Consumes those bits once both overlap, until both are released. Returns 1
 // after 500 ms continuously together, once per hold. A newly selected device already holding both must release first.
@@ -28,6 +27,7 @@ typedef struct {
 } InputHoldGate;
 int input_hold_gate(InputHoldGate *gate, uint32_t device, uint64_t now_ns, uint64_t *buttons);
 int input_overlay_gate(int *held, uint64_t *buttons);   // L3+R3: 1 in the poll both go down
+// The gamepad alone, for the menu: Switch button bits and the left stick (up +y). 0 without a connected gamepad.
 int input_pad_read(uint64_t *buttons, int32_t *lx, int32_t *ly);
 // Device snapshots are allocated with malloc; caller frees *devices. Calls are input-lock protected.
 // key persists GUID/name/serial identity, or an ordinal when the device has no serial number.
