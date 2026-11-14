@@ -524,20 +524,59 @@ int vk_pool_map_virtual(pool_t *v, int n, const void *requests) {
 
 // Per-thread copies of resolved import and physical pools that overlap no other index entry (so pidx_find picks them for
 // any range inside), valid while pool_gen is unchanged: the replay resolves a few dozen pools thousands of times per
-// frame (16 vertex streams and every buffer binding of each draw). Direct-mapped by the 4 KiB page of the address, so
-// a hit is one compare however many pools a frame touches. TOTK_RESOLVE_CHECK=1 compares every hit with the locked
-// lookup and stops on a difference.
+// frame (16 vertex streams and every buffer binding of each draw). A thread keeps up to RPOOL_N of them sorted by
+// address (rpool, all of one pool_gen, emptied when it moves), and a byte map from the 64 KiB block of an address to
+// the copy that held it last (rmap): a hit is one compare, and a block the map does not answer is found by a binary
+// search of the copies before pool_lock is taken. With a table of 512 copies indexed by the 4 KiB page, as before, 40%
+// of the resolves in Bananza's Lake Level (3.2.0) missed: a pool filled one slot per page it was read at, the vertex
+// data of a frame is spread over more pages than the table held, and each miss took pool_lock shared, an atomic write
+// to one cache line for every thread of a sliced pass. Now 2.4% miss, from 20 KiB per thread (the old table took 36).
+// TOTK_RESOLVE_CHECK=1 compares every hit with the locked lookup and stops on a difference.
 static int rec_class(const PoolRec *r) {
     if (r->kind != POOL_IMPORT) return VK_MCLS_DEVICE;
     return r->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS ? VK_MCLS_HOST_NOACC
          : r->flags & NVN_MEMORY_POOL_FLAGS_CPU_CACHED ? VK_MCLS_HOST_CACHED : VK_MCLS_HOST_UNC;
 }
 
-typedef struct { uint64_t gen, lo, hi, base, end; VkBuffer buf; VmaAllocation alloc; int cls; void *pool; } ResolveHit;
-#define RHIT_SLOTS 512
-static _Thread_local ResolveHit rhit[RHIT_SLOTS];
+typedef struct { uint64_t lo, hi, base, end; VkBuffer buf; VmaAllocation alloc; int cls; void *pool; } ResolveHit;
+#define RPOOL_N 255   // rmap holds an index
+#define RMAP_BLOCKS 4096
+static _Thread_local ResolveHit rpool[RPOOL_N];
+static _Thread_local int rpool_n;
+static _Thread_local uint64_t rpool_gen;
+static _Thread_local uint8_t rmap[RMAP_BLOCKS];   // the rpool index that held an address of the block last
 
-static ResolveHit *rhit_slot(uint64_t addr) { return &rhit[(addr >> 12 ^ addr >> 21) & (RHIT_SLOTS - 1)]; }
+static uint8_t *rmap_slot(uint64_t addr) { return &rmap[(addr >> 16 ^ addr >> 28) & (RMAP_BLOCKS - 1)]; }
+
+// The copy holding [addr, end) at pool_gen g, NULL for none.
+static const ResolveHit *rhit_find(uint64_t g, uint64_t addr, uint64_t end) {
+    if (rpool_gen != g) return NULL;
+    uint8_t *m = rmap_slot(addr);
+    const ResolveHit *h = &rpool[*m];
+    if (*m < rpool_n && addr >= h->lo && end <= h->hi) return h;
+    int lo = 0, hi = rpool_n;   // the last copy with lo <= addr
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (rpool[mid].lo <= addr) lo = mid + 1;
+        else hi = mid;
+    }
+    if (!lo || !(addr >= rpool[lo - 1].lo && end <= rpool[lo - 1].hi)) return NULL;
+    *m = (uint8_t)(lo - 1);
+    return &rpool[lo - 1];
+}
+
+// A copy for a pool's index entry [lo, hi) at pool_gen g, kept in order: the entry overlaps no other one.
+static ResolveHit *rhit_add(uint64_t g, uint64_t lo, uint64_t hi) {
+    if (rpool_gen != g || rpool_n == RPOOL_N) rpool_gen = g, rpool_n = 0;
+    int k = 0;
+    while (k < rpool_n && rpool[k].lo < lo) k++;
+    if (k == rpool_n || rpool[k].lo != lo) {
+        memmove(&rpool[k + 1], &rpool[k], sizeof *rpool * (size_t)(rpool_n - k));
+        rpool_n++;
+    }
+    rpool[k].lo = lo, rpool[k].hi = hi;
+    return &rpool[k];
+}
 
 static int resolve_check_on(void) {
     static int on = -1;
@@ -650,8 +689,8 @@ int vk_mem_descriptor_key(uint64_t addr, uint64_t size, VkDescKey *out) {
 int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out) {
     memset(out, 0, sizeof *out);
     uint64_t g = __atomic_load_n(&pool_gen, __ATOMIC_ACQUIRE), end = addr + size;
-    const ResolveHit *h = rhit_slot(addr);
-    if (end >= addr && h->gen == g && addr >= h->lo && end <= h->hi) {
+    const ResolveHit *h = end >= addr ? rhit_find(g, addr, end) : NULL;
+    if (h) {
         out->buffer = h->buf;
         out->offset = addr - h->base;
         out->avail = h->end - addr;
@@ -681,9 +720,9 @@ static int resolve_locked(uint64_t addr, uint64_t size, VkMemSpan *out) {
     if (r && (r->kind == POOL_IMPORT ? r->buf != VK_NULL_HANDLE : r->kind == POOL_PHYS)) {
         int i = (int)(e - pool_index.e);
         if ((i == 0 || pool_index.maxhi[i - 1] <= e->lo) && (i + 1 == pool_index.n || pool_index.e[i + 1].lo >= e->hi)) {
-            ResolveHit *h = rhit_slot(addr);
-            h->gen = __atomic_load_n(&pool_gen, __ATOMIC_RELAXED);   // stable: changed only under the exclusive lock
-            h->lo = e->lo, h->hi = e->hi, h->buf = r->buf, h->cls = rec_class(r);
+            // pool_gen is stable here: it changes only under the exclusive lock.
+            ResolveHit *h = rhit_add(__atomic_load_n(&pool_gen, __ATOMIC_RELAXED), e->lo, e->hi);
+            h->buf = r->buf, h->cls = rec_class(r);
             if (r->kind == POOL_IMPORT) h->base = r->import_lo, h->end = r->import_hi, h->alloc = NULL, h->pool = r;
             else h->base = r->lo, h->end = r->lo + r->size, h->alloc = r->alloc, h->pool = NULL;
         }
