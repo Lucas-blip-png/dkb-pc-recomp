@@ -62,7 +62,8 @@ static DrawCtx ctx;   // the replay thread's: c0_lay NULL (NVN 1), the bank memo
 '''
     knobs = draw[draw.index('static int knob_on('):draw.index('static const char *const BSF_NAME[')]
     c0 = function(draw, 'static VkDescriptorBufferInfo c0_info(')
-    # vk_texture.c: a slot's kind and serial are all descriptor_registered reads or writes.
+    # vk_texture.c: a slot's kind and serial are what descriptor_registered sets; its key and bucket position
+    # (desc_buckets) it keeps across the reset.
     kinds = next(line for line in texture.splitlines() if line.startswith('enum { DESC_TEXTURE = 1'))
     gens = '\n'.join(line for line in texture.splitlines()
                      if line.startswith(('static uint32_t slots_gen', 'static uint32_t samp_gen',
@@ -143,7 +144,7 @@ int main(void) {
     return failures!=0;
 }
 '''
-    adapter = 'typedef struct { uint32_t kind, serial; } DescSlot;\n'
+    adapter = 'typedef struct { uint32_t kind, serial; VkDescKey key; uint32_t bpos; } DescSlot;\n'
     return '\n'.join((prelude.replace('@CTX@', draw_context(draw)), knobs, c0, kinds, adapter, gens, registered,
                       tests))
 
