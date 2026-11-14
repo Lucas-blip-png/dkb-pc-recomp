@@ -10,8 +10,19 @@ Input comes from the selected SDL3 gamepad, the keyboard and the mouse, merged i
 ## Controller device
 
 Choose **Controller Device** in F1 > Controls > Controller. Changes apply to gameplay and the menu without restarting.
-Auto keeps the first available controller while it remains connected. A manual selection uses only that controller;
-if it disconnects, controller input waits for it to reconnect. Keyboard and mouse remain available.
+At startup, a saved manual choice is used when available; otherwise the first available controller is used.
+A newly connected controller takes over automatically, including after a manual choice. If the active controller
+disconnects, another available controller takes over. With no controllers, keyboard and mouse remain available.
+Only the currently active controller controls gameplay and the controller shortcuts.
+
+A manual menu choice applies immediately and is saved for the next startup. Automatic takeovers and fallbacks
+show **Auto: controller name** and do not overwrite that saved startup preference. Choosing Auto explicitly
+resets startup selection to the first available controller. Refreshing the list, opening the menu or changing
+an unrelated setting does not count as a new connection. Devices already connected at launch are a baseline;
+if several arrive between polls, the last enumerated new device is chosen. Discovery may take about one second.
+
+Identities are cached per connected SDL instance ID: routine scans do not repeatedly initialize USB/Bluetooth
+controllers. A new/reconnected device can still cause a brief initialization hitch.
 
 The selection is saved as `pad_device` in `totk.ini` (`dkb.ini` in Bananza). Set it to `auto` to reset it, or use
 `TOTK_PAD_DEVICE` / `DKB_PAD_DEVICE` to override it. The other values are opaque device keys written by the menu.

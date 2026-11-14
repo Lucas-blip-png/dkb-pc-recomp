@@ -26,8 +26,8 @@ typedef struct { const char *lang; const char *const *text; } Row;
 static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_PAD_DEVICE] = "Controller Device",
     [UI_MENU_PAD_DEVICE_DESC] = "Choose which controller to use. Changes take effect immediately.\n\n"
-        "Auto uses the first available controller and keeps it while connected.\n\n"
-        "Your selection is saved between sessions. If the selected controller disconnects, input resumes when it reconnects.\n\n"
+        "Newly connected controllers take over automatically. If the active controller disconnects, another available controller takes over.\n\n"
+        "Manual choices apply immediately and are saved for startup. Auto starts with the first available controller. Later connections can still take over.\n\n"
         "Keyboard and mouse remain available.",
     [UI_MENU_SHORTCUTS] = "Shortcuts",
     [UI_MENU_SHORTCUT_READONLY] = "Read-only shortcuts",
@@ -38,7 +38,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_SHORTCUT_PERFORMANCE] = "Toggle performance data",
     [UI_MENU_SHORTCUT_PERFORMANCE_DESC] = "Press both stick-click bindings together to cycle performance data: Off, FPS, then Full.\n\nThis shortcut follows the current stick-click bindings.\n\nKeyboard equivalent: F10.",
     [UI_MENU_PAD_CONNECTED] = "Connected",
-    [UI_MENU_PAD_WAITING] = "Waiting for selected controller to reconnect",
+    [UI_MENU_PAD_WAITING] = "Connect a controller to resume",
     [UI_MENU_PAD_NONE] = "No controller connected",
     [UI_MENU_PAD_SAVED] = "Saved controller",
     SWKBD("Text entry", "Enter a name", "Horse", "OK", "Cancel", "Controller: A = OK, B = Cancel"),

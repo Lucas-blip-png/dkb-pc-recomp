@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cfg.h"
@@ -347,6 +348,52 @@ static int chord(int *held, uint64_t *buttons, uint64_t combo) {
     }
     if (*held) *buttons &= ~combo;
     return edge;
+}
+
+static int pad_list_has(const InputPadDevice *devices, int count, uint32_t id) {
+    for (int i = 0; i < count; i++) if (devices[i].id == id) return 1;
+    return 0;
+}
+
+uint32_t input_pad_choose(InputPadSelection *s, const InputPadDevice *devices, int count,
+                          const char *preferred, uint32_t current) {
+    uint32_t *ids = count ? malloc((size_t)count * sizeof *ids) : NULL;
+    if (count && !ids) return pad_list_has(devices, count, current) ? current : devices[0].id;
+    uint32_t wanted = 0;
+    if (!s->initialized || s->force || strcmp(preferred, s->preferred)) {
+        // Initial inventory is a baseline, not a batch of new connections. An explicit menu choice wins
+        // over simultaneous arrivals and cancels a pending automatic takeover.
+        for (int i = 0; i < count; i++)
+            if (!strcmp(devices[i].key, preferred)) wanted = devices[i].id;
+        s->automatic = !wanted;
+        if (!wanted && count) wanted = devices[0].id;
+        s->pending = wanted != current ? wanted : 0;
+        snprintf(s->preferred, sizeof s->preferred, "%s", preferred);
+        s->force = 0;
+    } else {
+        if (s->pending == current || !pad_list_has(devices, count, s->pending)) s->pending = 0;
+        for (int i = 0; i < count; i++) {
+            int known = 0;
+            for (int j = 0; j < s->count; j++) if (devices[i].id == s->ids[j]) known = 1;
+            if (!known) {
+                // If several devices arrive in one poll, the last enumerated arrival wins.
+                s->pending = devices[i].id;
+                s->automatic = 1;
+            }
+        }
+        if (s->pending) wanted = s->pending;   // retry a takeover whose SDL open has not succeeded yet
+        else if (pad_list_has(devices, count, current)) wanted = current;
+        else {
+            if (count) wanted = devices[0].id;
+            s->automatic = 1;
+        }
+    }
+    for (int i = 0; i < count; i++) ids[i] = devices[i].id;
+    free(s->ids);
+    s->ids = ids;
+    s->count = count;
+    s->initialized = 1;
+    return wanted;
 }
 
 int input_hold_gate(InputHoldGate *gate, uint32_t device, uint64_t now_ns, uint64_t *buttons) {

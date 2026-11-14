@@ -878,11 +878,20 @@ static void row_controller_device(void) {
     if (!found) { values[n] = preferred; names[n++] = menu_text(UI_MENU_PAD_SAVED); }
     InputPadInfo info;
     int connected = input_pad_info(&info);
-    const char *status = connected ? menu_text(UI_MENU_PAD_CONNECTED) :
-        menu_text(found ? UI_MENU_PAD_NONE : UI_MENU_PAD_WAITING);
+    int cur = 0;
+    if (input_pad_automatic()) {
+        if (connected) {
+            snprintf(display[count], sizeof display[count], "Auto: %.240s", info.name);
+            names[0] = display[count];
+        }
+    } else if (connected) {
+        for (int i = 0; i < count; i++) if (devices[i].id == info.id) cur = i + 1;
+    }
+    const char *status = menu_text(connected ? UI_MENU_PAD_CONNECTED : UI_MENU_PAD_NONE);
     char detail[320];
     snprintf(detail, sizeof detail, "%s%s%s", status, connected ? ": " : "", connected ? info.name : "");
-    opt_choice_list("TOTK_PAD_DEVICE", UI_MENU_PAD_DEVICE, values, names, n, UI_MENU_PAD_DEVICE_DESC, -1, status, detail);
+    if (opt_choice_list("TOTK_PAD_DEVICE", UI_MENU_PAD_DEVICE, values, names, n, UI_MENU_PAD_DEVICE_DESC, cur, status, detail))
+        input_pad_selection_changed();
     free(values); free(names); free(display);
 }
 

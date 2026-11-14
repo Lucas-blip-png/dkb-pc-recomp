@@ -476,22 +476,44 @@ int input_pad_devices(InputPadDevice **devices) {
     return n;
 }
 
-// A missing explicit preference waits for that controller; keyboard/mouse remain usable.
-// Auto retains a connected pad, exactly as before. All handle changes share the motion/rumble lock.
+static InputPadSelection pad_selection;
+
+void input_pad_selection_changed(void) {
+    plat_mutex_lock(&lock);
+    pad_selection.force = 1;
+    next_scan = 0;
+    plat_mutex_unlock(&lock);
+}
+
+int input_pad_automatic(void) {
+    plat_mutex_lock(&lock);
+    int automatic = pad_selection.automatic;
+    plat_mutex_unlock(&lock);
+    return automatic;
+}
+
+// Polling owns the connection history; UI enumeration only reads device identities. Arrivals take over,
+// disconnections fall back, and an explicit preference applies at startup or when changed by the user.
 static void scan_pads(void) {
     pad_device_seen = cfg_version();
     const char *preferred = cfg_value("TOTK_PAD_DEVICE");
-    int automatic = !strcmp(preferred, "auto");
-    if (automatic && pad && SDL_GamepadConnected(pad)) return;
-    SDL_JoystickID wanted = 0;
-    if (!automatic) {
-        InputPadDevice *devices;
-        int n = devices_locked(&devices);
-        for (int i = 0; i < n; i++)
-            if (!strcmp(devices[i].key, preferred)) { wanted = devices[i].id; break; }
+    InputPadDevice *devices;
+    int n = devices_locked(&devices);
+    uint32_t current = pad && SDL_GamepadConnected(pad) ? SDL_GetGamepadID(pad) : 0;
+    if (!n && current) { free(devices); return; }   // do not interpret a failed snapshot as a topology change
+    uint32_t wanted = input_pad_choose(&pad_selection, devices, n, preferred, current);
+    if (current && current == wanted) { free(devices); return; }
+    SDL_Gamepad *next = wanted ? SDL_OpenGamepad(wanted) : NULL;
+    if (!next && current) {   // a failed arrival must not discard a still-working controller
+        pad_selection.automatic = 1;
         free(devices);
-        if (pad && SDL_GamepadConnected(pad) && SDL_GetGamepadID(pad) == wanted) return;
+        return;
     }
+    if (!next)
+        for (int i = 0; i < n && !next; i++)
+            if (devices[i].id != wanted) next = SDL_OpenGamepad(devices[i].id);
+    if (next && SDL_GetGamepadID(next) != wanted) pad_selection.automatic = 1;
+    free(devices);
     if (pad) {
         SDL_RumbleGamepad(pad, 0, 0, 0);
         SDL_RumbleGamepadTriggers(pad, 0, 0, 0);
@@ -500,13 +522,9 @@ static void scan_pads(void) {
         motion_restart(motion_global());
         plat_xchg32(&pad_layout_shown, -1);
         for (int i = 0; i < 4; i++) plat_xchg32(&pad_labels[i], PAD_LABEL_NONE);
-        rt_log("input: gamepad disconnected");
+        rt_log(current ? "input: gamepad released for selection change" : "input: gamepad disconnected");
     }
-    int n = 0;
-    SDL_JoystickID *ids = SDL_GetGamepads(&n);
-    for (int i = 0; ids && i < n && !pad; i++)
-        if (automatic || ids[i] == wanted) pad = SDL_OpenGamepad(ids[i]);
-    SDL_free(ids);
+    pad = next;
     if (!pad) return;
     pad_rumble = SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
     pad_east_a = SDL_GetGamepadButtonLabel(pad, SDL_GAMEPAD_BUTTON_EAST) == SDL_GAMEPAD_BUTTON_LABEL_A;

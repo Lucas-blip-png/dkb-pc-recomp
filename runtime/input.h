@@ -33,6 +33,18 @@ int input_pad_read(uint64_t *buttons, int32_t *lx, int32_t *ly);
 // key persists GUID/name/serial identity, or an ordinal when the device has no serial number.
 typedef struct { uint32_t id; char key[128], name[256]; } InputPadDevice;
 int input_pad_devices(InputPadDevice **devices);
+// Window-system-free hot-swap policy (input_map.c). ids is owned by the state; free it when discarding a test state.
+// Only input polling advances this history. Menu enumeration must not consume arrival notifications.
+typedef struct {
+    uint32_t *ids, pending;
+    int count, initialized, automatic, force;
+    char preferred[128];
+} InputPadSelection;
+uint32_t input_pad_choose(InputPadSelection *s, const InputPadDevice *devices, int count,
+                          const char *preferred, uint32_t current);
+// The menu calls this after an explicit choice, including reselecting the saved preference after an auto takeover.
+void input_pad_selection_changed(void);
+int input_pad_automatic(void);   // read-only UI status: automatic takeover/fallback is currently in effect
 // Read-only UI metadata for the actual selected handle. Does not initialize, rescan, switch or poll input.
 // type is SDL_GamepadType; 0/disconnected returns an empty snapshot. No SDL dependency in this public header.
 typedef struct { uint32_t id; int type; char name[256]; } InputPadInfo;

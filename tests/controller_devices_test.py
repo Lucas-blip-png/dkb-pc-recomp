@@ -26,6 +26,11 @@ def main():
                         '-I', str(ROOT / 'runtime'), '-I', str(out),
                         str(ROOT / 'tests/controller_devices_test.c'), '-o', str(exe)], check=True)
         subprocess.run([str(exe)], check=True)
+        policy = out / f'controller-selection-{opt[1:]}.exe'
+        subprocess.run([args.cc, '-std=gnu11', opt, '-Wall', '-Wextra', '-Werror',
+                        '-I', str(ROOT / 'runtime'), str(ROOT / 'tests/controller_selection_test.c'),
+                        str(ROOT / 'runtime/input_map.c'), '-lm', '-o', str(policy)], check=True)
+        subprocess.run([str(policy)], check=True)
     return 0
 
 
