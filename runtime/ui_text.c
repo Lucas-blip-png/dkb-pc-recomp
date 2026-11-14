@@ -88,7 +88,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_UPSCALER] = "Upscaling method",
     [UI_MENU_UPSCALER_DESC] = "This applies when the game image is smaller than the area it fills on your screen or in your window. "
                               "AMD FSR 1 can keep edges sharper than Bilinear.",
-    [UI_MENU_UPSCALER_FSR] = "AMD FSR 1", [UI_MENU_UPSCALER_BILINEAR] = "Bilinear",
+    [UI_MENU_UPSCALER_FSR] = "AMD FSR 1", [UI_MENU_UPSCALER_BILINEAR] = "Bilinear", [UI_MENU_UPSCALER_DLSS] = "NVIDIA DLSS",
     [UI_MENU_ASPECT] = "Display scaling",
     [UI_MENU_ASPECT_DESC] = "Default keeps the game's shape and adds black bars if needed.\n"
                             "Stretch to fill uses the whole window or screen. The image stretches only if the shapes differ.",
@@ -429,7 +429,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_UPSCALER] = "Масштабирование под окно",
     [UI_MENU_UPSCALER_DESC] = "Этот параметр действует, когда изображение игры меньше области вывода на экране или в окне. "
                               "AMD FSR 1 может сохранять края более чёткими, чем билинейное масштабирование.",
-    [UI_MENU_UPSCALER_FSR] = "AMD FSR 1", [UI_MENU_UPSCALER_BILINEAR] = "Билинейное",
+    [UI_MENU_UPSCALER_FSR] = "AMD FSR 1", [UI_MENU_UPSCALER_BILINEAR] = "Билинейное", [UI_MENU_UPSCALER_DLSS] = "NVIDIA DLSS",
     [UI_MENU_ASPECT] = "Масштабирование вывода",
     [UI_MENU_ASPECT_DESC] = "По умолчанию пропорции игры сохраняются, при необходимости появляются чёрные полосы.\n"
                             "В режиме «Растянуть» изображение заполняет всё окно или экран. Оно растягивается, только "
