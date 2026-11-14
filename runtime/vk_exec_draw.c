@@ -1243,7 +1243,8 @@ static const uint8_t *native_gs_control(DrawCtx *dc, const uint8_t *ctl, const u
     GfxShaderIo io[32];
     const uint32_t fs_in = gfx_shader_inputs(dc->native_gs_fs, io), vs_out = gfx_shader_outputs(dc->native_gs_vs, io);
     uint32_t mask = fs_in & vs_out;
-    if (vk_caps.amd_sc && nvn2_origin(code) == UINT64_C(0x3dbaaf649cb5f927))
+    uint64_t org = nvn2_origin(code);
+    if (vk_caps.amd_sc && (org == UINT64_C(0x3dbaaf649cb5f927) || org == UINT64_C(0xfe20eddfcbcf143e)))
         mask |= (UINT32_C(1) << 0) | (UINT32_C(1) << 19);
     for (size_t i = 0; i < count; i++)
         if (made[i].ctl == ctl && made[i].mask == mask) return made[i].copy;
