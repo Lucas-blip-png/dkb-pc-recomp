@@ -194,6 +194,12 @@ two thirds of the render resolution on each side (1280x720 at 1920x1080) and is 
 1.0 to 3.0) patches the controller (main 3c12b4 on 1.0.0) to store that ratio: the scene is drawn at the whole render
 resolution (more GPU cost, the render-target pool grows by (1.5/ratio)^2) and the game's upscaler, and so DLSS, is not
 dispatched. `dkb.log` says `Bananza resolution: 3D scene ratio ...`.
+On update 3.2.0 the game also makes each display's 3D image two thirds of the display (a scale in its render
+parameters, read at main 79024), and the ratio divides that image, so the controller alone gives a scene of the
+display x 2/3 / ratio: `full` drew 1920x1080 at a 2880x1620 render resolution and stretched it. There `scene_res` also
+sets that scale to 1.0 (set `render3d`), so the scene is the render resolution divided by the ratio, as on 1.0.0. A ratio
+keeps the upscaler: `scene_res = 1.5` at 3840x2160 draws the scene at 2560x1440 and DLSS outputs 3840x2160
+(`dlss: Quality 2560x1440 -> 3840x2160`), where `auto` outputs 2560x1440.
 
 5120x1440 (32:9) and 3840x2160 used to fail during render-resource creation because the game's
 render-target pool is a fixed 200 MiB; a patch grows it with the output size. Both now run on 1.0.0
