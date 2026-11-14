@@ -399,36 +399,42 @@ static uint64_t device_hash(const char *s) {
     return h;
 }
 
-// Retain fallback ordinals for connected instance IDs. Removing another identical
-// controller must not renumber the one the player is still using.
-static InputPadDevice *device_cache;
+// Retain identities and fallback ordinals for connected instance IDs. Opening an idle
+// controller can perform slow USB handshakes, so polling must not reopen a known device.
+// A failed open is not a complete identity: retry it so a saved serial can still match.
+typedef struct { InputPadDevice device; int identified; } CachedPadDevice;
+static CachedPadDevice *device_cache;
 static int device_cache_count;
 
-// Under input lock. Opening temporarily only adds an SDL reference; no mappings or sensors change.
+// Under input lock. Only newly seen devices need a temporary reference to read their serial.
 static int devices_locked(InputPadDevice **devices) {
     *devices = NULL;
     int n = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
     InputPadDevice *out = n > 0 ? calloc((size_t)n, sizeof *out) : NULL;
     if (!out) { SDL_free(ids); return 0; }
+    CachedPadDevice *cache = calloc((size_t)n, sizeof *cache);
     for (int i = 0; i < n; i++) {
         const char *name = SDL_GetGamepadNameForID(ids[i]);
         char guid[33], base[80];
         SDL_GUIDToString(SDL_GetGamepadGUIDForID(ids[i]), guid, sizeof guid);
         snprintf(base, sizeof base, "%s:%016llx", guid, (unsigned long long)device_hash(name));
+        out[i].id = ids[i];
+        for (int j = 0; j < device_cache_count; j++)
+            if (device_cache[j].identified && device_cache[j].device.id == ids[i] &&
+                !strncmp(device_cache[j].device.key, base, strlen(base))) {
+                snprintf(out[i].key, sizeof out[i].key, "%s", device_cache[j].device.key);
+                if (cache) cache[i].identified = 1;
+                break;
+            }
+        if (out[i].key[0]) continue;
         SDL_Gamepad *ref = SDL_OpenGamepad(ids[i]);
         const char *serial = ref ? SDL_GetGamepadSerial(ref) : NULL;
-        out[i].id = ids[i];
+        if (cache) cache[i].identified = ref != NULL;
         if (serial && *serial)
             snprintf(out[i].key, sizeof out[i].key, "%s:s%016llx", base, (unsigned long long)device_hash(serial));
-        else {
+        else
             snprintf(out[i].key, sizeof out[i].key, "%s:n0", base);
-            for (int j = 0; j < device_cache_count; j++)
-                if (device_cache[j].id == ids[i] && !strncmp(device_cache[j].key, base, strlen(base))) {
-                    snprintf(out[i].key, sizeof out[i].key, "%s", device_cache[j].key);
-                    break;
-                }
-        }
         if (ref) SDL_CloseGamepad(ref);
     }
     for (int i = 0; i < n; i++) {
@@ -450,9 +456,8 @@ static int devices_locked(InputPadDevice **devices) {
             snprintf(out[i].name, sizeof out[i].name, "%s (#%d, ID %u)", name ? name : "Unknown controller", ordinal, ids[i]);
         else snprintf(out[i].name, sizeof out[i].name, "%s (ID %u)", name ? name : "Unknown controller", ids[i]);
     }
-    InputPadDevice *cache = malloc((size_t)n * sizeof *cache);
     if (cache) {
-        memcpy(cache, out, (size_t)n * sizeof *cache);
+        for (int i = 0; i < n; i++) cache[i].device = out[i];
         free(device_cache);
         device_cache = cache;
         device_cache_count = n;
