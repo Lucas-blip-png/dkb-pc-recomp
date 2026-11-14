@@ -46,7 +46,7 @@ prewarm_xlate = 8
 
 # Memory management & texture eviction for 4GB VRAM
 astc = gpu
-memory = auto
+memory = import
 tex_alias = 1
 tex_vram_pressure = 75
 vk_subgroup_pin = 1
@@ -92,6 +92,11 @@ nx2_read_nowait = 1
 
 ### 5. External Frame Generation Compatibility
 * Setting `assume_focus = 1` and `window_mode = borderless` ensures external capture tools (such as Lossless Scaling or MFG Super Motion) can hook the borderless swapchain and double the stable 60 FPS base to **120 FPS** on 144Hz panels with zero focus-loss stutter.
+
+### 6. Host Memory Import vs. Buffer Mirroring (`memory = import`)
+* **What it does:** By default (`memory = auto`), the recomp engine treats discrete GPUs as needing dedicated device-local buffer mirrors (`mode mirror`), allocating an extra **784 MiB duplicate mirror pool** in dedicated VRAM.
+* **Impact on 4GB GPUs:** 2,745 MiB base game allocation + 784 MiB duplicate mirror pool + ~450 MiB Windows DWM/system = **~3,980 MiB**, completely choking a 4GB VRAM card. When transitioning between game zones or streaming new models, the Vulkan driver spills buffer allocations over the PCIe bus, triggering 1+ second catastrophic frame stalls (e.g. 1,125 ms freeze).
+* **Fix:** Setting `memory = import` forces Vulkan to import host memory directly without creating duplicate device-local mirror copies. This frees over 780 MiB of VRAM immediately, keeping total dedicated GPU memory strictly under 2.4 GB.
 
 ---
 

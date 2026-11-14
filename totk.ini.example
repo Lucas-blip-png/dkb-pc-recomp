@@ -59,7 +59,7 @@ astc = gpu
 # Game memory shared with the GPU: auto (mirror on a discrete GPU, import on an integrated one), import (host memory
 # imported into Vulkan), mirror (pools used as buffers get a copy in video memory) or verify (mirror plus a check of
 # every copy; slow).
-memory = auto
+memory = import
 # A new texture created over a live texture's memory starts with that content instead of empty.
 tex_alias = 1
 # Drop or release cached textures when VRAM usage rises above this percentage (75 recommended for 4GB VRAM cards). Default: 75.
