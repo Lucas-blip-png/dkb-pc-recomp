@@ -220,6 +220,12 @@ typedef struct { uint64_t serial; int stage; int used; GfxShaderAnswers a; const
 enum { DP_PASS, DP_SHADER, DP_PIPE, DP_STATE, DP_SIG, DP_UBO, DP_SSBO, DP_TEX, DP_SETS, DP_FEEDBACK, DP_VB, DP_TAIL,
        DP_OPS, DP_N };
 
+// The recent pipelines a context found, by shader pair (DrawCtx PM): a draw whose state is one of them takes its
+// pipeline without vk_pipeline.c's lock, which every lookup holds (graphics). The slices of a pass look up at once:
+// with six replay threads a sliced draw spent 500 ns in the pipeline section against 134 with two.
+#define PM_SETS 32
+#define PM_WAYS 4
+
 // The inline uniform updates of the submission being replayed, newest last (a ring of UPD_N). op_update_ub writes them
 // into the buffer's GPU copy; guest memory gets them only from the write-back when the submission ends. The terrain
 // rewrites its pointer block this way before every draw, all at one address, so ubo_ptr reads the latest update that
@@ -290,7 +296,15 @@ typedef struct DrawCtx {
     struct { uint64_t serial; int st; uint32_t m; } slotm[SLOTM_N];
     struct { uint64_t context, h, tok; uint32_t gen; SubRange r; } FM[FM_N];
     struct { int on, valid, has_fs, has_gs; MemoKey k; const GfxShader *vs, *fs, *gs; } SM;
-    struct { int on, valid; VkPipeState s; const VkPipeInfo *info; } PM;
+    // The pipeline memo (draw_impl): the last draw's state and pipeline, and the recent ones by shader pair (PM_SETS
+    // sets of PM_WAYS, replaced in turn).
+    struct {
+        int on, valid;
+        VkPipeState s;
+        const VkPipeInfo *info;
+        struct { VkPipeState s; const VkPipeInfo *info; } way[PM_SETS][PM_WAYS];
+        uint8_t next[PM_SETS];
+    } PM;
     struct { int on, active; uint64_t t, ticks[DP_N], draws, ops, win_tk, win_ns, op_n[OP_COUNT_], op_tk[OP_COUNT_]; } DP;
     uint32_t c0_dim[3], c0_binst;   // the dispatch size and base instance of the draw or dispatch being bound
     uint32_t ssbo_serial[6];          // bumped per stage by OP_BIND_SSBO, for c0_info's fast graphics check
@@ -395,6 +409,8 @@ typedef struct DrawCtx {
     struct { int on, filtered; uint64_t filter; unsigned records; } GCL;   // geometry_context_log; on -1: not read yet
     // token_of: slot tokens by texture id, with the pool, slot generation and memory generation they were read under.
     struct { uint64_t pool, mg, tok; uint32_t id, sg; VkSlotStamp st; } tk[256];
+    // twin_prepare: textures found to need no depth twin, by texture id, with the token they resolved under.
+    struct { uint64_t pool, tok; uint32_t id; } tw[64];
     int slice;                           // a slice thread's context (vk_exec_draw_slice_ctx)
     // The texture descriptors the context's last graphics build wrote into bind_d, and what they derive from
     // (tex_repeat): the pipeline (so the same bindings sit at the same places), the sampled handles, the descriptor
@@ -2209,11 +2225,22 @@ static void twin_prepare(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
                 int slot = res[r].slot + k;
                 uint64_t h = slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0;
                 if (!h) continue;
+                // Most compare-sampled textures need no twin, and whether one does follows from the image its slot
+                // resolves to, which stays while the slot's token does: those are answered here without the texture
+                // lock, which the slices of the same pass take for their own draws (part of the 6% of the replay
+                // thread's replay spent waiting for that lock, eight threads, 3.2.0). The token is read before the lookup.
+                uint32_t id = (uint32_t)(h & 0xfffff);
+                uint64_t tok = token_of(ex, h);
+                typeof(dc->tw[0]) *w = &dc->tw[(id ^ id >> 6) & 63];
+                if (tok && w->tok == tok && w->id == id && w->pool == ex->tex_pool.addr) continue;
                 if (!locked) vk_texture_lock(), locked = 1;
-                const VkTexImage *img = vk_texture_by_id_locked(&ex->tex_pool, (int)(h & 0xfffff), NULL, NULL);
+                const VkTexImage *img = vk_texture_by_id_locked(&ex->tex_pool, (int)id, NULL, NULL);
                 VkFormat df = img ? twin_format(img) : VK_FORMAT_UNDEFINED;
-                if (!df || n == TWINS || (VkDeviceSize)img->width * img->height * (img->layers ? img->layers : 1) * 4 > TWIN_MAX)
+                if (img && (!df || (VkDeviceSize)img->width * img->height * (img->layers ? img->layers : 1) * 4 > TWIN_MAX)) {
+                    *w = (typeof(*w)){ex->tex_pool.addr, tok, id};   // needs no twin while the token stays
                     continue;
+                }
+                if (!df || n == TWINS) continue;
                 int skip = 0;
                 for (int i = 0; i < n; i++) skip |= seen[i] == img->image;
                 for (uint32_t i = 0; i < 9; i++) {
@@ -3462,13 +3489,20 @@ static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
         if (wait_ms) t0 = kern_now_ns();
     }
     if (IS_HELPER(dc)) wait_ms = 0, t0 = 0;   // a helper never waits: a pending pipeline gives its part back
-    // The previous draw's pipeline while its state repeats (PM, TOTK_PIPE_MEMO=0 turns it off): the cache key is made
-    // from the state alone, and a pipeline once found only changes from its fast link to its optimised build, read
-    // from the info the cache entry keeps.
+    // The previous draw's pipeline while its state repeats, else one of the context's recent ones (PM, TOTK_PIPE_MEMO=0
+    // turns both off): the cache key is made from the state alone, a pipeline once found only changes from its fast
+    // link to its optimised build, read from the info the cache entry keeps, and vk_pipeline.c frees its entries only
+    // at shutdown. So the ways stay valid across command buffers and slices; only the last-draw memo is reset there.
     VkPipeline p;
     const char *why = NULL;
     uint64_t w0 = 0;
-    if (pipe_memo_on(dc) && dc->PM.valid && !memcmp(&dc->PM.s, &s, sizeof s)) {
+    int pmemo = pipe_memo_on(dc);
+    uint32_t pm_set = (uint32_t)((((uintptr_t)s.vs >> 4) * 0x9e3779b1u ^ ((uintptr_t)s.fs >> 4)) * 0x85ebca6bu >> 27) & (PM_SETS - 1);
+    int pm_hit = pmemo && dc->PM.valid && !memcmp(&dc->PM.s, &s, sizeof s);
+    for (int w = 0; pmemo && !pm_hit && w < PM_WAYS; w++)
+        if (dc->PM.way[pm_set][w].info && !memcmp(&dc->PM.way[pm_set][w].s, &s, sizeof s))
+            pm_hit = 1, dc->PM.valid = 1, dc->PM.s = s, dc->PM.info = dc->PM.way[pm_set][w].info;
+    if (pm_hit) {
         info = dc->PM.info, pending = 0;
         p = __atomic_load_n(&info->pipeline, __ATOMIC_ACQUIRE);
     } else {
@@ -3487,7 +3521,11 @@ static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
             p = vk_pipeline_graphics_async(&s, &info, &pending, ONESHOT_WAIT_MS);
         }
         dc->PM.valid = !pending && p && info;
-        if (dc->PM.valid) dc->PM.s = s, dc->PM.info = info;
+        if (dc->PM.valid) {
+            dc->PM.s = s, dc->PM.info = info;
+            int w = dc->PM.next[pm_set]++ % PM_WAYS;
+            dc->PM.way[pm_set][w].s = s, dc->PM.way[pm_set][w].info = info;
+        }
     }
     uint64_t waited = w0 ? kern_now_ns() - w0 : 0;
     static _Thread_local int wait_logs;
