@@ -108,9 +108,8 @@ static void yaw_end(Cpu *c) { camera_hook(c, YAW_END, c->x[19]); }
 static void pitch_begin(Cpu *c) { camera_hook(c, PITCH_BEGIN, c->x[19]); }
 static void pitch_end(Cpu *c) { camera_hook(c, PITCH_END, c->x[19]); }
 
-// Interp, SnapEnd and AcceptRequest can wait for vertical stick activity after automatic
-// camera adjustments. Report mouse activity to their existing interrupt checks; the game
-// chooses the next manual state. Do not force a state or interrupt a scripted/fixed camera.
+// Report vertical mouse activity to the automatic pitch states' stick checks so the
+// game chooses the next manual state and retains control of scripted cameras.
 static void pitch_activity(Cpu *c) {
     plat_mutex_lock(&mouse_lock);
     if (c == mouse.owner && c->x[19] == mouse.vertical && mouse.enabled && mouse.pitch != 0 && !mouse.pitch_used &&

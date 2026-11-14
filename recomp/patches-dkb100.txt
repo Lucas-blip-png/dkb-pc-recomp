@@ -72,7 +72,7 @@ set mousecamera TOTK_MOUSE_CAMERA 0
 # Keep each original instruction, then call the host adapter in runtime/dkb_camera.c. The five
 # dispatch addresses are outside main, at patch page +0x200/+0x210/+0x220/+0x230/+0x240. These functions
 # save LR in their prologues and restore it after the sites, so the inserted BL preserves returns.
-# All seven BL immediates below assume the patch page is at main+0x2450000 (recomp/layout.py).
+# The BL immediates below assume the patch page is at main+0x2450000 (recomp/layout.py).
 site mousecamera main 41b35c f9405808 f9405808 9480d3a9   # yaw begin: x0 is the follow camera
 site mousecamera main 41b4e0 6d42a3e9 6d42a3e9 9480d34c   # yaw end: x19 is the follow camera
 site mousecamera main 7f209c d000cdb4 d000cdb4 94717861   # pitch begin: x19 is the vertical controller
@@ -80,6 +80,8 @@ site mousecamera main 7f22f8 6d42a3e9 6d42a3e9 947177ce   # pitch end: x19 is th
 
 # Let vertical mouse activity interrupt the same waiting states as stick input.
 site mousecamera main 5ef070 2d4e0660 2d4e0660 94798474   # Interp manual input check
+site mousecamera main 173535c bd407260 bd407260 94346bb9 # automatic pitch state manual input check
+site mousecamera main 173550c bd407260 bd407260 94346b4d # automatic pitch blend manual input check
 site mousecamera main 17357c0 bd407260 bd407260 94346aa0   # SnapEnd manual input check
 # AcceptRequest loads s0 from [x0, #0x70] at 1735878, before the kept mov x19, x0.
 # The comparisons at 1735884 and 1735898 consume that value against -0.15 and +0.15
