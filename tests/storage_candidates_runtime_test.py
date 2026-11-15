@@ -103,6 +103,8 @@ int vk_mem_resolve(uint64_t addr, uint64_t n, VkMemSpan *span) {
                # bind_range asks for a stage origin only when vk_sync_noting(), which is 0 in this fixture
                '#define find_stage_origin(dc, p, st, ctl, code, len, o) ((void)(dc), find_stage_scan(p, st, ctl, code, len) && (*(o) = 0, 1))\n',
                function(draw, 'static p_bind_buf guarded_storage_binding('),
+               # ssbo_info is asked for no written binding here, so the geometry-stage write-back switch is never read
+               'static int gs_storage_writeback(void) { return 0; }' + chr(10),
                function(draw, 'static VkDescriptorBufferInfo ssbo_info(')]
     after = r'''
 int main(void) {
