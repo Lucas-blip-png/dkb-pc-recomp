@@ -282,6 +282,9 @@ void vk_mem_pick(VkMemSpan *sp);
 #define VK_MEM_USE(sp) do { if (vk_mirror_on && (sp).pool) vk_mem_use(&(sp)); } while (0)
 #define VK_MEM_PICK(sp) do { if (vk_mirror_on && (sp).pool) vk_mem_pick(&(sp)); } while (0)
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size);
+// The same for a write whose bytes stay in the mirror (the geometry stage's storage): of the runs such writes form in
+// the submission, only the partial first and last guest pages go back, and the whole pages go to vk_usnap_keep.
+void vk_mem_gpu_kept(const VkMemSpan *sp, uint64_t size);
 uint64_t vk_mem_mirror_gen(void);   // changes whenever a mirror is made or dropped, and with every submission
 int vk_mem_shadow_on(void);         // shadow storage is in use (TOTK_SHADOW)
 void vk_mem_threads(void);         // the workers of sliced passes bind mirrors too (vk_exec.c), from now on
@@ -301,6 +304,9 @@ void vk_usnap_view(uint64_t upto);
 const void *vk_usnap_bytes(uint64_t addr, uint64_t n);   // the copy's bytes for the CPU; NULL: not copied or dropped
 int vk_usnap_covers(uint64_t addr, uint64_t n);   // a copy of this submission overlaps the range
 void vk_usnap_drop(uint64_t addr, uint64_t n);   // the replay makes the GPU write [addr, addr+n) of guest memory
+// [addr, addr+n) holds GPU bytes guest memory does not get (vk_mem_gpu_kept): no snapshot copies it until the CPU writes
+// those pages again.
+void vk_usnap_keep(uint64_t addr, uint64_t n);
 uint64_t vk_usnap_arena_bytes(void);                 // arenas created so far (all kept until shutdown)
 uint64_t vk_usnap_gen(void);                      // changes whenever a binding may resolve differently
 void vk_usnap_shutdown(void);                     // vk_exec_draw_shutdown: frees the arenas
@@ -339,6 +345,7 @@ uint64_t vk_mem_pool_gen(void);
 // range was written after generation `since`, 0 when not, -1 when the range is not write-watched (treat as written);
 // *now is the generation to pass next time.
 int vk_mem_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);
+uint32_t vk_mem_ww_now(void);   // the newest page write generation: a `since` that later writes are newer than
 // The same answer from per-epoch write-watch snapshots of 2 MiB regions: no system call once the regions were queried in
 // this epoch (a guest submission). For checks that may see writes made during the epoch one epoch late.
 int vk_mem_changed_snap(uint64_t addr, uint64_t size, uint32_t since, uint32_t epoch, uint32_t *now);

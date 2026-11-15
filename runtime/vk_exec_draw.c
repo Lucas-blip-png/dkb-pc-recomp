@@ -1453,7 +1453,8 @@ static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, 
         if (written) {
             // In a slice, a store over a uniform snapshot copy depends on the draw order (vk_usnap.c vk_usnap_drop).
             if (IN_SLICE(dc) && vk_usnap_covers(addr, n)) vk_exec_par_order_hazard();
-            if (written == 1) vk_mem_gpu_wrote(&sp, n);   // 2: kept in VRAM (gs_storage_writeback)
+            if (written == 1) vk_mem_gpu_wrote(&sp, n);
+            else vk_mem_gpu_kept(&sp, n);   // 2: gs_storage_writeback
             vk_usnap_drop(addr, n);
         }
         count_use(dc, sp.cls, use, n);
@@ -1707,20 +1708,28 @@ static p_bind_buf guarded_storage_binding(const VkExec *ex, int st, const GfxSha
 // end of the submission (vk_memory.c vk_mem_mirror_end). Bananza's only geometry stage is the destructible terrain's
 // (native_gs_on), whose every draw writes the records of a 15,000-byte storage buffer at an address of its own that only
 // later GPU draws read: in the Hilltop Layer of Surf Hills (3.2.0) that was 70.5 of the 75 MiB written back a frame,
-// 7.7 ms of an RTX 5090's 17.7 ms a frame. The CPU writes none of those pages (the uploads into the mirrors stayed at
-// 76 MiB a frame without the write-back), so no later sync overwrites the GPU's bytes. Eglantine copies no GPU-written
-// buffer back for a Switch 2 title unless the CPU is seen reading it (buffer_cache_base.h AsyncBufferDownloads,
-// NoteCpuRead). TOTK_GS_STORAGE_WRITEBACK=1 copies them back as every other GPU write; ab alternates with the A/B blocks.
+// 7.7 ms of an RTX 5090's 17.7 ms a frame. Eglantine copies no GPU-written buffer back for a Switch 2 title unless the
+// CPU is seen reading it (buffer_cache_base.h AsyncBufferDownloads, NoteCpuRead). What still reads guest memory is kept
+// from reading the stale bytes there: of the runs these writes form in a submission the partial first and last pages
+// go back as before, so a sync that uploads such a page for a CPU write next to the run carries the GPU's bytes
+// (vk_memory.c vk_mem_gpu_kept); flushes upload their own pages only (nvn_pool_flushed); and the uniform snapshot
+// leaves the whole pages out until the CPU writes them again (vk_usnap_keep). In the hills no later submission bound
+// those pages as any buffer, and no read of guest memory by the replay touched them. The CPU itself reads guest memory,
+// as it does on Eglantine. TOTK_GS_STORAGE_WRITEBACK=1 copies them
+// back as every other GPU write; ab alternates with the A/B blocks.
 static int gs_storage_writeback(void) {
-    static int mode = -1;
-    if (mode < 0) {
-        mode = rt_knob("GS_STORAGE_WRITEBACK", "0");
+    static int mode = -1;   // slices ask too: the first answer is published once
+    int m = __atomic_load_n(&mode, __ATOMIC_ACQUIRE);
+    if (m >= 0) return RT_KNOB_ON(m);
+    m = rt_knob("GS_STORAGE_WRITEBACK", "0");
+    int unset = -1;
+    if (__atomic_compare_exchange_n(&mode, &unset, m, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         rt_log("vk: storage the geometry stage writes %s (TOTK_GS_STORAGE_WRITEBACK=%s)",
-               mode == 2 ? "is copied back to guest memory in the B blocks" : mode ? "is copied back to guest memory"
-                                                                              : "stays in VRAM",
-               mode == 2 ? "ab" : mode ? "1" : "0");
-    }
-    return RT_KNOB_ON(mode);
+               m == 2 ? "is copied back to guest memory in the B blocks"
+               : m    ? "is copied back to guest memory"
+                      : "stays in VRAM but for its partial first and last pages",
+               m == 2 ? "ab" : m ? "1" : "0");
+    return RT_KNOB_ON(m);
 }
 
 static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *r, int written) {

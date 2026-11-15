@@ -117,6 +117,7 @@ int vk_mem_resolve(uint64_t addr,uint64_t bytes,VkMemSpan *out) {
 }
 void vk_mem_use(VkMemSpan *span) {uses++;span->buffer=(VkBuffer)(uintptr_t)22;span->offset+=256;}
 void vk_mem_gpu_wrote(const VkMemSpan *span,uint64_t bytes) {CHECK((uintptr_t)span->buffer==22 && bytes,"write uses selected backing");gpu_writes++;}
+void vk_mem_gpu_kept(const VkMemSpan *span,uint64_t bytes) {CHECK((uintptr_t)span->buffer==22 && bytes,"kept write uses selected backing");}
 void vk_usnap_drop(uint64_t addr,uint64_t bytes) {CHECK(addr==(uintptr_t)output_words && bytes==sizeof output_words,"write drops exact output snapshot");drops++;}
 void vk_mem_gpu_pending(uint64_t addr,uint64_t bytes) {pending_writes++;pending_addr=addr;pending_size=bytes;}
 int vk_sync_noting(void) {return 0;}

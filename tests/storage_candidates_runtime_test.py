@@ -56,6 +56,7 @@ void vk_sync_note_write(uint64_t addr, uint64_t size, uint64_t stage) {
 void vk_mem_use(VkMemSpan *span) { (void)span; }
 void vk_mem_bound_note(void *pool) { (void)pool; }
 void vk_mem_gpu_wrote(const VkMemSpan *span, uint64_t n) { (void)span; (void)n; wrote++; }
+void vk_mem_gpu_kept(const VkMemSpan *span, uint64_t n) { (void)span; (void)n; wrote++; }
 void vk_usnap_drop(uint64_t addr, uint64_t n) { (void)addr; (void)n; dropped++; }
 int vk_usnap_covers(uint64_t addr, uint64_t n) { (void)addr; (void)n; return 0; }
 void vk_exec_par_order_hazard(void) {}

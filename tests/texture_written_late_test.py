@@ -191,6 +191,7 @@ def source(root):
         'sweep_released', 'fills_no_page', 'wb_cfg_init', 'vk_texture_gpu_written_ready')]
     parts += [statement(tex, 'static void gpu_written_entry(Tex *e);')]
     parts += [function(tex, name) for name in ('vk_texture_gpu_written_late', 'gpu_written_entry', 'vk_texture_release')]
+    parts += [statement(memory, '#define WB_KEPT')]
     parts += [function(memory, name) for name in ('grow', 'range_add', 'vk_mem_mirror_pending')]
     parts += [FIXTURE]
     return '\n\n'.join(parts), files

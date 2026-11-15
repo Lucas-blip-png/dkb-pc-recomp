@@ -9,6 +9,8 @@
 //   minUniformBufferOffsetAlignment) and at most 64 KiB from the bound address, overlapping ones merged.
 // - A range the GPU wrote in a submission that has not completed is left out: its bytes reach guest memory only with
 //   that submission's write-back, the mirror holds them until then.
+// - A range holding GPU bytes that never go back to guest memory (vk_usnap_keep: the geometry stage's storage,
+//   vk_mem_gpu_kept) is left out too, until the CPU writes its pages again.
 // - A GPU write within the submission (UpdateUniformBuffer, a storage buffer a shader writes, a buffer copy or fill,
 //   an image-to-buffer copy: vk_usnap_drop) drops the copies it touches from then on, so later draws read the result.
 // - The arena goes back to a free list once the submission's fence is done (completion thread).
@@ -59,6 +61,7 @@ static struct {
     uint64_t subs, regions, bytes, copy_ns, hits, drops, inflight, refused, off_subs;
     uint64_t cols, t_collect, t_sort, t_merge, t_copy;   // ranges collected, and the time of each step (summary)
     uint64_t wr_added;   // GPU write ranges added to wr (vk_usnap_drop), for the summary
+    uint64_t kept_out, kept_cut;   // ranges left out over kept bytes, and kept ranges the CPU wrote again
 } U;
 
 // The helper threads (vk_spec.h) look regions up in vk_usnap_find while the replay thread drops some of them
@@ -275,18 +278,95 @@ static int wr_hits(uint64_t lo, uint64_t hi) {   // wr_prune ran: disjoint, sort
     return a < U.nwr && U.wr[a].lo < hi;
 }
 
+// GPU writes kept in VRAM (vk_usnap_keep), whole pages: their bytes reach guest memory never, so guest memory holds
+// older bytes there for as long as the CPU does not write those pages again. kadd: added since the last
+// vk_usnap_begin (drop_lock), with the write-watch generation then in fence; kept: merged, sorted by lo, disjoint,
+// each with the newest generation among its parts (the replaying thread's, in vk_usnap_begin).
+static Wrote *kadd, *kept;
+static int nkadd, ckadd, nkept, ckept;
+
+static void kept_merge(void) {
+    if (!nkadd) return;
+    static Wrote *tmp, *out;
+    static size_t ctmp, cout;
+    sort_new_writes(kadd, nkadd, &tmp, &ctmp);
+    if (cout < (size_t)(nkept + nkadd)) {
+        size_t c = (size_t)(nkept + nkadd) + 1024;
+        Wrote *o = realloc(out, c * sizeof *o);
+        if (!o) rt_fatal("vk_usnap: out of memory");
+        out = o, cout = c;
+    }
+    int m = 0;
+    for (int a = 0, b = 0; a < nkept || b < nkadd;) {
+        const Wrote *w = b >= nkadd || (a < nkept && kept[a].lo <= kadd[b].lo) ? &kept[a++] : &kadd[b++];
+        if (m && w->lo <= out[m - 1].hi) {
+            if (w->hi > out[m - 1].hi) out[m - 1].hi = w->hi;
+            if (w->fence > out[m - 1].fence) out[m - 1].fence = w->fence;
+        } else {
+            out[m++] = *w;
+        }
+    }
+    Wrote *t = kept;
+    int ct = ckept;
+    kept = out, ckept = (int)cout, nkept = m;
+    out = t, cout = (size_t)ct;
+    nkadd = 0;
+}
+
+// Takes [lo, hi) out of kept: the CPU wrote there again, so guest memory holds the newer bytes. The entries are
+// disjoint, so at most one of them leaves a part on each side, and the list grows by one at most.
+static void kept_cut(uint64_t lo, uint64_t hi) {
+    static Wrote *t;
+    static int ct;
+    while (ct < nkept + 1) t = grow(t, &ct, sizeof *t);
+    int w = 0;
+    for (int i = 0; i < nkept; i++) {
+        Wrote k = kept[i];
+        if (k.hi <= lo || k.lo >= hi) t[w++] = k;
+        else {
+            if (k.lo < lo) t[w++] = (Wrote){k.lo, lo, k.fence};
+            if (k.hi > hi) t[w++] = (Wrote){hi, k.hi, k.fence};
+        }
+    }
+    Wrote *o = kept;
+    int co = ckept;
+    kept = t, ckept = ct, nkept = w;
+    t = o, ct = co;
+    U.kept_cut++;
+}
+
+// 1 when [lo, hi) overlaps kept bytes the CPU has not written since: the range stays out of the snapshot, and its
+// bindings read the mirror, which holds the GPU's bytes. A range the CPU wrote again comes out of kept.
+static int kept_hits(uint64_t lo, uint64_t hi) {
+    int a = 0, b = nkept;
+    while (a < b) {
+        int k = (a + b) / 2;
+        if (kept[k].hi <= lo) a = k + 1;
+        else b = k;
+    }
+    if (a >= nkept || kept[a].lo >= hi) return 0;
+    uint32_t since = 0, now;
+    for (int k = a; k < nkept && kept[k].lo < hi; k++)
+        if (kept[k].fence > since) since = (uint32_t)kept[k].fence;
+    if (vk_mem_changed(lo, hi - lo, since, &now) != 1) return 1;   // unchanged, or not write-watched
+    kept_cut(lo & ~0xfffull, (hi + 0xfff) & ~0xfffull);
+    return 0;
+}
+
 static void summary(void) {
     if (U.subs + U.off_subs < 3600) return;
     double s = U.subs ? (double)U.subs : 1.0;
     rt_log("vk_usnap: %llu submissions with a snapshot, %llu without; per submission %.0f ranges, %.1f KiB copied in "
            "%.3f ms, %.0f uniform bindings from the copy, %.1f dropped by GPU writes, %.1f left out (GPU writes in "
-           "flight), %.1f refused (not an imported pool); %.0f bindings collected, %.0f GPU write ranges added; ms: collect %.3f, sort and prune %.3f, "
+           "flight), %.1f refused (not an imported pool), %.1f left out over kept GPU bytes (%llu kept ranges, %llu cut); %.0f bindings collected, %.0f GPU write ranges added; ms: collect %.3f, sort and prune %.3f, "
            "merge %.3f, copy %.3f",
            (unsigned long long)U.subs, (unsigned long long)U.off_subs, U.regions / s, U.bytes / s / 1024.0,
-           U.copy_ns / s / 1e6, U.hits / s, U.drops / s, U.inflight / s, U.refused / s, U.cols / s, U.wr_added / s, U.t_collect / s / 1e6,
+           U.copy_ns / s / 1e6, U.hits / s, U.drops / s, U.inflight / s, U.refused / s, U.kept_out / s,
+           (unsigned long long)nkept, (unsigned long long)U.kept_cut, U.cols / s, U.wr_added / s, U.t_collect / s / 1e6,
            U.t_sort / s / 1e6, U.t_merge / s / 1e6, U.t_copy / s / 1e6);
     U.subs = U.off_subs = U.regions = U.bytes = U.copy_ns = U.hits = U.drops = U.inflight = U.refused = 0;
     U.cols = U.t_collect = U.t_sort = U.t_merge = U.t_copy = U.wr_added = 0;
+    U.kept_out = U.kept_cut = 0;
 }
 
 void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
@@ -304,6 +384,7 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
     uint64_t t1 = kern_now_ns();
     sort_col();
     wr_prune();
+    kept_merge();
     uint64_t t2 = kern_now_ns();
     U.cols += (uint64_t)U.ncol, U.t_collect += t1 - t0, U.t_sort += t2 - t1;
     // merge, keeping only what lies wholly in one imported pool and no GPU write in flight touches
@@ -321,6 +402,10 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
         }
         if (wr_hits(lo, hi)) {
             U.inflight++;
+            continue;
+        }
+        if (nkept && kept_hits(lo, hi)) {
+            U.kept_out++;
             continue;
         }
         if (U.nreg == U.creg) U.reg = grow(U.reg, &U.creg, sizeof *U.reg);
@@ -412,6 +497,15 @@ void vk_usnap_drop(uint64_t addr, uint64_t n) {
             if (!U.reg[i].dropped)
                 __atomic_store_n(&U.reg[i].dropped, __atomic_add_fetch(&U.dseq, 1, __ATOMIC_ACQ_REL), __ATOMIC_RELEASE), U.drops++,
                     gen_bump();
+    plat_mutex_unlock(&drop_lock);
+}
+
+void vk_usnap_keep(uint64_t addr, uint64_t n) {
+    if (U.mode < 2 || !n) return;   // the snapshot is off (stored +1) or not read yet
+    uint32_t g = vk_mem_ww_now();
+    plat_mutex_lock(&drop_lock);
+    if (nkadd == ckadd) kadd = grow(kadd, &ckadd, sizeof *kadd);
+    kadd[nkadd++] = (Wrote){addr, addr + n, g};
     plat_mutex_unlock(&drop_lock);
 }
 
