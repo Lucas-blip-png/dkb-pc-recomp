@@ -49,7 +49,7 @@ typedef struct { uint64_t lo, hi, fence; } Wrote;
 static struct {
     int mode;                   // rt_knob: 0 off, 1 on, 2 ab
     int on;                     // this submission has a snapshot
-    int fast;                   // this submission takes the USNAP_FAST shortcuts (set in vk_usnap_begin)
+    int fast;                   // this submission takes the USNAP_FAST shortcuts (set in vk_usnap_begin, read atomically in drop)
     uint64_t fence, gen;
     uint64_t dseq;              // drops made so far (vk_usnap_drops)
     Arena *arena;
@@ -352,7 +352,10 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
     // the writes this submission records.
     static int fast_mode;   // stored +1: 0 is "not read yet"
     if (!fast_mode) fast_mode = rt_knob("USNAP_FAST", "1") + 1;
-    U.fast = RT_KNOB_ON(fast_mode - 1);
+    // Slice threads read U.fast in drop(). vk_exec_record settles every slice (par_settle_all) before vk_usnap_end, and
+    // a slice is handed out under pw_lock (vk_exec.c par_publish) after this store, so no slice is recording now and
+    // each one sees this submission's value; the atomic store and load say so to the compiler and to race checkers.
+    __atomic_store_n(&U.fast, RT_KNOB_ON(fast_mode - 1), __ATOMIC_RELAXED);
     if (!RT_KNOB_ON(U.mode - 1)) {
         U.off_subs++;
         return;
@@ -488,7 +491,7 @@ static void drop(uint64_t addr, uint64_t n, uint64_t fence) {
     // before every draw) raises that entry's fence instead of adding a second entry. The newer of the two fences is
     // above the done fence exactly when either is, so wr_prune builds the same list from the one entry as from two.
     Wrote *last = U.nwr > nwr_sorted ? &U.wr[U.nwr - 1] : NULL;
-    if (U.fast && last && last->lo == addr && last->hi == addr + n) {
+    if (__atomic_load_n(&U.fast, __ATOMIC_RELAXED) && last && last->lo == addr && last->hi == addr + n) {
         if (fence > last->fence) last->fence = fence;
         U.wr_coalesced++;
     } else {

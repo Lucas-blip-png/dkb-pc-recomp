@@ -1383,6 +1383,13 @@ void vk_gpu_written(uint64_t addr, uint64_t size) {
 // is noted per page (own_chunk) when the mirror already holds every older write of the page: its previous stamp is
 // covered by the mirror's mgen or is itself such a stamp. A page with a newer write the mirror lacks fails that test, and
 // a CPU write stamped later gives the page a newer generation, so mirror_sync copies both as before.
+// buf is matched against the pool's mirror by handle, so this trusts a handle to name one buffer. Vulkan may give a
+// destroyed buffer's handle to a buffer made later. A finalized pool's mirror is destroyed at the completion of the
+// submission being recorded when the pool went (vk_pool_fini, mirror_retire), which may run just before that
+// submission's own report here (vk_exec_draw.c cb_done). If in that moment the replay thread made a mirror for a new
+// pool over the same addresses with the recycled handle, a write through the old mirror would count as the new one's
+// own, and mirror_sync would not copy those pages into it. The game frees a pool only once the GPU is done with it, so
+// that submission is not expected to write through the old mirror.
 void vk_gpu_written_into(uint64_t addr, uint64_t size, VkBuffer buf) {
     if (!buf || !vk_mirror_on || shadow_on || !size || nvn_gpu_only(addr)) {
         vk_gpu_written(addr, size);
@@ -3113,6 +3120,9 @@ void vk_mem_shutdown(void) {
     nphys = 0;
     plat_mutex_unlock(&pool_lock);
     plat_mutex_lock(&gen_lock);
-    for (uint64_t i = 0; i < GEN_CHUNKS; i++) free(gen_chunk[i]), gen_chunk[i] = NULL;
+    for (uint64_t i = 0; i < GEN_CHUNKS; i++) {
+        free(gen_chunk[i]), gen_chunk[i] = NULL;
+        free(own_chunk[i]), own_chunk[i] = NULL;   // the mirror's own stamps (vk_gpu_written_into) go with the generations
+    }
     plat_mutex_unlock(&gen_lock);
 }
