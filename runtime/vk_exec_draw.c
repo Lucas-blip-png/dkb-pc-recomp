@@ -4333,7 +4333,8 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
 // The upscaler's variants: fixed resolution (the intro: 1920x1080 or 1280x720 in) and dynamic resolution (gameplay
 // after the intro, e.g. 2095x1179 in).
 // The hashes move with the translator: the first two are from an older translator, the last two from the one of
-// 2026-11-09 (found with the log line "dlss: compute shader ... is not the game's upscaler" of upscaler = dlss).
+// 2026-11-09 (found with the log line "dlss: compute shader ... is not the game's upscaler" of upscaler = dlss, now
+// "upscaler: compute shader ...").
 static int mvk_upscale_cs(uint64_t h) {
     return h == 0x3f3390cfdfa1f9e8ull || h == 0x4f9090b273fa7e4full || h == 0xb14741d70eb26339ull ||
            h == 0xbd63ebb7ee8d50eaull;
@@ -4386,17 +4387,67 @@ static int mvk_upscale_blit(VkExec *ex, const GfxShader *cs) {
     return 1;
 }
 
+// The game's upscaler dispatch, for upscaler = dlss, fsr3 and fsr4 and for the HUD (note_upscaler): it is the upscaler
+// when its hash is a known one (mvk_upscale_cs), or by its shape. The hashes move with the translator and with the host
+// options the shaders are translated under (subgroup sizes, float64), so a build or a GPU the list was not made on
+// never reached the replacement: on Linux with RADV the dispatch had two hashes the list lacks. The shape is what the
+// frame dumps show of the upscaler and of no other dispatch: a shader that declares one texture, at slot 0, and one
+// image, at slot 1 and written (the slots keep their binds from one dispatch to the next, so what is bound says nothing
+// about a shader that does not read it: the particle and effect shaders run with the upscaler's images still bound),
+// dispatched over more than a few workgroups, from a single-sampled 2D B10G11R11 texture of at least 256 pixels a side
+// into a larger B10G11R11 image of the same aspect ratio (1280x720 or the dynamic 1397x786 into 1920x1080). Larger, not
+// the same size: at scene_res = full the game runs no upscale step at all (a run there dispatched no B10G11R11 texture
+// into a B10G11R11 image), and at auto or any other ratio the scene is smaller than the output, so no dispatch of the
+// upscaler has equal sizes, and the check keeps a same-size pass of the scene from being taken for it. The MoltenVK
+// blit (mvk_upscale_blit) keeps to the hashes: it replaces the dispatch without the further checks the temporal
+// upscalers make.
+static int game_upscaler(VkExec *ex, const GfxShader *cs, const VkPipeInfo *info, const p_dispatch *d) {
+    uint64_t h = gfx_shader_spirv_fnv(cs);
+    if (mvk_upscale_cs(h)) return 1;
+    if (!info || !d) return 0;
+    int ntex = 0, nimg = 0, fit = 1;
+    for (uint32_t i = 0; i < info->n_bindings; i++) {
+        const VkPipeBinding *bd = &info->bindings[i];
+        if (!bd->res) continue;
+        if (bd->kind == GFX_RES_TEX) ntex++, fit &= bd->res->slot == 0;
+        if (bd->kind == GFX_RES_IMG) nimg++, fit &= bd->res->slot == 1 && (bd->res->flags & 4);   // 4: written
+    }
+    if (!fit || ntex != 1 || nimg != 1 || (int64_t)d->x * d->y < 16 || d->z != 1) return 0;
+    uint64_t hs = ex->tex[NVN_STAGE_CS][0], hd = ex->img[NVN_STAGE_CS][1];
+    view_t vs, vd;
+    int hvs = 0, hvd = 0;
+    const VkTexImage *a = hs ? vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(hs), &vs, &hvs) : NULL;
+    const VkTexImage *b = hd ? vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(hd), &vd, &hvd) : NULL;
+    if (!a || !b || a->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || b->format != a->format || a->samples > 1 ||
+        b->samples > 1 || a->type != VK_IMAGE_TYPE_2D || b->type != VK_IMAGE_TYPE_2D || a->width < 256 ||
+        a->height < 256 || b->width <= a->width || b->height <= a->height)
+        return 0;
+    double aspect = (double)a->width / a->height - (double)b->width / b->height;
+    if (aspect < -0.02 || aspect > 0.02) return 0;
+    static uint64_t told[4];   // the first few hashes taken by shape, for the list in mvk_upscale_cs
+    static int ntold;
+    int i = 0;
+    while (i < ntold && told[i] != h) i++;
+    if (i == ntold && ntold < 4) {
+        told[ntold++] = h;
+        rt_log("upscaler: compute shader %016llx is taken for the game's upscaler by its images (%ux%u -> %ux%u, "
+               "issued at %#llx)", (unsigned long long)h, a->width, a->height, b->width, b->height,
+               (unsigned long long)d->caller);
+    }
+    return 1;
+}
+
 // upscaler = dlss (experimental): the same dispatch of the game's upscaler is replaced by NVIDIA DLSS on its input
 // (texture slot 0) and output (image slot 1), whole images as above (vk_dlss.c). upscaler = fsr3 takes the same place
 // with AMD FSR 3.1 (vk_fsr3.c). 0 when the upscaler is off or failed, or the images do not fit it: the shader then
 // runs. NGX binds its own pipelines and descriptors into the command buffer (FSR 3.1 its own pushes), so the caller
 // forgets the bound state (vk_exec_draw_new_cb) after it; -1 (it failed after it may have bound its own): the caller
 // also binds the game's pipeline and resources again before its dispatch.
-static int dlss_upscale(VkExec *ex, const GfxShader *cs) {
+static int dlss_upscale(VkExec *ex, const GfxShader *cs, const VkPipeInfo *info, const p_dispatch *d) {
     if (!vk_temporal_wanted()) return 0;
-    if (!mvk_upscale_cs(gfx_shader_spirv_fnv(cs))) {
-        // The upscaler is matched by hash, which a translator change moves: with DLSS on, list the compute shaders
-        // seen (the first 48 distinct) so a run that never reaches DLSS shows which hash to add.
+    if (!game_upscaler(ex, cs, info, d)) {
+        // The upscaler is matched by hash or shape (game_upscaler): with DLSS, FSR 3.1 or FSR 4 on, list the compute
+        // shaders seen (the first 48 distinct) so a run that never reaches the upscaler shows which dispatch it missed.
         static uint64_t seen[48];
         static int nseen;
         uint64_t h = gfx_shader_spirv_fnv(cs);
@@ -4409,7 +4460,7 @@ static int dlss_upscale(VkExec *ex, const GfxShader *cs) {
             int hws = 0, hwd = 0;
             const VkTexImage *a = ds ? vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(ds), &ws, &hws) : NULL;
             const VkTexImage *b = dd ? vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(dd), &wd, &hwd) : NULL;
-            rt_log("dlss: compute shader %016llx is not the game's upscaler (tex0 %ux%u fmt %d, img1 %ux%u fmt %d)",
+            rt_log("upscaler: compute shader %016llx is not the game's upscaler (tex0 %ux%u fmt %d, img1 %ux%u fmt %d)",
                    (unsigned long long)h, a ? a->width : 0, a ? a->height : 0, a ? (int)a->format : 0,
                    b ? b->width : 0, b ? b->height : 0, b ? (int)b->format : 0);
         }
@@ -4433,8 +4484,8 @@ static int dlss_upscale(VkExec *ex, const GfxShader *cs) {
 
 // Tells the HUD (resolution.c res_note_upscaler) the sizes of every dispatch of the game's upscaler, whatever replaces
 // it (blit, DLSS) or none: same slots as dlss_upscale, the input texture 0 and the output image 1.
-static void note_upscaler(VkExec *ex, const GfxShader *cs) {
-    if (!mvk_upscale_cs(gfx_shader_spirv_fnv(cs))) return;
+static void note_upscaler(VkExec *ex, const GfxShader *cs, const VkPipeInfo *info, const p_dispatch *d) {
+    if (!game_upscaler(ex, cs, info, d)) return;
     uint64_t hs = ex->tex[NVN_STAGE_CS][0], hd = ex->img[NVN_STAGE_CS][1];
     view_t vs, vd;
     int hvs = 0, hvd = 0;
@@ -4470,9 +4521,9 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     dc->twin_dispatch = 1;
     bind_resources(ex, info);
     dc->twin_dispatch = 0;
-    note_upscaler(ex, cs);
+    note_upscaler(ex, cs, info, d);
     int blit = mvk_upscale_blit(ex, cs);
-    int dlss = blit ? 0 : dlss_upscale(ex, cs);
+    int dlss = blit ? 0 : dlss_upscale(ex, cs, info, d);
     if (dlss) vk_exec_draw_new_cb(ex), ex->dirty = VK_EXEC_DIRTY_ALL;   // NGX left its own pipeline, descriptors and state
     if (dlss < 0) {                    // it failed: the game's upscaler runs on its own binds again
         bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);
