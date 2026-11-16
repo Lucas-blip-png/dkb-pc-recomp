@@ -42,7 +42,7 @@ static PresentJob job;
 static int pending, busy, present_thread;
 
 // Sleeps on a high-resolution timer to 1 ms before at, then yields until at: the timer alone wakes up to ~0.5 ms late.
-static void wait_until(uint64_t at) {
+void vk_wait_until(uint64_t at) {   // vk.h; the frame generation's display thread waits with it too
     uint64_t now = kern_now_ns();
     if (at > now + 1500000) plat_wait_ns(at - now - 1000000);
     while (kern_now_ns() < at) plat_yield();
@@ -86,8 +86,10 @@ static void present_main(void *arg) {
         plat_cond_broadcast(&pcv);
         plat_mutex_unlock(&pl);
         // Frame generation (TOTK_FRAME_GEN, vk_framegen.c): its command buffer is the only reader of the game's texture, so
-        // `made` replaces the blit below, and busy goes down as soon as that buffer is submitted
-        int made = vk_fg_record(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
+        // `made` replaces the blit below, and busy goes down as soon as that buffer is submitted; 1 is 2x, shown by
+        // vk_fg_show below, 2 is Auto and 3x to 8x, whose display thread presents the frames, so this thread is free for
+        // the next job at once
+        int made = vk_fg_record(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, flight_on ? j.frame : 0);
         if (!made) {
             if (flight_on) vk_thumbs_frame(j.frame);
             vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
@@ -101,8 +103,8 @@ static void present_main(void *arg) {
         plat_cond_broadcast(&pcv);
         plat_mutex_unlock(&pl);
         uint64_t t0 = kern_now_ns();
-        if (made) vk_fg_show(job_pending, flight_on ? j.frame : 0);   // paces and flips itself, and never waits on a new job
-        else if (present_hold()) wait_until(j.at);
+        if (made == 1) vk_fg_show(job_pending, flight_on ? j.frame : 0);   // paces and flips itself, and never waits on a new job
+        else if (!made && present_hold()) vk_wait_until(j.at);
         uint64_t t1 = kern_now_ns();
         if (!made) vk_present_flip();
         // TOTK_TRACE=present: one line per present: the host present's interval, the interval of the game's present

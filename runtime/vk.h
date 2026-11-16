@@ -138,14 +138,15 @@ void vk_fsr_release(void);   // before the device goes away
 // swapchain image dst, which is in TRANSFER_DST and holds the scaled picture, and leaves it there; 0 = nothing recorded.
 int vk_smaa_record(VkCommandBuffer cb, VkImage dst, const int to[4]);
 void vk_smaa_release(void);   // before the device goes away
-// Frame generation (vk_framegen.c, TOTK_FRAME_GEN = 2x), called by the present thread. vk_fg_record: before the game's
-// frame is presented, copies the crop of src (the window texture, in GENERAL, fmt its format, w x h) into its history and,
-// when the frame before is there, makes the frame between them; returns 1 when a made frame exists (then the caller
-// calls vk_fg_show in place of the blit), 0 for the plain present (off, no history, a hitch, a failure). The game's
-// texture is read only by the command buffer it submits. vk_fg_show: presents the made frame, then the game's, whose
-// flip waits half a frame interval, or until pending() says another job is waiting; frame (0: none) goes to
-// vk_thumbs_frame for the game's frame.
-int vk_fg_record(VkImage src, VkFormat fmt, int w, int h, const int crop[4]);
+// Frame generation (vk_framegen.c, TOTK_FRAME_GEN = auto or 2x to 8x), called by the present thread. vk_fg_record:
+// before the game's frame is presented, copies the crop of src (the window texture, in GENERAL, fmt its format, w x h)
+// into its history and, when the frame before is there, makes the frames between them; frame_no (0: none) goes to
+// vk_thumbs_frame for the game's frame. Returns 1 at 2x when a made frame exists (then the caller calls vk_fg_show in
+// place of the blit), 2 when the frames go to the display thread, which presents them (the caller neither blits nor
+// flips), 0 for the plain present (off, no history, a hitch, a failure). The game's texture is read only by the command
+// buffer it submits. vk_fg_show: presents the made frame, then the game's, whose flip waits half a frame interval, or
+// until pending() says another job is waiting.
+int vk_fg_record(VkImage src, VkFormat fmt, int w, int h, const int crop[4], uint64_t frame_no);
 void vk_fg_show(int (*pending)(void), uint64_t frame);
 void vk_fg_release(void);   // before the device goes away
 // Colour adjustment on the present (vk_color.c): with TOTK_COLOR_* away from their defaults, records a pass that writes
@@ -169,6 +170,12 @@ void vk_hdr_ui_compose(VkCommandBuffer cb, VkImageView dst_view, VkFormat fmt, u
 void vk_hdr_to_srgb8(const uint8_t *in, uint8_t *out, size_t px, int a2r);
 void vk_hdr_release(void);   // before the device goes away
 void vk_present_flip(void);
+void vk_present_lock(void);     // the lock vk_present_release runs under (vk_framegen.c display_main)
+// vk_present_image under vk_present_lock, gfx_window_start called before the lock was taken (the start lock is never
+// taken under the present lock)
+void vk_present_image_held(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4]);
+void vk_wait_until(uint64_t at);   // vk_backend.c: until kern_now_ns() reaches at, a sleep to 1 ms before it, then yields
+void vk_present_unlock(void);
 // TOTK_FLIGHT thumbnails (GfxBackend.thumbs_enable, thumbs_read; flight.c): the present thread blits every presented
 // frame into a host-visible ring of n thumbnails.
 void vk_thumbs_enable(int n);            // before the first present; n slots of FLIGHT_THUMB_W x FLIGHT_THUMB_H
