@@ -317,9 +317,14 @@ void vk_mem_mirror_prologue(VkCommandBuffer cb);
 void vk_mem_shadow_sync(void);
 void vk_mem_gpu_pending(uint64_t addr, uint64_t size);
 void vk_gpu_written(uint64_t addr, uint64_t size);
+// One range of a submission's GPU writes: {address, size, buffer the GPU wrote or VK_NULL_HANDLE}.
+typedef struct { uint64_t addr, size; VkBuffer buf; } VkGpuWrite;
 // As vk_gpu_written for a write into buffer buf (VK_NULL_HANDLE: unknown). When buf is the VRAM mirror of the range's
 // pool, the mirror's next sync does not copy the pages in again while that write is their newest.
 void vk_gpu_written_into(uint64_t addr, uint64_t size, VkBuffer buf);
+// vk_gpu_written_into for the n ranges of one submission, in one pass. With the shadow storage: one lock hold, the pages
+// made writable in runs before the copies, and the pending list searched once. Without it, one call per range.
+void vk_gpu_written_many(const VkGpuWrite *w, int n);
 int vk_mem_mirror_probe(uint64_t addr);   // --probe-vkexec: the pool at addr gets its mirror as on a first buffer use;
                                           // 1 when it has one
 void vk_mem_class_log(const VkPhysicalDeviceProperties *p, const VkPhysicalDeviceMemoryProperties *m);   // once

@@ -153,7 +153,7 @@ typedef struct {
     uint32_t aspect, level0, levels, layer0, layers, swz;
 } ViewKey;
 _Static_assert(sizeof(ViewKey) == 40, "ViewKey is hashed as bytes: no padding");
-typedef struct { uint64_t addr, size; VkBuffer buf; } Range;   // note_written: buf the one the GPU wrote, or none
+typedef VkGpuWrite Range;   // note_written: buf the one the GPU wrote, or none
 typedef struct {
     Chunk *chunks;
     int nchunks, cchunks;
@@ -516,7 +516,7 @@ static const char *const RS_CLS_NAME[7] = {"storage table", "uniform ranges", "t
 static void cb_done(void *arg) {   // completion thread
     CbRes *r = arg;
     VkCtx *c = vk_ctx();
-    for (int i = 0; i < r->nwritten; i++) vk_gpu_written_into(r->written[i].addr, r->written[i].size, r->written[i].buf);
+    vk_gpu_written_many(r->written, r->nwritten);
     for (int i = 0; i < r->npools; i++) {
         vkResetDescriptorPool(c->device, r->pools[i], 0);
         plat_mutex_lock(&spare_lock);
