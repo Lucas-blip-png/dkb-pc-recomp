@@ -1,5 +1,5 @@
 // The start-up screen (vk.h; docs/dkb-testing.md, the DKB_SPLASH rows): from the moment the window opens to the game's
-// first picture, the window shows a scene of our own (shaders/splash.comp draws it from arithmetic, no image file) with
+// first picture, the window shows a scene of our own (a compute shader draws it from arithmetic, no image file) with
 // what the start is doing: the step, its percentage and count, the time it has left once that can be said, and a tip.
 // Without it the window opened only at the game's first present, several seconds into the start, and then showed the
 // game's black frames for some seconds more.
@@ -16,6 +16,9 @@
 // present thread asks the screen's thread to stop, waits for its last present, and shows that frame. A frame that
 // cannot be checked ends the screen at once, and so does a minute of black frames, so the screen never hides the game
 // for long. The window closed meanwhile ends it too.
+//
+// Two scenes: splash = 1 (the default) the dawn over a jungle ridge (shaders/splash.comp), splash = 2 a cavern deep
+// under the ground (shaders/splash_under.comp). Each is a pipeline of its own and only the one shown is compiled.
 //
 // DKB_SPLASH=0 (splash = 0 in dkb.ini) turns it off: the window opens at the game's first present, as before, and
 // DKB_SPLASH_WATCH=1 then logs the first picture's time without holding frames. DKB_SPLASH_TEST=<seconds> shows a
@@ -35,6 +38,7 @@
 #include "splash.h"
 #include "splash_check_spv.h"
 #include "splash_spv.h"
+#include "splash_under_spv.h"
 #include "ui_text.h"
 #include "vk.h"
 #include "platform/platform.h"
@@ -64,6 +68,7 @@ int vk_splash_up(void) {
 // ---- the renderer: everything the screen's thread (or the probe) draws with
 typedef struct {
     VkDevice dev;
+    int scene;                              // 1 the dawn over the jungle (shaders/splash.comp), 2 the cavern (splash_under.comp)
     PFN_vkCmdPushDescriptorSetKHR push;
     VkDescriptorSetLayout dsl;
     VkPipelineLayout layout;
@@ -145,10 +150,17 @@ static VkPipeline compute_pipeline(VkDevice dev, const uint32_t *code, size_t by
     return p;
 }
 
-static int renderer_init(Renderer *r) {
+// The scene splash = <n> asks for: 2 the cavern, any other value that is not 0 the dawn over the jungle
+static int scene_of_cfg(void) { return cfg_int("TOTK_SPLASH") == 2 ? 2 : 1; }
+
+// Each scene is a pipeline of its own: only the one shown is compiled, so the second costs the start nothing
+static int renderer_init(Renderer *r, int scene) {
     VkCtx *c = vk_ctx();
     memset(r, 0, sizeof *r);
     r->dev = c->device;
+    r->scene = scene;
+    const uint32_t *code = scene == 2 ? splash_under_spv : splash_spv;
+    size_t bytes = scene == 2 ? sizeof splash_under_spv : sizeof splash_spv;
     r->back_dawn = -1;
     r->push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->device, "vkCmdPushDescriptorSetKHR");
     if (!r->push || !(r->text = splash_text_new())) return 0;
@@ -166,7 +178,7 @@ static int renderer_init(Renderer *r) {
     VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     if (vkCreateDescriptorSetLayout(r->dev, &dci, NULL, &r->dsl) != VK_SUCCESS ||
         vkCreatePipelineLayout(r->dev, &li, NULL, &r->layout) != VK_SUCCESS ||
-        !(r->pipe = compute_pipeline(r->dev, splash_spv, sizeof splash_spv, r->layout)) ||
+        !(r->pipe = compute_pipeline(r->dev, code, bytes, r->layout)) ||
         vkCreateCommandPool(r->dev, &pci, NULL, &r->pool) != VK_SUCCESS || vkCreateFence(r->dev, &fi, NULL, &r->fence) != VK_SUCCESS)
         return 0;
     VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = r->pool,
@@ -361,7 +373,7 @@ static int render(Renderer *r, const SplashView *v, double secs, uint32_t w, uin
     P->bar[0] = r->bar[0], P->bar[1] = r->bar[1], P->bar[2] = r->bar[2], P->bar[3] = v->fraction;
     P->mark[0] = r->mark[0], P->mark[1] = r->mark[1], P->mark[2] = r->mark[2];
     P->mark[3] = v->fraction >= 0 ? v->fraction * v->fraction : 0.15f;
-    P->misc[0] = 0.70f;
+    P->misc[0] = r->scene == 2 ? 0.62f : 0.70f;   // the sun's x, or the opening's in the cavern's roof
     for (int i = 0; i < r->nbox; i++) {   // the tip fades every frame without a new atlas
         P->box[i] = r->box[i];
         if (r->tip_boxes >> i & 1) P->box[i].color[3] = v->tip_alpha;
@@ -430,7 +442,7 @@ static void screen_main(void *arg) {
     (void)arg;
     uint64_t t0 = plat_now_ns();
     Renderer r;
-    if (!vk_init() || !renderer_init(&r)) {
+    if (!vk_init() || !renderer_init(&r, scene_of_cfg())) {
         rt_log("splash: the start-up screen could not be made; the window opens at the game's first frame");
         if (vk_ctx()) renderer_free(&r);
         plat_xchg32(&g_state, ST_DONE);
@@ -758,12 +770,17 @@ int probe_splash(void) {
         printf("probe-splash: FAIL no Vulkan device\n");
         return 1;
     }
+    // the scene splash = <n> selects (DKB_SPLASH=2: the cavern, whose files are named under-*.png)
+    int scene = scene_of_cfg();
+    const char *prefix = scene == 2 ? "under" : "splash";
     Renderer r;
-    if (!renderer_init(&r)) {
+    uint64_t t_init = plat_now_ns();
+    if (!renderer_init(&r, scene)) {
         printf("probe-splash: FAIL the renderer could not be made\n");
         renderer_free(&r);
         return 1;
     }
+    printf("probe-splash: scene %d, renderer and pipeline made in %.1f ms\n", scene, (double)(plat_now_ns() - t_init) / 1e6);
     plat_file_mkdir_p(dir);
     static const struct { uint32_t w, h; const char *name; } sizes[] = {
         {1920, 1080, "1080p"}, {1280, 720, "720p"}, {3840, 2160, "2160p"}, {720, 1000, "narrow"}, {3440, 1440, "ultrawide"}};
@@ -772,7 +789,9 @@ int probe_splash(void) {
         {BOOT_STEP_DEVICE, 0, 0, 0.9, 0.9, "starting"},
         {BOOT_STEP_SHADERS, 12417, 33936, 47.3, 45.0, "shaders"},
         {BOOT_STEP_PIPELINES, 3050, 3550, 131.5, 20.0, "pipelines"},
-        {BOOT_STEP_GAME, 0, 0, 146.2, 4.0, "game"}};
+        {BOOT_STEP_GAME, 0, 0, 146.2, 4.0, "game"},
+        {BOOT_STEP_SHADERS, 0, 33936, 3.1, 1.0, "shaders0"},
+        {BOOT_STEP_PIPELINES, 2485, 3550, 118.4, 14.0, "pipelines70"}};
     int fails = 0;
     for (size_t s = 0; s < sizeof sizes / sizeof *sizes; s++)
         for (size_t k = 0; k < sizeof states / sizeof *states; k++) {
@@ -790,7 +809,7 @@ int probe_splash(void) {
             if (k == 1 && s == 3) snprintf(v.tip, sizeof v.tip, "%s", ui_text_in("en", UI_MENU_SPLASH_TIP_SETTINGS));
             v.tip_alpha = 1;
             char path[1024];
-            snprintf(path, sizeof path, "%s/splash-%s-%s.png", dir, sizes[s].name, states[k].name);
+            snprintf(path, sizeof path, "%s/%s-%s-%s.png", dir, prefix, sizes[s].name, states[k].name);
             int ok = render(&r, &v, states[k].secs, sizes[s].w, sizes[s].h, 1.0f) && save_frame(&r, path);
             printf("probe-splash: %s %s\n", ok ? "wrote" : "FAIL", path);
             fails += !ok;

@@ -1,0 +1,488 @@
+// The start-up screen's second scene (runtime/vk_splash.c, splash = 2), drawn here from arithmetic alone: no image
+// file, no game art. A cavern deep under the ground, seen from inside: a far wall banded with the layers the digging
+// goes through (earth, red rock, dark stone, a seam of gold), a terrace of stalagmites and columns before it, the roof
+// with its stalactites overhead, and in the roof a small opening far above, from which a shaft of light falls into the
+// cave. The start is the night ending: the shaft begins as thin, cool moonlight and widens and warms into daylight as
+// the steps go on. Crystals glow faintly in the wall, small fungi on the terrace, dust drifts in the light, drops fall
+// from the roof now and then. In front, the shelf of rock the progress is dug through: the tunnel of the other scene
+// (shaders/splash/common.glsl), toward the bunch of bananas, through a layer whose rock tells the step: earth while the
+// start begins, red rock through the shaders, dark stone through the pipelines, gold once the game starts. Gold in the
+// shelf lights up as the start goes on.
+//
+// Two passes over the window (common.glsl main). Pass 0 paints the cave at the current dawn into the backdrop, with
+// in its alpha how much of the open cave the pixel shows (0 where near rock covers it): pass 1 draws the shaft, the
+// dust and the drops only there. Pass 1 adds what moves: the shaft's slow shimmer, the dust in three depths, the
+// crystals' and fungi's glow, the gold glinting, the drops, the tunnel and its lamp, the bananas, the text.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "splash/common.glsl"
+
+// ---- the layout of this scene
+// The opening in the roof, in scene units (its x from the screen's light share), and the half sizes of its ellipse
+vec2 hole_c() { return vec2((P.misc.x - 0.5) * W / H, 0.044); }
+const vec2 HOLE_R = vec2(0.062, 0.022);
+
+// The roof's lower edge before its stalactites: thick over the left (the name is there), lower around the opening
+// (rounded lobes of rock hang from it, cells 0.11 units wide)
+float roof(float x) {
+    float o = hole_c().x;
+    float i = floor(x / 0.11), lobe = 0.0;
+    for (int k = -1; k <= 1; k++) {
+        float c = i + float(k);
+        float cx = (c + 0.5 + 0.3 * (rnd(uint(int(c)) * 19u + 318u) - 0.5)) * 0.11;
+        float cr = 0.075 * (0.45 + 0.55 * rnd(uint(int(c)) * 19u + 319u));
+        float dx = x - cx;
+        lobe = max(lobe, sqrt(max(0.0, cr * cr - dx * dx)) - 0.50 * cr);
+    }
+    return 0.036 + 0.030 * fbm1(x * 3.0 + 1.0, 317u, 3) + lobe + 0.045 * exp(-pow((x - o) / 0.20, 2.0)) +
+           0.050 * smoothstep(0.1, -0.9, x);
+}
+// The terrace's top: the cave's floor beyond the shelf, where the shaft comes down
+float terrace(float x) { return 0.590 + 0.028 * (fbm1(x * 1.4 + 9.0, 313u, 3) - 0.5) + 0.010 * sin(x * 2.0 + 2.0); }
+// The top of the near shelf, before the boulders on it
+float shelf(float x) { return 0.664 + 0.012 * (fbm1(x * 2.2 + 3.0, 311u, 3) - 0.5) + 0.005 * sin(x * 3.1 + 0.4); }
+
+// The shaft of light from the opening to the terrace, where it lands in a pool: set once a pixel (shaft_setup)
+vec2 SH_O, SH_F, SH_DIR, SH_NRM;
+float SH_LEN;
+void shaft_setup() {
+    vec2 o = hole_c();
+    float x = o.x - 0.19 * min(1.0, W / H / 1.4);
+    SH_O = o + vec2(0.0, 0.006), SH_F = vec2(x, terrace(x) + 0.004);
+    vec2 ax = SH_F - SH_O;
+    SH_LEN = length(ax);
+    SH_DIR = ax / SH_LEN, SH_NRM = vec2(-SH_DIR.y, SH_DIR.x);
+}
+vec2 pool_c() { return SH_F; }
+// Its shape 0 to 1 at s, with t along it (0 the opening, 1 the floor) and u across it (its half width 1). Wider as the
+// day comes.
+float shaft(vec2 s, float d, out float t, out float u) {
+    vec2 q = s - SH_O;
+    t = dot(q, SH_DIR) / SH_LEN;
+    float hw = mix(0.050, 0.135, sat(t)) * (0.72 + 0.42 * d);
+    u = dot(q, SH_NRM) / hw;
+    float across = exp(-u * u * 1.7);
+    float along = smoothstep(-0.03, 0.05, t) * (1.0 - smoothstep(0.92, 1.06, t)) * (1.0 - 0.40 * sat(t));
+    return across * along;
+}
+vec3 light_col(float d) { return mix(hex(0x88a8eau), hex(0xffd08au), smoothstep(0.22, 0.90, d)); }
+float light_k(float d) { return 0.34 + 0.50 * d; }
+
+// How much of the shaft's light reaches a surface at s: the pool where it lands and the glow along it
+float lit_at(vec2 s, float d) {
+    vec2 f = pool_c();
+    float t, u;
+    shaft(s, d, t, u);
+    float pool = exp(-pow((s.x - f.x) / (0.24 * (0.80 + 0.45 * d)), 2.0) - pow((s.y - f.y) / 0.12, 2.0));
+    float along = exp(-u * u * 0.22) * smoothstep(-0.05, 0.15, t) * (1.0 - smoothstep(0.9, 1.3, t));
+    return 0.85 * pool + 0.30 * along;
+}
+
+// The step's layer, by the dawn the steps set (splash_model.c splash_view: 0.15 starting, 0.2 to 0.6 the shaders,
+// 0.6 to 0.85 the pipelines, 0.92 the game)
+vec3 layer_col(float d) {
+    vec3 c = hex(0x5c3c24u);                                    // earth
+    c = mix(c, hex(0x74301eu), smoothstep(0.16, 0.21, d));     // red rock
+    c = mix(c, hex(0x4c4a72u), smoothstep(0.58, 0.63, d));     // dark stone, cool
+    c = mix(c, hex(0x8c6a22u), smoothstep(0.87, 0.91, d));     // the gold seam
+    return c;
+}
+
+// The gold of shelf cell g (0.06 units square), when it has some: where (go), how large (gr) and whether it is lit yet
+// (on: a share of them that grows with the dawn). Three times as many in the step's layer about the tunnel at lyS.
+bool shelf_gold(ivec2 g, float lyS, float d, out vec2 go, out float gr, out float on) {
+    go = (vec2(g) + 0.2 + 0.6 * vec2(rnd2(g, 513u), rnd2(g, 515u))) * 0.060;
+    gr = 0.0026 + 0.0036 * rnd2(g, 517u);
+    on = step(rnd2(g, 519u), 0.12 + 0.88 * d);
+    return rnd2(g, 511u) < (abs(go.y - lyS) < 0.030 ? 0.30 : 0.06);
+}
+
+// ---- pass 0: what stays
+// The crystal cluster of wall cell g (0.20 units wide), when it has one: its foot, and its size (0: none)
+vec3 crystal_cell(int g) {
+    if (rnd(uint(g) * 41u + 401u) > 0.50) return vec3(0.0);
+    float x = (float(g) + 0.2 + 0.6 * rnd(uint(g) * 41u + 403u)) * 0.20;
+    return vec3(x, terrace(x) + 0.003, 0.6 + 0.8 * rnd(uint(g) * 41u + 407u));
+}
+vec3 crystal_tint(int g) { return rnd(uint(g) * 41u + 409u) < 0.55 ? hex(0x48d8c8u) : hex(0x9c7cf4u); }
+
+// A cluster of crystals: coverage, and the facet's light (0 the shaded side, 1 the lit one), at s
+float crystals(vec2 s, vec3 cc, uint seed, out float facet) {
+    facet = 0.0;
+    float cov = 0.0, px = 1.0 / H;
+    for (int i = 0; i < 5; i++) {
+        float a = (rnd(seed + uint(i) * 7u) - 0.5) * 1.5;   // off upright
+        float len = cc.z * (0.016 + 0.030 * rnd(seed + uint(i) * 7u + 1u)) * (i == 0 ? 1.5 : 1.0);
+        float w = len * (0.20 + 0.08 * rnd(seed + uint(i) * 7u + 2u));
+        vec2 dir = vec2(sin(a), -cos(a)), nrm = vec2(-dir.y, dir.x);
+        vec2 q = s - cc.xy - nrm * (float(i) - 2.0) * 0.002 * cc.z;
+        float along = dot(q, dir), across = dot(q, nrm);
+        float half_w = w * min(1.0, (len - along) / (w * 1.6));   // a pointed prism
+        float sd = max(abs(across) - half_w, max(-along, along - len));
+        float k = cover(sd / px);
+        if (k > cov) facet = across < 0.0 ? 1.0 : 0.35 + 0.25 * sat(along / len);
+        cov = max(cov, k);
+    }
+    return cov;
+}
+
+// A row of stalactites from the roof, one in some cells of width cell (prob: the share that have one), of lengths and
+// root widths in the ranges given; adds their coverage to cov, their edge to rim and how much the pixel is on the
+// side of one that faces the shaft (0 to 1) to side
+void stalactites(float cell, float prob, vec2 lr, vec2 wr, uint seed, inout float cov, inout float rim, inout float side) {
+    float px = 1.0 / H, bx = mix(SH_O.x, SH_F.x, 0.4);
+    int ci = int(floor(S.x / cell));
+    for (int k = ci - 1; k <= ci + 1; k++) {
+        if (rnd(uint(k) * 37u + seed) > prob) continue;
+        float cx = (float(k) + 0.3 + 0.4 * rnd(uint(k) * 37u + seed + 2u)) * cell;
+        if (abs(cx - hole_c().x) < HOLE_R.x * 1.1) continue;   // none hang in the opening
+        float root = roof(cx) - 0.006;
+        float r = rnd(uint(k) * 37u + seed + 4u);
+        float l = mix(lr.x, lr.y, r * r);
+        float w = mix(wr.x, wr.y, sqrt(rnd(uint(k) * 37u + seed + 6u))) * (0.7 + 0.5 * r);
+        float a = (S.y - root) / l;
+        if (a < 0.0 || a > 1.0) continue;
+        float hw = w * pow(1.0 - a, 1.5) * (1.0 + 0.18 * (n1(S.y * 140.0 + float(k), seed + 8u) - 0.5)) + 0.6 * px;
+        float dx = S.x - cx;
+        float sd = (abs(dx) - hw) / px;
+        float k2 = cover(sd);
+        if (k2 <= 0.0) continue;
+        cov = max(cov, k2);
+        float toward = sign(bx - cx) * dx / hw;   // -1 to 1 across it, 1 on the side toward the shaft
+        side = max(side, k2 * sat(0.5 + 0.5 * toward));
+        rim = max(rim, k2 * (1.0 - smoothstep(0.0, 2.0 * U, -sd)) * step(0.0, toward));
+    }
+}
+
+// A row of spires on the terrace (its top lifted by lift, x shifted by xoff), one in most cells of width cell:
+// stalagmites scale times the near ones' size, leaning a little, and with columns, now and then a column up to the roof,
+// narrow where the two halves met. Adds their coverage to cov and their lit edge to rim, and sets side to how much the
+// pixel faces the shaft (0 to 1)
+void spires(float cell, float scale, float lift, float xoff, uint seed, bool columns, inout float cov, inout float rim, inout float side) {
+    float px = 1.0 / H, bx = SH_F.x;
+    int ci = int(floor(S.x / cell));
+    for (int k = ci - 1; k <= ci + 1; k++) {
+        float r0 = rnd(uint(k) * 29u + seed);
+        if (r0 > 0.85) continue;
+        float cx = (float(k) + 0.25 + 0.5 * rnd(uint(k) * 29u + seed + 2u)) * cell;
+        float base = terrace(cx + xoff) - lift + 0.004;
+        float dy = base - S.y;   // height above the spire's foot
+        float hw;
+        if (columns && r0 < 0.16 && abs(cx - hole_c().x) > 0.20) {
+            if (dy < -0.008) continue;
+            float top = roof(cx), waist = mix(top, base, 0.40 + 0.25 * rnd(uint(k) * 29u + seed + 4u));
+            float cw = 0.016 + 0.014 * rnd(uint(k) * 29u + seed + 6u);
+            float sp = S.y < waist ? (waist - S.y) / (waist - top + 0.02) : (S.y - waist) / (base - waist);
+            hw = cw * (0.38 + 1.2 * pow(sat(sp), 2.0)) * (1.0 + 0.14 * (n1(S.y * 70.0 + float(k), seed + 8u) - 0.5));
+        } else {
+            float h = scale * (0.040 + 0.150 * pow(rnd(uint(k) * 29u + seed + 10u), 1.3));
+            if (dy < -0.008 || dy > h) continue;
+            float a = sat(1.0 - dy / h);   // 0 at the tip, 1 at the foot
+            float bw = h * (0.17 + 0.13 * rnd(uint(k) * 29u + seed + 12u));
+            hw = bw * pow(a, 0.95) * (1.0 + 0.12 * (n1(S.y * 90.0 / scale + float(k), seed + 14u) - 0.5)) + 0.5 * px;
+            cx += (rnd(uint(k) * 29u + seed + 16u) - 0.5) * 0.30 * h * (1.0 - a) * (1.0 - a);   // its tip leans
+        }
+        float dx = S.x - cx;
+        float sd = (abs(dx) - hw) / px;
+        float k2 = cover(sd);
+        if (k2 <= 0.0) continue;
+        float across = sign(bx - cx) * dx / max(hw, px);   // -1 to 1, 1 on the side toward the shaft
+        side = sat(0.5 + 0.5 * across);
+        cov = max(cov, k2);
+        rim = max(rim, k2 * (1.0 - smoothstep(0.0, 2.5 * U, -sd)) * step(0.0, across));
+    }
+}
+
+vec3 backdrop_pixel() {
+    float d = P.t.z;
+    shaft_setup();
+    vec3 L = light_col(d) * light_k(d);
+    float px = 1.0 / H;
+    vec2 o = hole_c();
+    float lit = lit_at(S, d);
+    vec3 amb = vec3(0.38, 0.34, 0.46);   // the cave's own light: cool, faint
+    float open = 1.0;                    // how much of the open cave shows here (the backdrop's alpha)
+
+    // the far wall: bulging rock in relief, lit from the pool of light, its layers in soft folded bands
+    vec2 wq = S * vec2(2.6, 4.2);
+    float hgt = gfbm(wq, 331u, 4), e = 0.012;
+    vec2 grad = vec2(gfbm(wq + vec2(e, 0.0), 331u, 4) - hgt, gfbm(wq + vec2(0.0, e), 331u, 4) - hgt) / e;
+    vec2 to_light = normalize(pool_c() - S + vec2(0.0, -0.15));
+    float relief = sat(0.62 + 0.55 * dot(grad, -to_light) * 0.5);   // faces turned toward the light are brighter
+    float y = S.y + 0.050 * hgt + 0.022 * (fbm1(S.x * 1.3 + 2.0, 333u, 3) - 0.5);
+    vec3 wall = hex(0x4c3426u);                                     // earth
+    wall = mix(wall, hex(0x5a2c22u), smoothstep(0.22, 0.29, y));     // red rock
+    wall = mix(wall, hex(0x30303eu), smoothstep(0.35, 0.42, y));     // dark stone
+    wall = mix(wall, hex(0x4e4230u), smoothstep(0.48, 0.55, y));     // toward the gold
+    float seam = min(min(abs(y - 0.255), abs(y - 0.385)), abs(y - 0.515));
+    wall *= 1.0 - 0.22 * (1.0 - smoothstep(0.0, 0.010, seam));
+    wall *= 0.82 + 0.30 * fbm2(S * vec2(16.0, 24.0), 335u, 3);
+    wall *= 1.0 + 0.025 * sin((y + 0.004 * n1(S.x * 12.0, 337u)) * 650.0);
+    // cracks down the wall: where the relief folds in
+    float crease = 1.0 - smoothstep(0.0, 0.050, abs(gfbm(S * vec2(7.0, 2.0) + 11.0, 339u, 2)));
+    wall *= 1.0 - 0.25 * crease * smoothstep(0.50, 0.70, n2(S * vec2(4.0, 1.5), 341u));
+    vec3 c = wall * (amb * (0.55 + 0.45 * relief) + L * lit * (0.6 + 1.6 * relief));
+    // the air is hazy: dark blue up under the roof, glowing round the shaft
+    vec3 fog = hex(0x11121eu) + L * 0.22 * lit;
+    c = mix(c, fog, 0.26 + 0.30 * smoothstep(0.30, 0.05, S.y));
+
+    // a row of spires far off in the haze, then the terrace beyond the shelf with its stalagmites and columns
+    for (int row = 0; row < 2; row++) {
+        float lift = row == 0 ? 0.030 : 0.0;
+        float tr = terrace(S.x + 0.5 * float(1 - row)) - lift;
+        float cov = cover((tr - S.y) / px), rim = 0.0, side = 0.5;
+        spires(row == 0 ? 0.085 : 0.150, row == 0 ? 0.55 : 1.0, lift, row == 0 ? 0.5 : 0.0, 421u + uint(row) * 97u, row == 1, cov, rim, side);
+        if (cov <= 0.0) continue;
+        float ml = lit_at(S, d);
+        vec3 rock = (row == 0 ? hex(0x2e2834u) : hex(0x46343au)) * (0.80 + 0.40 * fbm2(S * vec2(30.0, 50.0), 441u + uint(row), 2));
+        vec3 m = rock * (amb * (0.55 + 0.55 * side) + L * ml * (0.25 + 0.95 * side));
+        // the terrace's top where the shaft lands, and the rims of the stone toward it
+        float top = 1.0 - smoothstep(0.0, 5.0 * U, (S.y - tr) / px);
+        m += L * (ml + 0.10) * (0.45 * top + 0.55 * rim);
+        m = mix(m, fog, row == 0 ? 0.55 : 0.15);
+        c = mix(c, m, cov);
+    }
+    // crystals in the wall and at the terrace's foot
+    {
+        int g0 = int(floor(S.x / 0.20));
+        for (int k = g0 - 1; k <= g0 + 1; k++) {
+            vec3 cc = crystal_cell(k);
+            if (cc.z == 0.0) continue;
+            vec3 tint = crystal_tint(k);
+            float r = length((S - cc.xy + vec2(0.0, 0.015 * cc.z)) * vec2(1.0, 1.3));
+            c += tint * 0.10 * exp(-r * r / (0.0016 * cc.z * cc.z));   // their glow on the rock
+            if (abs(S.x - cc.x) > 0.07 || abs(S.y - cc.y) > 0.07) continue;
+            float facet;
+            float cov = crystals(S, cc, uint(k) * 53u + 411u, facet);
+            vec3 cry = tint * mix(0.16, 0.62, facet) * (0.55 + 0.45 * smoothstep(0.0, 0.025 * cc.z, cc.y - S.y)) + L * lit * 0.5 * facet;
+            c = mix(c, cry, cov);
+        }
+    }
+
+    // fungi on the terrace: small caps on short stems, glowing
+    {
+        const float cell = 0.035;
+        int ci = int(floor(S.x / cell));
+        for (int k = ci - 1; k <= ci + 1; k++) {
+            if (rnd(uint(k) * 31u + 451u) > 0.22 || n1(float(k) * 0.21, 453u) < 0.45) continue;
+            float cx = (float(k) + 0.5) * cell + 0.010 * (rnd(uint(k) * 31u + 455u) - 0.5);
+            float s = 0.0035 + 0.0040 * rnd(uint(k) * 31u + 457u);
+            vec2 cap = vec2(cx, terrace(cx) - s * (1.2 + 1.4 * rnd(uint(k) * 31u + 459u)));
+            vec2 q = (S - cap) / s;
+            float sd = max(length(q * vec2(1.0, 1.7)) - 1.0, q.y) * s / px;   // a dome
+            float stem = (abs(S.x - cx) - 0.25 * s) / px;
+            stem = max(stem, max(cap.y - S.y, S.y - terrace(cx)) / px);
+            vec3 glow = hex(0x6ef0c4u);
+            float r = length(S - cap) / s;
+            c += glow * 0.08 / (1.0 + r * r * 0.08);
+            c = mix(c, hex(0x3a3a3au) * 0.5, cover(stem) * 0.8);
+            c = mix(c, glow * (0.55 + 0.45 * sat(-q.y)), cover(sd));
+        }
+    }
+
+    // the roof overhead with its stalactites, and the opening in it
+    float rf = roof(S.x);
+    float near = cover((S.y - rf) / px);
+    float near_rim = 0.0, near_side = 0.0;
+    stalactites(0.090, 0.60, vec2(0.040, 0.190), vec2(0.010, 0.024), 461u, near, near_rim, near_side);
+    stalactites(0.026, 0.55, vec2(0.010, 0.050), vec2(0.0025, 0.0065), 471u, near, near_rim, near_side);
+    // the opening: an uneven ellipse, the sky beyond it going from night to day
+    vec2 hq = (S - o) / HOLE_R;
+    float ha = atan(hq.y, hq.x);
+    float hr = length(hq) - 1.0 - 0.18 * (n1(ha * 2.5 + 7.0, 471u) - 0.5) - 0.08 * (n1(ha * 9.0, 473u) - 0.5);
+    float in_hole = cover(hr * HOLE_R.y / px);
+    if (near > 0.0) {
+        float nl = lit_at(S, d);
+        vec3 rock = hex(0x16121au) * (0.85 + 0.30 * fbm2(S * vec2(40.0, 30.0), 475u, 2));
+        vec3 n = rock * (amb * 0.55 * (0.8 + 0.4 * near_side) + L * nl * (0.4 + 0.9 * near_side));
+        n += L * nl * 0.55 * near_rim;
+        // the roof round the opening catches the light that comes in
+        n += L * 0.40 * exp(-max(hr, 0.0) * 7.0) * (1.0 - in_hole) * smoothstep(-0.2, 0.6, hq.y);
+        c = mix(c, n, near * (1.0 - in_hole));
+        open = 1.0 - near * (1.0 - in_hole);
+    }
+    if (in_hole > 0.0) {
+        // seen at a slant through the rock: the far side of the sky at the top, the light nearest the sun below
+        float sk = sat(hq.y * 0.5 + 0.5);
+        vec3 sky = mix(mix(hex(0x0c1530u), hex(0x34497au), sk), mix(hex(0xa8c4e4u), hex(0xffeccau), sk), smoothstep(0.20, 0.95, d));
+        sky += light_col(d) * 0.12;
+        sky *= 0.70 + 0.30 * smoothstep(0.0, 0.45, -hr);   // the throat of the opening, darker at its rim
+        c = mix(c, sky, in_hole);
+    }
+    // roots hanging from the opening's rim, dark against the light
+    {
+        float rx = (S.x - o.x) / (HOLE_R.x * 2.2);
+        if (abs(rx) < 1.0 && S.y > o.y - 0.01 && S.y < o.y + 0.14) {
+            float id = floor(rx * 7.0);
+            float len = 0.025 + 0.090 * rnd(uint(int(id) + 50) * 11u + 481u);
+            float top = o.y + HOLE_R.y * sqrt(max(0.0, 1.0 - pow((id + 0.5) / 7.0, 2.0))) * 0.9;
+            float a = (S.y - top) / len;
+            float wob = 0.20 * sin(a * 7.0 + rnd(uint(int(id) + 50) * 11u + 483u) * 6.283) * a;
+            float lx = fract(rx * 7.0) - 0.5 - wob;
+            float sd = abs(lx) * (HOLE_R.x * 2.2 / 7.0) / px - 0.6 * max(U, 0.8) * (1.0 - 0.6 * a);
+            float on = step(0.30, rnd(uint(int(id) + 50) * 11u + 485u)) * step(0.0, a) * step(a, 1.0);
+            c = mix(c, hex(0x0c0806u), cover(sd) * on);
+        }
+    }
+
+    // the shelf in front: its top with boulders on it, rock below, the step's layer around the tunnel
+    float sh = shelf(S.x);
+    float cov = cover((sh - S.y) / px), brim = 0.0;
+    {
+        const float cell = 0.060;
+        int ci = int(floor(S.x / cell));
+        for (int k = ci - 1; k <= ci + 1; k++) {
+            if (rnd(uint(k) * 43u + 491u) > 0.62) continue;
+            float cx = (float(k) + 0.5 + 0.5 * (rnd(uint(k) * 43u + 493u) - 0.5)) * cell;
+            float r = 0.010 + 0.028 * pow(rnd(uint(k) * 43u + 495u), 1.5);
+            vec2 bc = vec2(cx, shelf(cx) + 0.35 * r);
+            vec2 q = (S - bc) / vec2(r * 1.25, r);
+            float bd = (length(q) - 1.0 - 0.10 * (n1(atan(q.y, q.x) * 3.0 + float(k), 497u) - 0.5)) * r / px;
+            float k2 = cover(bd);
+            if (k2 > 0.0) brim = max(brim, k2 * (1.0 - smoothstep(0.0, 3.0 * U, -bd)) * smoothstep(0.2, -0.6, q.y));
+            cov = max(cov, k2);
+        }
+    }
+    if (cov > 0.0) {
+        float sl = lit_at(vec2(S.x, min(S.y, sh)), d);
+        float below = S.y - sh;
+        float lyS = P.bar.z / H;
+        // the face of the shelf: dark rock in thin layers, seams across it, cool where it turns from the light
+        float yl = S.y + 0.006 * (fbm1(S.x * 6.0, 505u, 2) - 0.5);
+        vec3 rock = mix(hex(0x3a2a2au), hex(0x2a2236u), smoothstep(0.70, 0.80, S.y));
+        rock *= 0.78 + 0.34 * fbm2(S * vec2(30.0, 60.0), 503u, 3);
+        rock *= 1.0 + 0.07 * sin(yl * 900.0) - 0.20 * (1.0 - smoothstep(0.0, 0.0025, abs(fract(yl * 26.0) - 0.5) / 26.0));
+        // the step's layer: a band about the tunnel, its edges uneven, a dark seam above and below it
+        float edge = 0.032 + 0.006 * (n1(S.x * 14.0, 501u) - 0.5);
+        float off = abs(S.y - lyS + 0.004 * sin(S.x * 5.0));
+        float band = 1.0 - smoothstep(edge - 1.5 * px, edge + 1.5 * px, off);
+        vec3 lay = layer_col(d) * (0.80 + 0.35 * fbm2(S * vec2(22.0, 80.0), 507u, 3));
+        lay *= 1.0 + 0.10 * sin((S.y - lyS) * 1600.0 + 2.0 * n1(S.x * 20.0, 509u));
+        rock = mix(rock, lay, band);
+        rock *= 1.0 - 0.55 * (1.0 - smoothstep(0.0, 2.0 * U, abs(off - edge) / px));
+        vec3 n = rock * (amb * 1.0 + L * sl * (0.55 * (1.0 - smoothstep(0.0, 0.05, below)) + 0.12));
+        n += L * sl * 0.60 * brim;
+        n += L * sl * 0.45 * (1.0 - smoothstep(0.0, 3.0 * U, below / px)) * step(-0.002, below);   // its lit lip
+        n *= 1.0 - 0.40 * smoothstep(0.0, 0.035, below) * (1.0 - band * 0.5);   // the face below the lip in shadow
+        // gold in the shelf: nuggets, most in the step's layer, more of them lit as the start goes on
+        ivec2 gc = ivec2(floor(S / 0.060));
+        for (int j = -1; j <= 1; j++)
+            for (int i = -1; i <= 1; i++) {
+                ivec2 g = gc + ivec2(i, j);
+                vec2 go;
+                float gr, on;
+                if (!shelf_gold(g, lyS, d, go, gr, on) || go.y < sh + 0.012) continue;
+                vec2 dv = S - go;
+                float l = length(dv);
+                n += hex(0xf6c52bu) * (0.02 + 0.08 * on) / (1.0 + l * l / (gr * gr * 9.0));
+                float m = cover((l - gr * (0.85 + 0.25 * n1(atan(dv.y, dv.x) * 2.0, 521u))) * H);
+                vec3 gold = mix(hex(0x7a5010u), hex(0xffd650u), sat(0.70 - dv.y / (gr * 1.6))) * (0.45 + 0.55 * on);
+                gold = mix(gold, hex(0xfff2b0u), cover((length(dv + vec2(0.30, 0.40) * gr) - 0.22 * gr) * H) * 0.8 * on);
+                n = mix(n, gold, m);
+            }
+        c = mix(c, n, cov);
+        open *= 1.0 - cov;
+    }
+
+    // the corners and the bottom darker, so the text reads on any part of the picture
+    vec2 v = vec2(X / W - 0.5, Y / H - 0.5);
+    c *= 1.0 - 0.30 * smoothstep(0.40, 1.05, length(v * vec2(0.9, 1.1)));
+    c *= 1.0 - 0.28 * smoothstep(0.70, 1.0, Y / H);
+    BACK_A = open;
+    return c;
+}
+
+// ---- pass 1: what moves
+vec3 frame_pixel(vec3 c) {
+    float time = P.t.x, d = P.t.z;
+    float open = BACK_IN_A;
+    vec3 L = light_col(d) * light_k(d);
+    shaft_setup();
+    // the shaft, its rays shifting slowly; the open cave behind it only
+    float t, u;
+    float sh = shaft(S, d, t, u);
+    if (sh > 0.002 && open > 0.0) {
+        float rays = 0.62 + 0.38 * n1(u * 3.2 + 0.07 * time, 531u) * (0.6 + 0.4 * n1(u * 7.0 - 0.11 * time + 5.0, 533u));
+        float k = sh * rays * open;
+        c += L * 0.95 * k;
+        c = mix(c, c * 0.6 + L * 0.7, k * 0.12);
+    }
+    // the opening's own glow
+    vec2 hq = (S - hole_c()) / HOLE_R;
+    c += light_col(d) * (0.10 + 0.22 * d) / (1.0 + dot(hq, hq) * 0.9) * (0.96 + 0.04 * sin(time * 0.7)) * smoothstep(0.85, 1.4, length(hq));
+    // crystals and fungi breathing light
+    {
+        int g0 = int(floor(S.x / 0.20));
+        for (int k = g0 - 1; k <= g0 + 1; k++) {
+            vec3 cc = crystal_cell(k);
+            if (cc.z == 0.0) continue;
+            vec2 dv = (S - cc.xy + vec2(0.0, 0.015 * cc.z)) * vec2(1.0, 1.3);
+            float pulse = 0.5 + 0.5 * sin(time * (0.6 + 0.5 * rnd(uint(k) * 41u + 413u)) + 6.283 * rnd(uint(k) * 41u + 415u));
+            c += crystal_tint(k) * 0.06 * pulse * open * exp(-dot(dv, dv) / (0.0020 * cc.z * cc.z));
+        }
+    }
+    // gold in the shelf catching the light now and then
+    if (S.y > shelf(S.x)) {
+        ivec2 gc = ivec2(floor(S / 0.060));
+        for (int j = -1; j <= 1; j++)
+            for (int i = -1; i <= 1; i++) {
+                ivec2 g = gc + ivec2(i, j);
+                vec2 go;
+                float gr, on;
+                if (!shelf_gold(g, P.bar.z / H, d, go, gr, on) || on == 0.0) continue;
+                float ph = time * (0.30 + 0.40 * rnd2(g, 523u)) + rnd2(g, 525u) * 6.283;
+                float flash = pow(max(0.0, sin(ph)), 30.0);
+                if (flash < 0.01) continue;
+                vec2 dv = (S - go + vec2(0.3, 0.4) * gr) * H / U;
+                float star = 1.0 / (1.0 + abs(dv.x) * 8.0) / (1.0 + abs(dv.y) * 0.30) +
+                             1.0 / (1.0 + abs(dv.y) * 8.0) / (1.0 + abs(dv.x) * 0.30);
+                c += hex(0xfff1b8u) * flash * (0.55 * star / (1.0 + dot(dv, dv) * 0.02) + 0.30 / (1.0 + dot(dv, dv) * 0.5));
+            }
+    }
+    // drops falling from the roof into the light now and then, each a bright streak that fades on the terrace
+    for (int i = 0; i < 3; i++) {
+        float every = 3.0 + 2.0 * rnd(uint(i) * 17u + 541u);
+        float tt = time + every * rnd(uint(i) * 17u + 543u);
+        uint gen = uint(floor(tt / every));
+        float age = mod(tt, every);
+        float dx = (rnd(uint(i) * 17u + 545u + gen * 3u) - 0.5) * 0.24;
+        vec2 top = vec2(pool_c().x + dx * 0.6 + (hole_c().x - pool_c().x) * 0.35, 0.0);
+        if (abs(S.x - top.x) * H > 8.0 * U) continue;
+        top.y = roof(top.x) + 0.02;
+        float fall = 0.5 * 1.6 * age * age;   // scene units: a slow, dreamlike fall
+        float y = top.y + fall, floor_y = terrace(top.x);
+        if (y > floor_y) continue;
+        vec2 dv = vec2((S.x - top.x) * H, (S.y - y) * H) / U;
+        float streak = 1.0 / (1.0 + dv.x * dv.x * 0.8) * exp(-max(0.0, -dv.y) / (4.0 + 18.0 * age)) * step(dv.y, 1.5);
+        c += mix(L, vec3(0.9), 0.4) * 0.45 * streak * open * smoothstep(0.0, 0.15, age);
+    }
+    float ly = P.bar.z;
+    c = tunnel(c, time);
+    // dust drifting at three depths, bright in the shaft and faint in the dark (the nearer, the larger and the faster)
+    for (int layer = 0; layer < 3; layer++) {
+        float z = 1.0 + float(layer) * 0.8;
+        float cs = 0.085 / z;
+        vec2 dq = S + vec2(time * 0.003 * z, -time * 0.004 * z);
+        ivec2 cell = ivec2(floor(dq / cs));
+        for (int j = 0; j <= 1; j++)
+            for (int i = 0; i <= 1; i++) {
+                ivec2 m = cell + ivec2(i, j);
+                uint seed = 551u + uint(layer) * 101u;
+                if (rnd2(m, seed) > 0.45) continue;
+                vec2 o = (vec2(m) + 0.5) * cs + vec2(sin(time * (0.20 + 0.3 * rnd2(m, seed + 6u)) + 6.283 * rnd2(m, seed + 8u)),
+                                                     cos(time * (0.15 + 0.2 * rnd2(m, seed + 14u)) + 6.283 * rnd2(m, seed + 18u))) * 0.3 * cs;
+                vec2 ow = o - vec2(time * 0.003 * z, -time * 0.004 * z);   // where the mote is in the scene
+                float rr = (0.0010 + 0.0014 * rnd2(m, seed + 20u)) * z;
+                float dist = length(dq - o) / rr;
+                float tq, uq;
+                float in_shaft = shaft(ow, d, tq, uq);
+                float near_lamp = exp(-pow((ow.y * H - ly) / (110.0 * U), 2.0));
+                float a = (0.06 + 1.10 * in_shaft * open + 0.25 * near_lamp) * (0.20 + 0.35 * rnd2(m, seed + 30u)) *
+                          (0.55 + 0.45 * sin(time * 0.9 + rnd2(m, seed + 40u) * 6.283));
+                vec3 col = mix(hex(0xffe2b0u), light_col(d), in_shaft * 0.6);
+                c += col * a * (sat(1.4 - dist) * 0.7 + 0.30 / (1.0 + dist * dist * 0.5)) / z;
+            }
+    }
+    return c;
+}
