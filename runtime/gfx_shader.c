@@ -44,6 +44,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "boot_progress.h"
 #include "cfg.h"
 #include "gfx.h"
 #include "host.h"
@@ -2422,9 +2423,10 @@ static void warm_worker(void *arg) {
             key_hex(key, hex);
             snprintf(p, PATH_CAP + 80, "%s/%s.spv", cache_dir, hex);
             if (pack_find(PACK_SPV, key) || file_exists(p)) plat_inc32(&w->other_cached);
-            else gfx_shader_load_input(iid, 1);
+            else gfx_shader_load_input(iid, 1), boot_progress_work(1);   // the start-up screen tells a long start by it
         }
         plat_inc64(&w->done);
+        boot_progress_add(1);
     }
 }
 
@@ -2482,6 +2484,7 @@ void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **o
     w.n_other = other_inputs(sorted, sorted ? n : 0, &w.other);
     free(sorted);
     size_t total = w.n_named + w.n_other;
+    boot_progress_step(BOOT_STEP_SHADERS, total);
     threads = threads < 1 ? 1 : threads > 64 ? 64 : threads;
     if ((size_t)threads > total) threads = (int)(total ? total : 1);
     svc_set_limit(procs);

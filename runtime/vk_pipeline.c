@@ -46,6 +46,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "boot_progress.h"
 #include "cfg.h"
 #include "gfx.h"
 #include "gfx_spirv.h"
@@ -2447,6 +2448,7 @@ static void job_build(Job *j) {
     if (j->prebuild) {
         if (pipe) K.built++;
         else K.failed++;
+        if (K.warm) boot_progress_add(1);
         K.promoted += j->demanded;
         if (!--K.left && !K.loading) prebuild_report();
     }
@@ -2890,6 +2892,7 @@ static void warm_builder(void *arg) {
         }
         K.promoted += j->demanded;
         K.left--;
+        boot_progress_add(1);
         if (!--A.inflight) plat_cond_broadcast(&A.idle);
         plat_cond_broadcast(&done_cv);
         free(j);
@@ -2910,6 +2913,7 @@ void vk_pipeline_prewarm(void) {
     }
     double t0 = now_ms();
     K.warm = 1;
+    boot_progress_step(BOOT_STEP_DEVICE, 0);   // the start-up screen (vk_splash.c): the device and the cache load
     if (!ensure_init() || !K.file_n) {
         rt_log("vk_pipeline: prewarm: no pipeline keys (%s)", K.path[0] ? K.path : "<none>");
         if (P.ready) lb_start(pr_hist, fs_hist);
@@ -2952,6 +2956,7 @@ void vk_pipeline_prewarm(void) {
                VO.n, VO.n ? (double)uni / VO.n : 0.0, (unsigned long long)pairs, pairs ? (double)pair / pairs : 0.0);
     }
     uint32_t queued = 0, dropped = 0, known = 0;
+    boot_progress_step(BOOT_STEP_PIPELINES, 0);   // the total once every record is queued, below
     plat_mutex_lock(&P.lock);
     K.t0 = t1;
     K.loading = 1;
@@ -2976,6 +2981,7 @@ void vk_pipeline_prewarm(void) {
         else pipe_miss(&s, &k, h, 2, &q), queued += (uint32_t)q;
     }
     K.loading = 0;
+    boot_progress_total(queued);   // under the lock: no job finished before its count was taken (each counts itself)
     plat_mutex_unlock(&P.lock);
     free(ids), free(sh);
 
