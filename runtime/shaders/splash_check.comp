@@ -1,4 +1,4 @@
-// Whether a game frame shows anything (runtime/vk_splash.c splash_check): the start-up screen stays over the game's
+// Whether a game frame shows anything (runtime/vk_splash.c frame_lit): the start-up screen stays over the game's
 // first frames, which are black, and goes at the first one with a picture. Every texel of the frame is read; a colour
 // channel above the threshold anywhere sets the answer to 1. The game's first picture can be a few lines of small white
 // text on black, so no texel is skipped. One atomic write per workgroup at most.

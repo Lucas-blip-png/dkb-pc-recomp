@@ -268,12 +268,11 @@ static void layout_text(Renderer *r, const SplashView *v, uint32_t w, uint32_t h
     r->nbox = 0, r->tip_boxes = 0;
     splash_text_begin(t);
     // the name and the version at the top left, beside the mark
-    // the bunch hangs from its stem at mark[0..1], mark[2] pixels a unit of its shape: about 2.2 units wide, 1.6 tall
-    // the bunch hangs from its stem at mark[0..1], mark[2] pixels a unit of its shape (about 2.1 units wide and 1.6
-    // tall from 0.4 above the stem), centred on the capitals of the name
+    // the hand of bananas has its crown at mark[0..1], mark[2] pixels a unit of its shape (shaders/splash.comp bunch:
+    // from 0.3 left of the crown to 1.75 right of it, 1.1 above it to 0.66 under it), centred on the name's capitals
     float name_px = 36.0f * u, mark_s = 22.0f * u;
     float ny = 50.0f * u + splash_text_ascent(t, name_px) * 0.78f, nx = x0 + 2.1f * mark_s + 12.0f * u;
-    r->mark[0] = x0 + 0.2f * mark_s, r->mark[1] = ny - 0.36f * name_px - 0.40f * mark_s, r->mark[2] = mark_s;
+    r->mark[0] = x0 + 0.3f * mark_s, r->mark[1] = ny - 0.36f * name_px + 0.22f * mark_s, r->mark[2] = mark_s;
     put_box(r, splash_text_add(t, splash_project_name(), name_px, 0.4f * u, nx, ny, 0), CREAM, 1, u);
     char ver[128];
     splash_version_text(ver, sizeof ver);
@@ -448,7 +447,8 @@ static void screen_main(void *arg) {
     SplashEta eta;
     splash_eta_reset(&eta, -1);
     int test_running = test_s > 0, shot_n = 0, frames = 0;
-    double next_shot = 0.5, opened = -1, text_at = -1;
+    double next_shot = 0.5, opened = -1, text_at = -1, last_secs = 0;
+    float dawn = -1;
     for (;;) {
         if (gfx_window_exiting() || plat_cas32(&g_state, 0, 0) != ST_UP) break;
         double secs = now_s(t0);
@@ -468,6 +468,10 @@ static void screen_main(void *arg) {
         }
         SplashView v;
         splash_view(&v, &p, secs, step_secs, &eta);
+        // The sky moves toward the dawn of the step over about half a second rather than jumping when a step begins
+        // (a start from a warm cache goes through all of them in a few seconds)
+        dawn = dawn < 0 ? v.dawn : dawn + (v.dawn - dawn) * (float)fmin(1.0, (secs - last_secs) / 0.5);
+        v.dawn = dawn, last_secs = secs;
         // The words and numbers change eight times a second at most, the picture every frame: each new text is laid
         // out and rasterised again (splash_text.c), which a count that moves every frame would do 60 times a second
         if (secs - text_at < 0.125 && v.label[0] && !strcmp(v.label, r.shown.label)) {
