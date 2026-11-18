@@ -1,0 +1,29 @@
+// Whether a game frame shows anything (runtime/vk_splash.c splash_check): the start-up screen stays over the game's
+// first frames, which are black, and goes at the first one with a picture. Every texel of the frame is read; a colour
+// channel above the threshold anywhere sets the answer to 1. The game's first picture can be a few lines of small white
+// text on black, so no texel is skipped. One atomic write per workgroup at most.
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(set = 0, binding = 0) uniform sampler2D frame;
+layout(std430, set = 0, binding = 1) buffer Result { uint lit; } result;
+
+layout(push_constant) uniform P {
+    ivec2 size;       // the frame's width and height in texels
+    float threshold;  // a channel above it counts as a picture (the code value, 0 to 1)
+    int pad;
+} pc;
+
+shared uint any_lit;
+
+void main() {
+    if (gl_LocalInvocationIndex == 0) any_lit = 0;
+    barrier();
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x < pc.size.x && p.y < pc.size.y) {
+        vec3 c = texelFetch(frame, p, 0).rgb;
+        if (max(c.r, max(c.g, c.b)) > pc.threshold) any_lit = 1;
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0 && any_lit != 0) atomicOr(result.lit, 1u);
+}

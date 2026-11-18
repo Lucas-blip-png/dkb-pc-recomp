@@ -89,9 +89,12 @@ static void present_main(void *arg) {
         // `made` replaces the blit below, and busy goes down as soon as that buffer is submitted; 1 is 2x, shown by
         // vk_fg_show below, 2 is Auto and 3x to 8x, whose display thread presents the frames, so this thread is free for
         // the next job at once
-        int made = vk_fg_record(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, &j.fi,
-                                flight_on ? j.frame : 0, j.antilag);
-        if (!made) {
+        // While the start-up screen is up (vk_splash.c) the game's frames are blank and stay off the window: the screen
+        // goes when one of them shows a picture, and that frame is the first one presented.
+        int held = vk_splash_hold(j.image, j.format, j.w, j.h);
+        int made = held ? 0 : vk_fg_record(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, &j.fi,
+                                           flight_on ? j.frame : 0, j.antilag);
+        if (!made && !held) {
             if (flight_on) vk_thumbs_frame(j.frame);
             vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
         }
@@ -107,7 +110,7 @@ static void present_main(void *arg) {
         if (made == 1) vk_fg_show(job_pending, flight_on ? j.frame : 0, j.antilag);   // paces and flips itself, and never waits on a new job
         else if (!made && present_hold()) vk_wait_until(j.at);
         uint64_t t1 = kern_now_ns();
-        if (!made) {
+        if (!made && !held) {
             // AMD Anti-Lag 2 (vk_antilag.c): the game frame's present stage goes right before its present
             vk_antilag_present(j.antilag);
             vk_present_flip();
@@ -675,6 +678,7 @@ const GfxBackend gfx_vulkan_backend = {
     .window_resize = vk_present_window_resize,
     .present_mode = vk_present_mode,
     .window_hdr10 = vk_present_hdr10,
+    .splash = vk_splash,
     .boot_async = vk_pipeline_async_enable,
     .boot_prewarm = vk_pipeline_prewarm,
     .save = vk_pipeline_save,

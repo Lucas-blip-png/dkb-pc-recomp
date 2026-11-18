@@ -165,6 +165,7 @@ typedef struct {
                                                                // transitions
 } GfxExecFrame;
 enum { GFX_TOOL_PREPARE_SHADERS, GFX_TOOL_TRANSLATE_SHADERS, GFX_TOOL_WARM_SHADERS };   // GfxBackend.shader_tool
+enum { GFX_SPLASH_START, GFX_SPLASH_GUEST };                                            // GfxBackend.splash
 typedef struct {
     const char *name;
     // ---- guest side: called by the NVN front end (nvn_api_*.c, nvn_ext.c) on guest threads.
@@ -197,6 +198,10 @@ typedef struct {
     void (*window_resize)(void);    // gfx_window_resize: the window has its new size; the swapchain or drawable follows
     const char *(*present_mode)(void);   // gfx_window_present_mode: the mode the swapchain got; "" before one, "none" without
     int  (*window_hdr10)(void);     // gfx_window_hdr10: the swapchain is HDR10 now; any thread, guest threads included
+    // boot: the start-up screen (vk_splash.c) in the window from its creation to the game's first picture. GFX_SPLASH_START
+    // first thing, on the boot thread; GFX_SPLASH_GUEST just before the guest starts (a test sequence of the screen,
+    // DKB_SPLASH_TEST, holds the start there until it ends).
+    void (*splash)(int when);
     void (*boot_async)(void);       // boot, before the prewarm: pipelines may be built in the background (not with --shot)
     void (*boot_prewarm)(void);     // boot: what earlier runs recorded is made ready; the guest starts after it returns
     void (*save)(void);             // every exit path, with the saves: the back end's caches and records go to disk

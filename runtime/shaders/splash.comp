@@ -1,0 +1,618 @@
+// The start-up screen's picture (runtime/vk_splash.c), drawn here from arithmetic alone: no image file, no game art.
+// Dawn over a jungle ridge, and under the ground a cut through the earth, band after band of rock with gold in it. The
+// progress is a tunnel dug along one of the deep bands toward a bunch of bananas at its far end: its head is a lamp
+// that glows, throws sparks and lights the rock around it. The text (vk_splash.c renders it with stb_truetype into the
+// atlas) goes over the picture with a soft shadow.
+//
+// Two passes over the window. Pass 0 paints what stays (the sky at the current dawn, the ridges, the plants, the rock
+// and its gold) into the backdrop image, which vk_splash.c paints again only when the size or the dawn changed. Pass 1
+// copies the backdrop into the frame and adds what moves: stars, fireflies and dust at three depths, gold catching the
+// light, the tunnel and its lamp, the bananas, the text. The colours are sRGB code values throughout; the frame is
+// RGBA8 and the present treats it as a picture of the game's (HDR10: at the paper white the settings give).
+//
+// The scene is laid out in units of the window's height from the middle of the window, so it keeps its proportions at
+// any size and a wider window shows more of it at the sides.
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D frame;
+layout(set = 0, binding = 1, rgba8) uniform image2D backdrop;
+
+struct Box {
+    vec4 rect;    // where the text goes: x, y, width, height in window pixels, top-left origin
+    vec4 src;     // the atlas pixel at the box's top-left (x, y); shadow offset (pixels); shadow blur (pixels)
+    vec4 color;   // sRGB colour and opacity
+    vec4 shade;   // shadow colour and opacity
+};
+layout(std430, set = 0, binding = 2) readonly buffer Params {
+    ivec4 size;   // window width, height; pass; number of text boxes
+    ivec4 atlas;  // atlas row length in bytes (a multiple of 4), its height; 0; 0
+    vec4 t;       // seconds since the screen opened; pixels a unit (1 at 1080 lines); dawn 0 to 1; fade-in 0 to 1
+    vec4 bar;     // the tunnel: x from, x to, y; fraction done (negative: the step has no count)
+    vec4 mark;    // the bunch beside the name: centre x, y, size; how close the tunnel is to its end, 0 to 1
+    vec4 misc;    // the sun's x as a share of the width; 0; 0; 0
+    Box box[16];
+} P;
+layout(std430, set = 0, binding = 3) readonly buffer Atlas { uint a[]; } A;
+
+// ---- small tools
+uint pcg(uint v) {
+    uint s = v * 747796405u + 2891336453u;
+    uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+float rnd(uint v) { return float(pcg(v) & 0xffffffu) / 16777216.0; }
+float rnd2(ivec2 c, uint seed) { return rnd(uint(c.x) * 1973u + uint(c.y) * 9277u + seed * 26699u); }
+float n1(float x, uint seed) {   // value noise along a line, 0 to 1
+    float i = floor(x), f = x - i;
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(rnd(uint(int(i)) * 7919u + seed), rnd(uint(int(i) + 1) * 7919u + seed), f);
+}
+float fbm1(float x, uint seed, int oct) {
+    float s = 0.0, a = 0.5, n = 0.0;
+    for (int o = 0; o < oct; o++) {
+        s += a * n1(x, seed + uint(o) * 101u);
+        n += a;
+        x = x * 2.03 + 3.7;
+        a *= 0.5;
+    }
+    return s / n;
+}
+float n2(vec2 p, uint seed) {    // value noise over the plane, 0 to 1, with a quintic fade (no visible grid)
+    vec2 i = floor(p), f = p - i;
+    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    ivec2 c = ivec2(i);
+    float a = rnd2(c, seed), b = rnd2(c + ivec2(1, 0), seed), d = rnd2(c + ivec2(0, 1), seed), e = rnd2(c + ivec2(1, 1), seed);
+    return mix(mix(a, b, f.x), mix(d, e, f.x), f.y);
+}
+float fbm2(vec2 p, uint seed, int oct) {
+    float s = 0.0, a = 0.5, n = 0.0;
+    const mat2 turn = mat2(0.80, 0.60, -0.60, 0.80);   // each octave turned, so the lattice does not line up
+    for (int o = 0; o < oct; o++) {
+        s += a * n2(p, seed + uint(o) * 131u);
+        n += a;
+        p = turn * p * 2.02 + vec2(5.1, 1.7);
+        a *= 0.5;
+    }
+    return s / n;
+}
+// Gradient noise over the plane, about -0.5 to 0.5: smooth everywhere, without the flat steps value noise shows when it
+// is stretched (the clouds)
+float gn(vec2 p, uint seed) {
+    vec2 i = floor(p), f = p - i;
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    ivec2 c = ivec2(i);
+    float r00 = 6.28318 * rnd2(c, seed), r10 = 6.28318 * rnd2(c + ivec2(1, 0), seed);
+    float r01 = 6.28318 * rnd2(c + ivec2(0, 1), seed), r11 = 6.28318 * rnd2(c + ivec2(1, 1), seed);
+    float a = dot(vec2(cos(r00), sin(r00)), f), b = dot(vec2(cos(r10), sin(r10)), f - vec2(1.0, 0.0));
+    float d = dot(vec2(cos(r01), sin(r01)), f - vec2(0.0, 1.0)), e = dot(vec2(cos(r11), sin(r11)), f - vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(d, e, u.x), u.y);
+}
+float gfbm(vec2 p, uint seed, int oct) {
+    float s = 0.0, a = 0.5;
+    const mat2 turn = mat2(0.80, 0.60, -0.60, 0.80);
+    for (int o = 0; o < oct; o++) {
+        s += a * gn(p, seed + uint(o) * 131u);
+        p = turn * p * 2.02 + vec2(5.1, 1.7);
+        a *= 0.5;
+    }
+    return s;
+}
+vec3 hex(uint v) { return vec3(float((v >> 16) & 255u), float((v >> 8) & 255u), float(v & 255u)) / 255.0; }
+float sat(float v) { return clamp(v, 0.0, 1.0); }
+float cover(float d) { return sat(0.5 - d); }   // coverage of an edge at signed distance d (pixels, negative inside)
+mat2 rot(float a) { return mat2(cos(a), sin(a), -sin(a), cos(a)); }
+
+// ---- the layout every pass shares
+float W, H, U, X, Y;   // window size, pixels a unit (1 at 1080 lines), this pixel's centre
+vec2 S;                // this pixel in scene units: x from the window's middle, y from its top, both in window heights
+
+const float HORIZON = 0.475;
+float ground(float x) {   // the surface where the cut through the earth begins
+    return 0.548 + 0.010 * (fbm1(x * 1.6 + 4.0, 11u, 3) - 0.5) + 0.004 * sin(x * 2.3 + 1.0);
+}
+// The lower edge of rock band i (0 the topsoil) at x: the bands lie nearly flat, folded a little, tilted to the right
+float band_edge(int i, float x) {
+    const float depth[6] = float[6](0.030, 0.085, 0.150, 0.190, 0.262, 0.335);
+    float fold = 0.016 * (fbm1(x * 1.3 + float(i) * 0.9, 61u, 3) - 0.5) + 0.008 * sin(x * 1.9 + float(i) * 0.7);
+    return 0.548 + depth[clamp(i, 0, 5)] + fold + 0.010 * x;
+}
+
+vec2 sun_pos(float d) {   // rises from behind the far ridge as the start goes on
+    return vec2((P.misc.x - 0.5) * W / H, HORIZON + 0.030 - 0.150 * smoothstep(0.0, 1.0, d));
+}
+
+// ---- pass 0: what stays
+void sky_keys(float d, out vec3 top, out vec3 mid, out vec3 low) {
+    top = mix(hex(0x0a0814u), hex(0x1b1d3cu), d);
+    mid = mix(hex(0x1a1224u), hex(0x6a3850u), d);
+    low = mix(hex(0x2e1a22u), hex(0xf09a52u), d);
+}
+
+vec3 sky(float d) {
+    vec3 top, mid, low;
+    sky_keys(d, top, mid, low);
+    float k = sat(S.y / HORIZON);
+    vec3 c = mix(top, mid, smoothstep(0.0, 0.62, k));
+    c = mix(c, low, pow(smoothstep(0.40, 1.0, k), 1.6));
+    vec2 sp = sun_pos(d), dv = S - sp;
+    float sun_on = smoothstep(0.05, 0.70, d);
+    // the light of the sun: a wide band along the horizon and a tighter halo
+    vec3 warm = mix(hex(0xff6a3au), hex(0xffc07au), d);
+    float band = exp(-dv.y * dv.y / 0.006) * exp(-dv.x * dv.x / 0.60);
+    float halo = 1.0 / (1.0 + dot(dv, dv) * 420.0);
+    c += warm * sun_on * (0.28 * band + 0.40 * halo);
+    // long thin clouds, their undersides lit where the sun is
+    vec2 q = vec2(S.x * 1.6, S.y * 12.0);
+    q.x += 0.8 * gfbm(q * vec2(0.5, 0.35) + 7.0, 41u, 2);
+    float n = gfbm(q, 53u, 4) + 0.5;
+    float layer = smoothstep(0.05, 0.18, S.y) * (1.0 - smoothstep(0.30, 0.43, S.y));
+    float a = smoothstep(0.52, 0.78, n) * layer;
+    float lit = sat(1.0 / (1.0 + dot(dv * vec2(0.8, 2.0), dv * vec2(0.8, 2.0)) * 9.0)) * sun_on;
+    vec3 cloud = mix(c * 0.78 + hex(0x15101cu) * 0.25, mix(hex(0xc0566au), hex(0xffc896u), d), lit * 0.85);
+    c = mix(c, cloud, a * (0.28 + 0.30 * d));
+    // the sun's disc, soft at its rim
+    float r = length(dv) * H, rad = 0.026 * H;
+    vec3 disc = mix(hex(0xffc47au), hex(0xfff4dcu), d);
+    c += disc * 0.20 * sun_on / (1.0 + pow(r / rad, 2.0) * 1.5);
+    c = mix(c, mix(disc, vec3(1.0, 0.98, 0.94), 0.5 * (1.0 - r / rad)), sat((rad - r) / (1.5 * U) + 0.5) * sun_on);
+    return c;
+}
+
+// Where a ridge faces the sun: 0 to 1, by how near in x
+float toward_sun(float d) {
+    float dx = S.x - sun_pos(d).x;
+    return smoothstep(0.05, 0.8, d) / (1.0 + dx * dx * 9.0);
+}
+
+// The crowns of a row of trees along a ridge: the height above the ridge at x (cells of width w, a crown of radius
+// up to r in each, rounded)
+float crowns(float x, float w, float r, uint seed) {
+    float i = floor(x / w), h = 0.0;
+    for (int k = -1; k <= 1; k++) {
+        float c = i + float(k);
+        float cx = (c + 0.5 + 0.35 * (rnd(uint(int(c)) * 13u + seed) - 0.5)) * w;
+        float cr = r * (0.55 + 0.45 * rnd(uint(int(c)) * 17u + seed + 1u));
+        float dx = x - cx;
+        h = max(h, sqrt(max(0.0, cr * cr - dx * dx)) - 0.35 * cr);
+    }
+    return h;
+}
+
+// A palm, as coverage 0 to 1 at q (scene units from its foot, y up): a leaning trunk with rings, and a crown of
+// fronds that arch and droop, each a tapered leaf cut into leaflets
+float palm(vec2 q, float h, float lean, float seed) {
+    if (q.y < -0.01 || q.y > h * 1.45 || abs(q.x - lean * h) > h * 0.95) return 0.0;
+    float px = 1.0 / H, cov = 0.0;
+    float ty = sat(q.y / h);
+    float tx = lean * h * (ty * ty * 0.7 + ty * 0.3);
+    float tw = h * (0.020 - 0.008 * ty) * (1.0 + 0.10 * step(0.5, fract(q.y / (h * 0.045))));
+    if (q.y < h) cov = cover((abs(q.x - tx) - tw) / px);
+    vec2 c = q - vec2(lean * h, h);
+    for (int i = 0; i < 8; i++) {
+        float a = 3.14159 * (0.06 + 0.88 * float(i) / 7.0) + 0.15 * sin(seed * 3.0 + float(i) * 1.7);
+        vec2 dir = vec2(cos(a), sin(a) * 0.70 + 0.12);
+        float len = h * (0.50 + 0.14 * fract(seed * 7.1 + float(i) * 0.37));
+        float along = sat(dot(c, dir) / len);
+        vec2 pt = dir * along * len - vec2(0.0, 0.42 * len * along * along * (0.6 + 0.4 * abs(dir.x)));
+        float lw = h * 0.055 * pow(sin(3.14159 * sat(along * 0.92 + 0.04)), 0.8);
+        lw *= 0.55 + 0.45 * abs(sin(along * 46.0 + float(i)));   // the leaflets
+        cov = max(cov, cover((length(c - pt) - lw) / px));
+    }
+    return cov;
+}
+
+// A banana plant's silhouette: a stout stem and a few long broad leaves that rise from its top, arch out and hang
+float banana_plant(vec2 q, float h, float seed) {
+    if (q.y < -0.01 || q.y > h * 1.35 || abs(q.x) > h * 1.2) return 0.0;
+    float px = 1.0 / H, cov = 0.0;
+    float top = h * 0.55;
+    if (q.y < top) cov = cover((abs(q.x + 0.04 * h * sin(q.y / h * 3.0)) - h * (0.050 - 0.020 * q.y / top)) / px);
+    vec2 c = q - vec2(0.0, top);
+    for (int i = 0; i < 5; i++) {
+        float side = (i & 1) == 0 ? 1.0 : -1.0;
+        float a = side * (0.40 + 0.42 * float(i / 2)) + 0.10 * sin(seed * 1.3 + float(i) * 2.1);   // off upright
+        vec2 dir = vec2(sin(a), cos(a));
+        float len = h * (0.85 + 0.30 * fract(seed * 5.3 + float(i) * 0.41)) * (i == 4 ? 0.7 : 1.0);
+        float along = sat(dot(c, dir) / len);
+        vec2 pt = dir * along * len + vec2(sign(a) * 0.20, -0.62) * len * along * along;
+        float lw = h * 0.085 * pow(sin(3.14159 * sat(along * 0.92 + 0.05)), 0.6);
+        cov = max(cov, cover((length(c - pt) - lw) / px));
+    }
+    return cov;
+}
+
+// The rock under the ground: the band, its texture, the gold in it
+vec3 rock_band(int i) {
+    const uint cols[7] = uint[7](0x2e1c10u, 0x664024u, 0x8a5a32u, 0x7a3220u, 0x52331cu, 0x352212u, 0x1f140bu);
+    return hex(cols[clamp(i, 0, 6)]);
+}
+
+// The gold of cell g, when it has some: its centre and radius in scene units (radius 0: none)
+vec3 nugget(ivec2 g) {
+    if (rnd2(g, 109u) > 0.26) return vec3(0.0);
+    vec2 o = (vec2(g) + 0.2 + 0.6 * vec2(rnd2(g, 113u), rnd2(g, 127u))) * 0.075;
+    return vec3(o, 0.0035 + 0.0055 * rnd2(g, 131u));
+}
+
+vec3 earth(float gy, float d) {
+    int band = 6;
+    float above = gy, below = 2.0;
+    for (int i = 0; i < 6; i++) {
+        float e = band_edge(i, S.x);
+        if (S.y < e) { band = i; below = e; break; }
+        above = e;
+    }
+    vec3 c = rock_band(band);
+    vec2 q = S * 260.0;   // a texture unit: about four pixels at 1080 lines
+    float grain = fbm2(q / 6.0, 71u + uint(band), 3);
+    c *= 0.84 + 0.26 * grain;
+    if (band == 0) {   // topsoil: crumbs and roots hanging into it
+        c *= 0.85 + 0.25 * n2(q / 1.5, 73u);
+        float rx = S.x * 60.0;
+        float id = floor(rx);
+        float wob = 0.18 * sin((S.y - gy) * 260.0 + rnd(uint(int(id)) * 7u + 76u) * 6.283);
+        float root = abs(fract(rx) - 0.5 - wob) * 2.0;
+        float len = 0.006 + 0.022 * rnd(uint(int(id)) * 7u + 77u);
+        float on = step(0.45, rnd(uint(int(id)) * 7u + 78u)) * (1.0 - smoothstep(len * 0.6, len, S.y - gy));
+        c *= 1.0 - 0.40 * (1.0 - smoothstep(0.03, 0.09, root)) * on;
+    } else if (band == 2 || band == 3) {   // sandstone and the red band: fine layers, crossed now and then
+        float lam = sin((S.y + 0.006 * fbm1(S.x * 9.0, 79u + uint(band), 2)) * 900.0);
+        c *= 1.0 + 0.06 * lam;
+        float cross = sin((S.y * 3.0 - S.x) * 260.0 + 3.0 * n1(S.x * 6.0, 81u));
+        c *= 1.0 + 0.04 * cross * smoothstep(0.55, 0.75, n2(S * vec2(8.0, 30.0), 83u));
+    } else if (band == 1) {   // clay: smooth, mottled
+        c *= 0.95 + 0.08 * fbm2(S * vec2(10.0, 40.0), 85u, 2);
+    } else if (band == 4) {   // conglomerate: rounded pebbles set in it, lit from above
+        ivec2 cell = ivec2(floor(S / 0.018));
+        for (int j = 0; j <= 1; j++)
+            for (int i = 0; i <= 1; i++) {
+                ivec2 m = cell + ivec2(i, j);
+                if (rnd2(m, 89u) > 0.38) continue;
+                vec2 o = (vec2(m) + 0.15 + 0.7 * vec2(rnd2(m, 97u), rnd2(m, 101u))) * 0.018;
+                vec2 r = vec2(0.0040, 0.0030) * (0.6 + 0.8 * rnd2(m, 103u));
+                vec2 dv = (S - o) / r;
+                float l = length(dv);
+                float m2 = cover((l - 1.0) * min(r.x, r.y) * H);
+                vec3 stone = mix(hex(0x5e4632u), hex(0x92724eu), rnd2(m, 107u)) * (1.10 - 0.45 * sat(dv.y * 0.5 + 0.5));
+                c *= 1.0 - 0.35 * (1.0 - smoothstep(1.0, 1.35, length(dv - vec2(0.0, 0.25))));   // its shadow
+                c = mix(c, stone, m2);
+            }
+    } else if (band >= 5) {   // shale and the bedrock: thin dark layers, cracks
+        c *= 1.0 + 0.07 * sin((S.y + 0.004 * n1(S.x * 14.0, 87u)) * 1500.0);
+        if (band == 6) {   // cracks: where two cells of the rock meet (the second nearest point barely farther)
+            vec2 g = S * vec2(16.0, 22.0);
+            ivec2 gi = ivec2(floor(g));
+            float d1 = 9.0, d2 = 9.0;
+            for (int j = -1; j <= 1; j++)
+                for (int i = -1; i <= 1; i++) {
+                    ivec2 m = gi + ivec2(i, j);
+                    vec2 o = vec2(m) + vec2(rnd2(m, 91u), rnd2(m, 93u));
+                    float l = length(g - o);
+                    if (l < d1) d2 = d1, d1 = l;
+                    else if (l < d2) d2 = l;
+                }
+            c *= 1.0 - 0.40 * (1.0 - smoothstep(0.0, 0.05, d2 - d1)) * step(0.45, n2(g * 0.5, 95u));
+        }
+    }
+    // the seam between two bands: a dark line, and the band above it slightly overhanging (lit top, shadow under)
+    float px = 1.0 / H;
+    float to_edge = (below - S.y) / px, from_top = (S.y - above) / px;
+    c *= 1.0 - 0.45 * (1.0 - smoothstep(0.0, 2.0 * U, to_edge)) - 0.10 * (1.0 - smoothstep(0.0, 10.0 * U, to_edge));
+    c *= 1.0 + 0.16 * (1.0 - smoothstep(0.0, 3.0 * U, from_top)) - 0.12 * (1.0 - smoothstep(3.0 * U, 14.0 * U, from_top)) * step(1.0, band);
+    // gold: nuggets in the deeper bands, faceted and outlined; a faint warmth in the rock around them
+    if (band >= 3) {
+        ivec2 gc = ivec2(floor(S / 0.075));
+        for (int j = -1; j <= 1; j++)
+            for (int i = -1; i <= 1; i++) {
+                vec3 g = nugget(gc + ivec2(i, j));
+                if (g.z == 0.0) continue;
+                vec2 dv = S - g.xy;
+                float ang = atan(dv.y, dv.x);
+                float facet = floor((ang + 3.14159) / 6.28318 * 7.0);
+                float rr = g.z * (0.80 + 0.30 * rnd(uint(facet) * 31u + uint(gc.x + i) * 7u + uint(gc.y + j) * 13u));
+                float l = length(dv);
+                c += hex(0xf6c52bu) * 0.07 / (1.0 + l * l / (g.z * g.z * 9.0));
+                float m = cover((l - rr) * H);
+                if (m <= 0.0) continue;
+                float lit = 0.55 + 0.45 * rnd(uint(facet) * 17u + uint(gc.x + i) * 3u + 5u);
+                vec3 gold = mix(hex(0x9a6408u), hex(0xffd650u), lit * sat(0.75 - dv.y / (rr * 1.6)));
+                gold = mix(gold, hex(0xfff2b0u), cover((length(dv + vec2(0.30, 0.40) * rr) - 0.22 * rr) * H) * 0.85);
+                gold = mix(gold, hex(0x5a3a0cu), (1.0 - smoothstep(0.0, 1.4, (rr - l) * H)) * 0.7);   // its rim
+                c = mix(c, gold, m);
+            }
+    }
+    // the light: the cut face is lit from above by the sky, warmer as the day comes; the depth goes dark
+    float depth = sat((S.y - gy) / 0.42);
+    c *= mix(0.95 + 0.15 * d, 0.40, smoothstep(0.0, 1.0, depth));
+    c += hex(0xff9a4au) * 0.05 * d * (1.0 - smoothstep(0.0, 0.08, S.y - gy));
+    return c;
+}
+
+vec3 backdrop_pixel() {
+    float d = P.t.z;
+    vec3 top, mid, low;
+    sky_keys(d, top, mid, low);
+    vec3 haze = mix(low, hex(0xffb070u), 0.20 * smoothstep(0.2, 1.0, d));
+    float gy = ground(S.x);
+    vec3 c;
+    if (S.y < gy) {
+        c = sky(d);
+        float px = 1.0 / H;
+        // the far ridge: jagged, pale with distance, its edge lit where the sun is behind it
+        float peaks = pow(1.0 - abs(2.0 * fbm1(S.x * 1.7 + 2.0, 29u, 3) - 1.0), 2.5);
+        float ridge = HORIZON - 0.020 - 0.070 * peaks - 0.025 * fbm1(S.x * 7.0 + 11.0, 23u, 3) - 0.006 * fbm1(S.x * 30.0, 27u, 2);
+        if (S.y > ridge - px) {
+            vec3 m = mix(hex(0x241c30u), haze, 0.38 + 0.18 * d);
+            m = mix(m, haze, 0.40 * smoothstep(ridge, HORIZON + 0.02, S.y));
+            m += hex(0xffc58au) * 0.50 * toward_sun(d) * (1.0 - smoothstep(0.0, 3.0 * U, (S.y - ridge) / px));
+            c = mix(c, m, cover((ridge - S.y) / px));
+        }
+        // the jungle hills between: rolling, under a canopy of round crowns
+        float hill = HORIZON + 0.030 - 0.040 * fbm1(S.x * 3.0 + 7.0, 37u, 4) - crowns(S.x, 0.016, 0.011, 43u);
+        if (S.y > hill - px) {
+            vec3 h = mix(hex(0x1c1a14u), haze, 0.24 + 0.10 * d);
+            float base = HORIZON + 0.030 - 0.040 * fbm1(S.x * 3.0 + 7.0, 37u, 4);
+            h = mix(h, haze * 0.8, 0.30 * smoothstep(base - 0.01, base + 0.05, S.y));
+            h += hex(0xffb36eu) * 0.30 * toward_sun(d) * (1.0 - smoothstep(0.0, 1.8 * U, (S.y - hill) / px));
+            c = mix(c, h, cover((hill - S.y) / px));
+        }
+        // the near ridge: bushes, palms and banana plants, dark against the sky
+        vec3 ink = mix(hex(0x0f0905u), hex(0x1a0f08u), d);
+        float bush = gy - 0.004 - crowns(S.x, 0.028, 0.026, 47u) - 0.010 * fbm1(S.x * 22.0, 151u, 2);
+        float cov = cover((bush - S.y) / px);
+        const float cell = 0.17;
+        int ci = int(floor(S.x / cell));
+        for (int k = ci - 1; k <= ci + 1; k++) {
+            float r0 = rnd(uint(k) * 31u + 157u);
+            float fx = (float(k) + 0.2 + 0.6 * rnd(uint(k) * 31u + 163u)) * cell;
+            vec2 q = vec2(S.x - fx, ground(fx) - S.y);
+            if (r0 < 0.55) {
+                float ph = 0.10 + 0.07 * rnd(uint(k) * 31u + 167u);
+                float lean = (rnd(uint(k) * 31u + 173u) - 0.5) * 0.55;
+                cov = max(cov, palm(q, ph, lean, float(k) * 1.7));
+            } else if (r0 < 0.85) {
+                cov = max(cov, banana_plant(q, 0.070 + 0.035 * rnd(uint(k) * 31u + 179u), float(k) * 2.3));
+            }
+        }
+        // their rims catch the dawn where they face the sun
+        c = mix(c, ink + hex(0x3a1e10u) * 0.35 * toward_sun(d), cov);
+    } else {
+        // the cut: a fringe of grass on its edge, the earth below
+        c = earth(gy, d);
+        float lip = (S.y - gy) * H;
+        c = mix(hex(0x120b06u), c, smoothstep(0.0, 3.0 * U, lip));
+    }
+    // the grass on the edge of the cut, over sky and earth alike
+    float blades = 0.0045 * pow(abs(sin(S.x * 900.0 + 3.0 * n1(S.x * 120.0, 191u))), 3.0) * (0.5 + n1(S.x * 60.0, 193u));
+    c = mix(c, hex(0x120b06u), cover((S.y - gy) * H + 0.5) * step(gy - blades - 1.0 / H, S.y) * step(S.y, gy + 1.0 / H));
+    // the corners and the bottom darker, so the text reads on any part of the picture
+    vec2 v = vec2(X / W - 0.5, Y / H - 0.5);
+    c *= 1.0 - 0.30 * smoothstep(0.40, 1.05, length(v * vec2(0.9, 1.1)));
+    c *= 1.0 - 0.28 * smoothstep(0.66, 1.0, Y / H);
+    c *= 1.0 - 0.18 * smoothstep(0.20, 0.0, Y / H);
+    return c;
+}
+
+// ---- pass 1: what moves
+float atlas_at(ivec2 p) {
+    if (p.x < 0 || p.y < 0 || p.x >= P.atlas.x || p.y >= P.atlas.y) return 0.0;
+    int i = p.y * P.atlas.x + p.x;
+    return float((A.a[i >> 2] >> (8 * (i & 3))) & 255u) / 255.0;
+}
+
+vec3 text_over(vec3 c) {
+    for (int i = 0; i < P.size.w; i++) {
+        Box b = P.box[i];
+        float off = b.src.z, blur = b.src.w;
+        vec2 r0 = b.rect.xy, r1 = b.rect.xy + b.rect.zw;
+        if (X < r0.x - blur || Y < r0.y - blur || X > r1.x + off + blur || Y > r1.y + off + blur) continue;
+        if (b.color.a <= 0.0) continue;
+        ivec2 at = ivec2(floor(vec2(X, Y) - r0)) + ivec2(b.src.xy);
+        ivec2 lo = ivec2(b.src.xy), hi = lo + ivec2(b.rect.zw);
+        // the shadow: the glyphs moved down and right, blurred over a few texels
+        float s = 0.0;
+        if (b.shade.a > 0.0) {
+            ivec2 sp = at - ivec2(off);
+            float k = max(1.0, blur);
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++) {
+                    ivec2 tp = sp + ivec2(vec2(dx, dy) * k);
+                    if (all(greaterThanEqual(tp, lo)) && all(lessThan(tp, hi))) s += atlas_at(tp);
+                }
+            s /= 9.0;
+            c = mix(c, b.shade.rgb, sat(s * 1.4) * b.shade.a * b.color.a);
+        }
+        if (all(greaterThanEqual(at, lo)) && all(lessThan(at, hi))) c = mix(c, b.color.rgb, atlas_at(at) * b.color.a);
+    }
+    return c;
+}
+
+// One banana in its own frame: the fruit lies along an arc about (0, -1) of radius 1, from angle -0.95 (the stem) to
+// 0.95 (the tip) off straight down, so it bends up at both ends. Signed distance in frame units; t along it (0 the
+// stem, 1 the tip), u across it (-1 the inner, upper edge, 1 the outer belly).
+float banana_sd(vec2 p, out float t, out float u) {
+    const float AA = 0.95;
+    vec2 q = p - vec2(0.0, -1.0);
+    float phi = atan(q.x, q.y), r = length(q);
+    float tt = clamp(phi / AA, -1.0, 1.0);
+    t = tt * 0.5 + 0.5;
+    float w = 0.20 * pow(max(0.0, 1.0 - tt * tt), 0.42) + 0.015;
+    float rc = 1.0 + 0.045 * (1.0 - tt * tt);   // the belly rounder than the inner edge
+    u = (r - rc) / w;
+    if (abs(phi) <= AA) return abs(r - rc) - w;
+    vec2 e = vec2(0.0, -1.0) + 1.0 * vec2(sin(sign(phi) * AA), cos(AA));
+    return length(p - e) - 0.015;
+}
+
+// A bunch of three bananas hanging from a stem at o (pixels), s pixels a frame unit; lit 0 to 1 brightens it
+vec3 bunch(vec3 c, vec2 o, float s, float lit) {
+    vec2 q = (vec2(X, Y) - o) / s;
+    if (q.x < -0.6 || q.x > 2.4 || q.y < -0.8 || q.y > 2.2) return c;
+    const float ang[3] = float[3](0.95, 0.45, 0.05);   // the back one first, the front one last
+    const float sc[3] = float[3](0.92, 1.0, 0.96);
+    const uint base[3] = uint[3](0xd99e1cu, 0xf6c52bu, 0xffd650u);
+    vec2 e0 = vec2(sin(-0.95), cos(0.95) - 1.0);   // the stem end in the banana's frame
+    for (int i = 0; i < 3; i++) {
+        vec2 p = rot(ang[i]) * q / sc[i] + e0;
+        float t, u;
+        float dd = banana_sd(p, t, u) * s * sc[i];
+        if (dd > 1.5) continue;
+        vec3 col = hex(base[i]);
+        col *= mix(1.18, 0.66, sat(u * 0.5 + 0.5));                    // lit from above
+        col += vec3(0.28, 0.22, 0.10) * exp(-pow((u + 0.45) / 0.18, 2.0)) * (1.0 - abs(t - 0.5) * 1.6);   // its sheen
+        col = mix(col, hex(0x7a6a1eu), smoothstep(0.10, 0.02, t));     // green at the stem
+        col = mix(col, hex(0x3a2210u), smoothstep(0.93, 0.99, t));     // the dark tip
+        col *= 0.72 + 0.38 * lit;
+        col = mix(hex(0x6e4410u), col, smoothstep(0.0, 1.4, -dd));    // the outline
+        c = mix(c, col, cover(dd));
+        c *= 1.0 - 0.25 * cover(dd - 2.5) * (1.0 - cover(dd)) * float(i < 2);   // a soft contact shadow on the next
+    }
+    vec2 st = q - vec2(-0.05, -0.18);   // the stem, over the ends
+    float sd = max(abs(st.x) - 0.09, abs(st.y) - 0.22) * s;
+    c = mix(c, mix(hex(0x5c3a1au), hex(0x8a6030u), sat(0.5 - st.x * 4.0)), cover(sd));
+    return c;
+}
+
+vec3 frame_pixel(vec3 c) {
+    float time = P.t.x, d = P.t.z;
+    float gy = ground(S.x);
+    // stars in the high sky, twinkling, gone as the day comes
+    if (S.y < 0.36 && d < 0.85) {
+        ivec2 cell = ivec2(floor(S / 0.022));
+        if (rnd2(cell, 191u) < 0.22) {
+            vec2 o = (vec2(cell) + 0.15 + 0.7 * vec2(rnd2(cell, 193u), rnd2(cell, 197u))) * 0.022;
+            float tw = 0.60 + 0.40 * sin(time * (0.7 + 2.2 * rnd2(cell, 199u)) + 6.283 * rnd2(cell, 211u));
+            float a = (1.0 - smoothstep(0.30, 0.85, d)) * (0.20 + 0.80 * pow(rnd2(cell, 223u), 3.0)) * tw;
+            a *= 1.0 - smoothstep(0.20, 0.36, S.y);
+            float r = length(S - o) * H;
+            c += vec3(1.0, 0.95, 0.88) * a * (cover(r - 0.8 * max(U, 1.0)) * 0.8 + 0.10 / (1.0 + r * r * 0.3));
+        }
+    }
+    // gold that catches the light now and then: a four-pointed glint over a nugget of the backdrop
+    if (S.y > gy) {
+        ivec2 gc = ivec2(floor(S / 0.075));
+        for (int j = -1; j <= 1; j++)
+            for (int i = -1; i <= 1; i++) {
+                ivec2 g = gc + ivec2(i, j);
+                vec3 n = nugget(g);
+                if (n.z == 0.0 || n.y < band_edge(2, n.x)) continue;
+                float ph = time * (0.30 + 0.40 * rnd2(g, 229u)) + rnd2(g, 233u) * 6.283;
+                float flash = pow(max(0.0, sin(ph)), 30.0);
+                if (flash < 0.01) continue;
+                vec2 dv = (S - n.xy + vec2(0.3, 0.4) * n.z) * H / U;
+                float star = 1.0 / (1.0 + abs(dv.x) * 8.0) / (1.0 + abs(dv.y) * 0.30) +
+                             1.0 / (1.0 + abs(dv.y) * 8.0) / (1.0 + abs(dv.x) * 0.30);
+                c += hex(0xfff1b8u) * flash * (0.55 * star / (1.0 + dot(dv, dv) * 0.02) + 0.30 / (1.0 + dot(dv, dv) * 0.5));
+            }
+    }
+    // the tunnel: dug from the left to the lamp, its course ahead marked in the rock; with no count, a light travels it
+    float x0 = P.bar.x, x1 = P.bar.y, ly = P.bar.z, f = P.bar.w;
+    float hh = 9.0 * U;   // half the tunnel's height
+    if (abs(Y - ly) < 110.0 * U && X > x0 - 140.0 * U && X < x1 + 160.0 * U) {
+        float hx = x0 + (x1 - x0) * sat(f);
+        if (X > (f >= 0.0 ? hx + 10.0 * U : x0) && X < x1) {   // the course ahead: small marks every 10 units
+            float k = mod(X - x0, 10.0 * U) - 5.0 * U;
+            float m = length(vec2(k, Y - ly)) - 1.0 * max(U, 0.8);
+            c = mix(c, hex(0xe9d6b0u), cover(m) * 0.28);
+        }
+        if (f >= 0.0) {
+            // the dug part: a hollow with a ragged edge, dark at the back, lit warm toward the lamp
+            float rough = hh * (1.0 + 0.16 * (n1(X / (16.0 * U), 241u) - 0.5) + 0.06 * (n1(X / (5.0 * U), 243u) - 0.5));
+            if (X > x0 - hh && X < hx + hh) {
+                vec2 e = vec2(max(x0 - X, 0.0) + max(X - hx, 0.0), Y - ly);
+                float hd = length(e) - rough;
+                float near_lamp = smoothstep(hx - 520.0 * U, hx, X);
+                if (hd < 1.5) {
+                    float v = (Y - ly) / rough;   // -1 the roof, 1 the floor
+                    vec3 hollow = mix(hex(0x0a0603u), hex(0x2a1608u), sat(v * 0.5 + 0.5));
+                    hollow += hex(0xffa040u) * (0.06 + 0.42 * near_lamp * near_lamp) * (0.5 + 0.5 * v);
+                    c = mix(c, hollow, cover(hd));
+                    // the thread of gold along the floor that shows how far the tunnel goes
+                    float thread = cover(abs(Y - (ly + 0.45 * rough)) - 0.8 * max(U, 0.75));
+                    c = mix(c, mix(hex(0xa8781cu), hex(0xffe08au), near_lamp), thread * (0.55 + 0.45 * near_lamp) * cover(hd + 1.0));
+                }
+                // the rim of the hollow: chipped rock catching the light, all along and most near the lamp
+                float rim = abs(hd - 1.2 * U);
+                c += hex(0xffb050u) * (0.07 + 0.25 * near_lamp) * (1.0 - smoothstep(0.0, 1.8 * U, rim)) * step(0.0, hd);
+            }
+            // the lamp: a bright core in a warm glow that breathes, its light on the rock around
+            vec2 hv = vec2(X - hx, Y - ly) / U;
+            float pulse = 0.88 + 0.12 * sin(time * 2.7) + 0.04 * sin(time * 7.3);
+            float r2 = dot(hv, hv);
+            c *= 1.0 + 0.60 * pulse / (1.0 + r2 / 2600.0);
+            c += hex(0xff9a36u) * 0.40 * pulse / (1.0 + r2 / 420.0);
+            c += hex(0xfff2c8u) * 0.95 * pulse / (1.0 + r2 / 7.0);
+            // sparks thrown back and up from where it digs, falling as they fade
+            for (int s = 0; s < 16; s++) {
+                float life = 0.8 + 0.6 * rnd(uint(s) * 13u + 239u);
+                float tt = time + rnd(uint(s) * 13u + 241u) * life;
+                float age = mod(tt, life) / life;
+                uint gen = uint(floor(tt / life));
+                float ang = 2.0 + 1.6 * rnd(uint(s) * 13u + 251u + gen * 7u);
+                vec2 v0 = vec2(cos(ang), -abs(sin(ang))) * (45.0 + 70.0 * rnd(uint(s) * 13u + 257u + gen * 5u));
+                vec2 sp = v0 * age * life + vec2(0.0, 95.0) * age * age * life * life;
+                vec2 dv = hv - sp;
+                float glow = (1.0 - age) * (1.0 - age);
+                c += hex(0xffc860u) * glow * (0.85 / (1.0 + dot(dv, dv) * 1.1));
+            }
+        } else {
+            // no count: a light moves to and fro along the course
+            float at = x0 + (x1 - x0) * (0.5 - 0.5 * cos(time * 0.8));
+            float k = 1.0 - abs(X - at) / (180.0 * U);
+            if (k > 0.0) c = mix(c, hex(0xffe08au), cover(abs(Y - ly) - 1.0 * max(U, 0.75)) * k * k * 0.9);
+            vec2 hv = vec2(X - at, Y - ly) / U;
+            c += hex(0xffb347u) * 0.32 / (1.0 + dot(hv, hv) / 320.0);
+        }
+    }
+    // the bunch at the tunnel's end, glowing more as the tunnel nears it
+    float g = P.mark.w;
+    vec2 bo = vec2(x1 + 40.0 * U, ly - 30.0 * U);
+    vec2 bv = (vec2(X, Y) - bo - vec2(18.0, 22.0) * U) / U;
+    c += hex(0xf6c52bu) * (0.06 + 0.30 * g) * (0.92 + 0.08 * sin(time * 2.0)) / (1.0 + dot(bv, bv) / 650.0);
+    c = bunch(c, bo, 30.0 * U, 0.55 + 0.45 * g);
+    // in the air: fireflies over the jungle at night, dust in the light below, at three depths (the nearer, the
+    // larger, the softer and the faster)
+    for (int layer = 0; layer < 3; layer++) {
+        float z = 1.0 + float(layer) * 0.8;                 // nearness
+        float cs = 0.10 / z;                                // cell size, scene units
+        vec2 dq = S + vec2(time * 0.004 * z, -time * 0.006 * z);
+        ivec2 cell = ivec2(floor(dq / cs));
+        for (int j = 0; j <= 1; j++)
+            for (int i = 0; i <= 1; i++) {
+                ivec2 m = cell + ivec2(i, j) - ivec2(i == 0 ? 0 : 0, 0);
+                uint seed = 263u + uint(layer) * 101u;
+                if (rnd2(m, seed) > 0.40) continue;
+                vec2 o = (vec2(m) + 0.5) * cs + vec2(sin(time * (0.20 + 0.3 * rnd2(m, seed + 6u)) + 6.283 * rnd2(m, seed + 8u)),
+                                                     cos(time * (0.15 + 0.2 * rnd2(m, seed + 14u)) + 6.283 * rnd2(m, seed + 18u))) * 0.3 * cs;
+                float rr = (0.0012 + 0.0016 * rnd2(m, seed + 20u)) * z;
+                float dist = length(dq - o) / rr;
+                float above = 1.0 - smoothstep(gy - 0.02, gy + 0.02, o.y);
+                // fireflies low over the jungle at night; under the ground, dust in the lamp's light
+                float fly = above * (1.0 - smoothstep(0.35, 0.8, d)) * smoothstep(0.40, 0.47, o.y) * step(0.6, rnd2(m, seed + 50u));
+                float dust = (1.0 - above) * (0.15 + 0.85 * exp(-pow((o.y * H - ly) / (120.0 * U), 2.0)));
+                float a = (fly + dust) * (0.18 + 0.30 * rnd2(m, seed + 30u)) * (0.55 + 0.45 * sin(time * 0.9 + rnd2(m, seed + 40u) * 6.283));
+                vec3 col = mix(hex(0xffe2b0u), hex(0xd8f07au), fly * 0.6);
+                c += col * a * (sat(1.4 - dist) * 0.7 + 0.30 / (1.0 + dist * dist * 0.5)) / z;
+            }
+    }
+    // the bunch beside the name
+    if (P.mark.z > 0.0) c = bunch(c, P.mark.xy, P.mark.z, 0.85);
+    return text_over(c);
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    W = float(P.size.x), H = float(P.size.y), U = P.t.y;
+    if (p.x >= P.size.x || p.y >= P.size.y) return;
+    X = float(p.x) + 0.5, Y = float(p.y) + 0.5;
+    S = vec2((X - 0.5 * W) / H, Y / H);
+    float dither = (rnd(uint(p.x) * 4801u + uint(p.y) * 6343u + uint(P.size.z) * 97u) - 0.5) / 255.0;
+    if (P.size.z == 0) {
+        imageStore(backdrop, p, vec4(clamp(backdrop_pixel() + dither, 0.0, 1.0), 1.0));
+        return;
+    }
+    vec3 c = frame_pixel(imageLoad(backdrop, p).rgb);
+    c = mix(hex(0x1d1109u), c, P.t.w);   // the fade-in from the launcher's darkest brown
+    imageStore(frame, p, vec4(clamp(c + dither, 0.0, 1.0), 1.0));
+}

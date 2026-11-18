@@ -152,6 +152,7 @@ static int null_shader_tool(int tool) {
 static void null_thumbs_enable(int n) { (void)n; }
 static int null_thumbs_read(uint64_t frame, uint8_t *rgba) { (void)frame, (void)rgba; return 0; }
 static const char *null_present_mode(void) { return "none"; }
+static void null_splash(int when) { (void)when; }
 static const GfxExecFrame *null_exec_frame(void) {
     static const GfxExecFrame none;
     return &none;
@@ -184,6 +185,7 @@ const GfxBackend gfx_null_backend = {
     .window_resize = null_nothing,
     .present_mode = null_present_mode,
     .window_hdr10 = null_zero,
+    .splash = null_splash,
     .boot_async = null_nothing,
     .boot_prewarm = null_nothing,
     .save = null_nothing,

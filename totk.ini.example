@@ -144,6 +144,11 @@
 # frame limit) or counter (the frame rate as a large outlined number with no background). F10 cycles the modes in
 # game, as do both stick clicks (L3 + R3) on a controller.
 # perf_overlay = off
+# The start-up screen: from the moment the window opens to the game's first picture, the window shows a scene of
+# its own with what the start prepares (the shaders, the pipelines earlier runs met), how far each step is and, on a
+# long start, about how long it has left. 0 opens the window at the game's first frame instead, as before. Read at
+# start.
+# splash = 1
 # Which GPU to use: its index in the log, or part of its name. Default: the first discrete GPU with Vulkan 1.3.
 # gpu_index = 0
 # gpu_name = NVIDIA

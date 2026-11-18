@@ -424,6 +424,7 @@ int probe_vkpool(void);                                   // vk_pool_probe.c: or
 int probe_vkreset(void);                                  // vk_reset_probe.c: original indirect reset ordering
 int probe_vkclear(void);                                                  // vk_clear_probe.c
 int probe_movie(void);                                     // movie_probe.c: host VP9 movie::Decoder on one RomFS movie
+int probe_splash(void);                                    // vk_splash.c: the start-up screen drawn in states and sizes
 int vk_pipeline_prepare_shaders(void);                     // vk_pipeline.c: --prepare-shaders (tools/prepare_shaders.py)
 int vk_pipeline_translate_shaders(void);                  // vk_pipeline.c: --translate-shaders (installer/bananza.py)
 int vk_pipeline_warm_shaders(void);                       // vk_pipeline.c: --warm-shaders (tools/build_game.py)

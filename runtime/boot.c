@@ -410,6 +410,9 @@ static void prewarm_main(void *arg) {
 
 static void boot_main(void *arg) {
     (void)arg;
+    // The start-up screen (vk_splash.c) first: its thread opens the window and draws there while the rest of the boot
+    // prepares the shaders and pipelines beside it
+    gfx_backend()->splash(GFX_SPLASH_START);
     check_npdm();
     if (!rt_config()->shot) gfx_backend()->boot_async();   // a --shot image must not depend on build timing
     // Shaders and pipelines recorded in earlier runs are made ready while the modules load; the guest waits for them.
@@ -429,6 +432,7 @@ static void boot_main(void *arg) {
     held = plat_now_ms() - held;
     rt_log("boot: guest starts %llu ms after process start (%llu ms of it waiting for the prewarm)",
            (unsigned long long)(plat_process_uptime_ns() / 1000000), (unsigned long long)held);
+    gfx_backend()->splash(GFX_SPLASH_GUEST);   // the screen says the game starts (a DKB_SPLASH_TEST run waits here)
     rt_guest_start_ns = kern_now_ns();
     kern_run_on_guest_main(guest_main);
     rt_fatal("boot: the guest main thread ended");

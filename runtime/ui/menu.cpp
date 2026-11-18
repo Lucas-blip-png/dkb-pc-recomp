@@ -49,6 +49,7 @@ void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void vk_queue_lock(void);
 void vk_queue_unlock(void);
 int vk_antilag_available(void);   // vk_antilag.c: the device can run AMD Anti-Lag 2; its row is shown only then
+int vk_splash_up(void);           // vk_splash.c: the start-up screen is up
 void gfx_fit_rect(int cw, int ch, int dw, int dh, int out[4]);
 int res_sizes(unsigned out[2], unsigned scene[2]);
 double frame_step_limit_hz(void);
@@ -91,6 +92,7 @@ static PlatMutex open_lock = PLAT_MUTEX_INIT;
 static int change_open(int want) {
     plat_mutex_lock(&open_lock);
     int open = want < 0 ? !g_open.load() : want;
+    if (open && vk_splash_up()) open = g_open.load();   // the start-up screen has no menu over it (vk_splash.c)
     if (g_open.load() != open) {
         g_open.store(open);
         g_reset.store(1);
