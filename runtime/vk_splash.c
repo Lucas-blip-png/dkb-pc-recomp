@@ -18,7 +18,8 @@
 // for long. The window closed meanwhile ends it too.
 //
 // Two scenes: splash = 1 (the default) the dawn over a jungle ridge (shaders/splash.comp), splash = 2 a cavern deep
-// under the ground (shaders/splash_under.comp). Each is a pipeline of its own and only the one shown is compiled.
+// under the ground (shaders/splash_under.comp), splash = 3 a canyon at sunrise (shaders/splash_canyon.comp). Each is a
+// pipeline of its own and only the one shown is compiled.
 //
 // DKB_SPLASH=0 (splash = 0 in dkb.ini) turns it off: the window opens at the game's first present, as before, and
 // DKB_SPLASH_WATCH=1 then logs the first picture's time without holding frames. DKB_SPLASH_TEST=<seconds> shows a
@@ -38,6 +39,7 @@
 #include "splash.h"
 #include "splash_check_spv.h"
 #include "splash_spv.h"
+#include "splash_canyon_spv.h"
 #include "splash_under_spv.h"
 #include "ui_text.h"
 #include "vk.h"
@@ -68,7 +70,7 @@ int vk_splash_up(void) {
 // ---- the renderer: everything the screen's thread (or the probe) draws with
 typedef struct {
     VkDevice dev;
-    int scene;                              // 1 the dawn over the jungle (shaders/splash.comp), 2 the cavern (splash_under.comp)
+    int scene;                              // 1 the dawn over the jungle (shaders/splash.comp), 2 the cavern (splash_under.comp), 3 the canyon (splash_canyon.comp)
     PFN_vkCmdPushDescriptorSetKHR push;
     VkDescriptorSetLayout dsl;
     VkPipelineLayout layout;
@@ -150,8 +152,11 @@ static VkPipeline compute_pipeline(VkDevice dev, const uint32_t *code, size_t by
     return p;
 }
 
-// The scene splash = <n> asks for: 2 the cavern, any other value that is not 0 the dawn over the jungle
-static int scene_of_cfg(void) { return cfg_int("TOTK_SPLASH") == 2 ? 2 : 1; }
+// The scene splash = <n> asks for: 2 the cavern, 3 the canyon, any other value that is not 0 the dawn over the jungle
+static int scene_of_cfg(void) {
+    int n = cfg_int("TOTK_SPLASH");
+    return n == 2 || n == 3 ? n : 1;
+}
 
 // Each scene is a pipeline of its own: only the one shown is compiled, so the second costs the start nothing
 static int renderer_init(Renderer *r, int scene) {
@@ -159,8 +164,8 @@ static int renderer_init(Renderer *r, int scene) {
     memset(r, 0, sizeof *r);
     r->dev = c->device;
     r->scene = scene;
-    const uint32_t *code = scene == 2 ? splash_under_spv : splash_spv;
-    size_t bytes = scene == 2 ? sizeof splash_under_spv : sizeof splash_spv;
+    const uint32_t *code = scene == 2 ? splash_under_spv : scene == 3 ? splash_canyon_spv : splash_spv;
+    size_t bytes = scene == 2 ? sizeof splash_under_spv : scene == 3 ? sizeof splash_canyon_spv : sizeof splash_spv;
     r->back_dawn = -1;
     r->push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->device, "vkCmdPushDescriptorSetKHR");
     if (!r->push || !(r->text = splash_text_new())) return 0;
@@ -365,15 +370,18 @@ static int render(Renderer *r, const SplashView *v, double secs, uint32_t w, uin
     }
     Params *P = r->pp;
     float u = unit_of(w, h);
-    // the dawn moves in steps of 1/64: the backdrop is painted again only then
-    float dawn = roundf(v->dawn * 64.0f) / 64.0f;
+    // the dawn moves in steps of 1/64 (1/256 in the cavern and the canyon, whose light moves across the rock in plain
+    // sight, so a step would show as a jump): the backdrop is painted again only then
+    float steps = r->scene == 1 ? 64.0f : 256.0f;
+    float dawn = roundf(v->dawn * steps) / steps;
     int paint = r->back_dawn != dawn;
     P->size[0] = (int)w, P->size[1] = (int)h, P->size[3] = r->nbox;
     P->t[0] = (float)secs, P->t[1] = u, P->t[2] = dawn, P->t[3] = fade;
     P->bar[0] = r->bar[0], P->bar[1] = r->bar[1], P->bar[2] = r->bar[2], P->bar[3] = v->fraction;
     P->mark[0] = r->mark[0], P->mark[1] = r->mark[1], P->mark[2] = r->mark[2];
     P->mark[3] = v->fraction >= 0 ? v->fraction * v->fraction : 0.15f;
-    P->misc[0] = r->scene == 2 ? 0.62f : 0.70f;   // the sun's x, or the opening's in the cavern's roof
+    // the sun's x (over the jungle; at the canyon's far end), or the opening's in the cavern's roof
+    P->misc[0] = r->scene == 2 ? 0.62f : r->scene == 3 ? 0.515f : 0.70f;
     for (int i = 0; i < r->nbox; i++) {   // the tip fades every frame without a new atlas
         P->box[i] = r->box[i];
         if (r->tip_boxes >> i & 1) P->box[i].color[3] = v->tip_alpha;
@@ -770,9 +778,9 @@ int probe_splash(void) {
         printf("probe-splash: FAIL no Vulkan device\n");
         return 1;
     }
-    // the scene splash = <n> selects (DKB_SPLASH=2: the cavern, whose files are named under-*.png)
+    // the scene splash = <n> selects (DKB_SPLASH=2: the cavern, files named under-*.png; 3: the canyon, canyon-*.png)
     int scene = scene_of_cfg();
-    const char *prefix = scene == 2 ? "under" : "splash";
+    const char *prefix = scene == 2 ? "under" : scene == 3 ? "canyon" : "splash";
     Renderer r;
     uint64_t t_init = plat_now_ns();
     if (!renderer_init(&r, scene)) {
@@ -791,7 +799,8 @@ int probe_splash(void) {
         {BOOT_STEP_PIPELINES, 3050, 3550, 131.5, 20.0, "pipelines"},
         {BOOT_STEP_GAME, 0, 0, 146.2, 4.0, "game"},
         {BOOT_STEP_SHADERS, 0, 33936, 3.1, 1.0, "shaders0"},
-        {BOOT_STEP_PIPELINES, 2485, 3550, 118.4, 14.0, "pipelines70"}};
+        {BOOT_STEP_PIPELINES, 2485, 3550, 118.4, 14.0, "pipelines70"},
+        {BOOT_STEP_PIPELINES, 3266, 3550, 134.0, 22.0, "pipelines92"}};
     int fails = 0;
     for (size_t s = 0; s < sizeof sizes / sizeof *sizes; s++)
         for (size_t k = 0; k < sizeof states / sizeof *states; k++) {

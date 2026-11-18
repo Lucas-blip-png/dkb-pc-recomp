@@ -195,6 +195,30 @@ vec3 bunch(vec3 c, vec2 o, float s, float lit) {
     return c;
 }
 
+// ---- plants
+// A palm, as coverage 0 to 1 at q (scene units from its foot, y up): a leaning trunk with rings, and a crown of
+// fronds that arch and droop, each a tapered leaf cut into leaflets
+float palm(vec2 q, float h, float lean, float seed) {
+    if (q.y < -0.01 || q.y > h * 1.45 || abs(q.x - lean * h) > h * 0.95) return 0.0;
+    float px = 1.0 / H, cov = 0.0;
+    float ty = sat(q.y / h);
+    float tx = lean * h * (ty * ty * 0.7 + ty * 0.3);
+    float tw = h * (0.020 - 0.008 * ty) * (1.0 + 0.10 * step(0.5, fract(q.y / (h * 0.045))));
+    if (q.y < h) cov = cover((abs(q.x - tx) - tw) / px);
+    vec2 c = q - vec2(lean * h, h);
+    for (int i = 0; i < 8; i++) {
+        float a = 3.14159 * (0.06 + 0.88 * float(i) / 7.0) + 0.15 * sin(seed * 3.0 + float(i) * 1.7);
+        vec2 dir = vec2(cos(a), sin(a) * 0.70 + 0.12);
+        float len = h * (0.50 + 0.14 * fract(seed * 7.1 + float(i) * 0.37));
+        float along = sat(dot(c, dir) / len);
+        vec2 pt = dir * along * len - vec2(0.0, 0.42 * len * along * along * (0.6 + 0.4 * abs(dir.x)));
+        float lw = h * 0.055 * pow(sin(3.14159 * sat(along * 0.92 + 0.04)), 0.8);
+        lw *= 0.55 + 0.45 * abs(sin(along * 46.0 + float(i)));   // the leaflets
+        cov = max(cov, cover((length(c - pt) - lw) / px));
+    }
+    return cov;
+}
+
 // ---- the progress: a tunnel dug from the left to the lamp, its course ahead marked in the rock, and the bunch at its
 // far end, which glows more as the tunnel nears it; with no count, a light travels the course
 vec3 tunnel(vec3 c, float time) {
