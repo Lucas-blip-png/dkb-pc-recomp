@@ -95,7 +95,7 @@ bool shelf_gold(ivec2 g, float lyS, float d, out vec2 go, out float gr, out floa
     go = (vec2(g) + 0.2 + 0.6 * vec2(rnd2(g, 513u), rnd2(g, 515u))) * 0.060;
     gr = 0.0026 + 0.0036 * rnd2(g, 517u);
     on = step(rnd2(g, 519u), 0.12 + 0.88 * d);
-    return rnd2(g, 511u) < (abs(go.y - lyS) < 0.030 ? 0.30 : 0.06);
+    return rnd2(g, 511u) < (abs(go.y - lyS) < 26.0 * U / H ? 0.30 : 0.06);
 }
 
 // ---- pass 0: what stays
@@ -354,7 +354,7 @@ vec3 backdrop_pixel() {
         rock *= 0.78 + 0.34 * fbm2(S * vec2(30.0, 60.0), 503u, 3);
         rock *= 1.0 + 0.07 * sin(yl * 900.0) - 0.20 * (1.0 - smoothstep(0.0, 0.0025, abs(fract(yl * 26.0) - 0.5) / 26.0));
         // the step's layer: a band about the tunnel, its edges uneven, a dark seam above and below it
-        float edge = 0.032 + 0.006 * (n1(S.x * 14.0, 501u) - 0.5);
+        float edge = (30.0 + 5.0 * (n1(S.x * 14.0, 501u) - 0.5)) * U / H;   // clear of the tip under the line
         float off = abs(S.y - lyS + 0.004 * sin(S.x * 5.0));
         float band = 1.0 - smoothstep(edge - 1.5 * px, edge + 1.5 * px, off);
         vec3 lay = layer_col(d) * (0.80 + 0.35 * fbm2(S * vec2(22.0, 80.0), 507u, 3));
