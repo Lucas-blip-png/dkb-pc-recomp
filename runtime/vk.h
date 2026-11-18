@@ -203,14 +203,15 @@ void vk_color_release(void);   // before the device goes away
 // HDR output (vk_hdr.c). vk_hdr_wanted: hdr, read once. vk_hdr_surface_format: the HDR10 surface format when wanted
 // and offered (1). vk_hdr_mid: the RGBA8 image the present chain (blit or FSR, SMAA) writes in place of the HDR10
 // swapchain image, in TRANSFER_DST_OPTIMAL; vk_hdr_record: the HDR pass from it onto the swapchain image (1; 0: nothing
-// recorded). vk_hdr_ui_target / vk_hdr_ui_compose: the in-game menu's RGBA8 target, then blended onto the swapchain
-// image. vk_hdr_to_srgb8: 10-bit PQ pixels to sRGB bytes.
+// recorded), lifting the highlights toward the display's peak unless lift is 0 (the start-up screen).
+// vk_hdr_ui_target / vk_hdr_ui_compose: the in-game menu's RGBA8 target, then blended onto the swapchain image.
+// vk_hdr_to_srgb8: 10-bit PQ pixels to sRGB bytes.
 int vk_hdr_wanted(void);
 void vk_hdr_off(void);   // probes that read back 8-bit swapchain pixels, or a failed HDR setup: SDR whatever the setting
 int vk_hdr_surface_format(const VkSurfaceFormatKHR *f, uint32_t n, VkSurfaceFormatKHR *out);
 void vk_hdr_metadata(VkSwapchainKHR sc, int new_sc);
 VkImage vk_hdr_mid(VkCommandBuffer cb, uint32_t w, uint32_t h);
-int vk_hdr_record(VkCommandBuffer cb, VkImage dst, VkImageView dst_view, VkFormat fmt, uint32_t w, uint32_t h);
+int vk_hdr_record(VkCommandBuffer cb, VkImage dst, VkImageView dst_view, VkFormat fmt, uint32_t w, uint32_t h, int lift);
 VkImageView vk_hdr_ui_target(VkCommandBuffer cb, uint32_t w, uint32_t h);
 void vk_hdr_ui_compose(VkCommandBuffer cb, VkImageView dst_view, VkFormat fmt, uint32_t w, uint32_t h);
 void vk_hdr_to_srgb8(const uint8_t *in, uint8_t *out, size_t px, int a2r);
@@ -239,6 +240,18 @@ void vk_queue_unlock(void);
 // and wait for the GPU. *px stays valid until the next present; the format is the swapchain's. Returns 0 with no frame.
 void vk_present_capture(int on);
 int vk_present_captured(const uint8_t **px, int *w, int *h, VkFormat *fmt);
+
+// The start-up screen (vk_splash.c). vk_present_splash presents src, an RGBA8 image of the swapchain's size in GENERAL
+// whose writes are submitted, as it is: no colour adjustment, scaling filter, SMAA, CRT filter, menu or thumbnail, only
+// the HDR10 encoding when the swapchain is HDR. shot: a PNG path the presented image is also saved to (sRGB), or NULL.
+// vk_present_extent: the swapchain's size, 0 x 0 before one. vk_splash: GfxBackend.splash. vk_splash_hold: the present
+// thread, before the blit of each game frame: 1 while the screen stays and the frame must not be shown.
+// vk_splash_up: 1 while the screen is up (the menu does not open over it). --probe-splash is probe_splash (host.h).
+void vk_present_splash(VkImage src, int w, int h, const char *shot);
+void vk_present_extent(uint32_t *w, uint32_t *h);
+void vk_splash(int when);
+int vk_splash_hold(VkImage image, VkFormat fmt, int w, int h);
+int vk_splash_up(void);
 
 // The window system's part of device creation (gfx_window_win.c with Win32, gfx_window_sdl.c with SDL): the instance
 // extensions a surface needs (their count, at most max), and whether a queue family of pd can present to it.

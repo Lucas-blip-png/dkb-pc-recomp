@@ -325,7 +325,9 @@ static void fullscreen(VkCommandBuffer cb, VkPipeline pipe, VkImageView dst_view
 
 // The HDR pass: the chain's image (vk_hdr_mid, TRANSFER_DST_OPTIMAL after the blit or FSR and SMAA) onto dst (the
 // swapchain image, UNDEFINED), left in COLOR_ATTACHMENT_OPTIMAL. 0: no pass, dst untouched and the caller presents SDR.
-int vk_hdr_record(VkCommandBuffer cb, VkImage dst, VkImageView dst_view, VkFormat fmt, uint32_t w, uint32_t h) {
+// lift 0 keeps the highlights at the picture's white (the knee at 1.0): the start-up screen (vk_splash.c), whose wide
+// sunlit sky would otherwise go to the display's peak, as the game's own highlights are meant to.
+int vk_hdr_record(VkCommandBuffer cb, VkImage dst, VkImageView dst_view, VkFormat fmt, uint32_t w, uint32_t h, int lift) {
     VkCtx *c = vk_ctx();
     if (!H.ok || !H.mid.img || !pipelines(c, fmt)) return 0;
     barrier(cb, H.mid.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -335,7 +337,7 @@ int vk_hdr_record(VkCommandBuffer cb, VkImage dst, VkImageView dst_view, VkForma
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
     Nits n = nits();
-    const float pc[4] = {n.game, n.peak, 0.8f, 0};   // the picture's white and the display's peak in nits; the knee
+    const float pc[4] = {n.game, n.peak, lift ? 0.8f : 1.0f, 0};   // the picture's white and the display's peak in nits; the knee
     fullscreen(cb, H.hdr, dst_view, 0, H.mid.view, pc, w, h);
     return 1;
 }
