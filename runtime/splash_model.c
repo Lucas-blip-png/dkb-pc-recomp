@@ -12,14 +12,13 @@
 #include "ui_text.h"
 
 // ---- time left
-// The rate is the slope of a least-squares line through the samples of the last WINDOW_S seconds (four a second), not
-// the count since the step began: the shader step goes fast through what the cache holds and slowly through what it must
-// translate, so its early rate says nothing of the rest, and a line through many samples moves less with each burst of
-// finished items than the difference of two. Nothing is said before the step has run FIRST_S seconds and done a
-// twentieth of its items. What is shown counts down by itself and moves toward each new estimate with a time constant
-// of PULL_S seconds, so the text does not jump with each burst. Replayed through the counts of a 60 s translation
-// (33,937 shaders on 8 translators, whose rate rose by a quarter as it went), it said 61 s with 52 s left, 48 s with
-// 40 s left and was within a second from the last 20 s on.
+// The rate is the slope of a least-squares line through the samples of the last WINDOW_S seconds (four a second; half
+// the step's time while that is shorter, FIRST_S at least), not the count since the step began: the shader step can go
+// fast through what the cache holds and slowly through what it must translate, so its early rate says nothing of the
+// rest, and a line through many samples moves less with each burst of finished items than the difference of two.
+// Nothing is said before the step has run FIRST_S seconds and done a twentieth of its items. What is shown counts down
+// by itself and moves toward each new estimate with a time constant of PULL_S seconds, so the text does not jump with
+// each burst. The selftest holds it to an even rate and to a burst of cache hits followed by a tenth of the pace.
 enum { WINDOW_S = 15, FIRST_S = 5 };
 static const double PULL_S = 4.0;
 
@@ -57,7 +56,9 @@ double splash_eta_note(SplashEta *e, double now, double since, uint64_t done, ui
     if (e->n == SPLASH_SAMPLES) e->head = (e->head + 1) % SPLASH_SAMPLES, e->n--;   // the oldest makes room
     int at = (e->head + e->n) % SPLASH_SAMPLES;
     e->t[at] = now, e->done[at] = done, e->n++;
-    while (e->n > 3 && now - e->t[e->head] > WINDOW_S) e->head = (e->head + 1) % SPLASH_SAMPLES, e->n--;
+    // A young step looks back over half its time (five seconds at least), so a burst at its start leaves the line soon
+    double window = fmin((double)WINDOW_S, fmax((double)FIRST_S, 0.5 * (now - since)));
+    while (e->n > 3 && now - e->t[e->head] > window) e->head = (e->head + 1) % SPLASH_SAMPLES, e->n--;
     if (done >= total) return e->shown = 0;
     double rate = eta_slope(e);
     if (now - since < FIRST_S || now - e->t[e->head] < FIRST_S - 1 || done * 20 < total) return e->shown = -1;
@@ -196,6 +197,8 @@ int splash_selftest(void) {
         double t = i * 0.25;
         uint64_t d = t < 2 ? (uint64_t)(t * 3000) : 6000 + (uint64_t)((t - 2) * 300);
         left = splash_eta_note(&e, t, 0, d, 33936);
+        // ten seconds after the burst the line no longer leans on it: within a fifth of the truth when said at all
+        if (t == 12.0) EXPECT(left < 0 || fabs(left - (33936 - d) / 300.0) < 0.2 * (33936 - d) / 300.0, "the estimate soon after a burst");
     }
     EXPECT(left > 0 && fabs(left - (33936 - (6000 + 58 * 300.0)) / 300.0) < 12, "the estimate after a burst");
     EXPECT(splash_eta_note(&e, 61, 0, 33936, 33936) == 0, "a finished step");
