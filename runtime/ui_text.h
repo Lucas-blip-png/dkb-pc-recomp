@@ -214,7 +214,17 @@ typedef enum {
     UI_MENU_PAD_SAVED,
     UI_MENU_PAD_FULLSCREEN_HOLD, UI_MENU_PAD_FULLSCREEN_HOLD_DESC,
     UI_MENU_SHORTCUT_SETTINGS_COMBO_DESC,
-    UI_MENU_LAST_ID = UI_MENU_SHORTCUT_SETTINGS_COMBO_DESC,
+    // The start-up screen (splash_model.c): the step names in capitals, the count and time-left formats, the tips
+    UI_MENU_SPLASH_STARTING, UI_MENU_SPLASH_SHADERS, UI_MENU_SPLASH_PIPELINES, UI_MENU_SPLASH_GAME,
+    UI_MENU_SPLASH_COUNT_SHADERS,     // "%s of %s shaders": the numbers already formatted
+    UI_MENU_SPLASH_COUNT_PIPELINES,   // "%s of %s pipelines"
+    UI_MENU_SPLASH_LEFT_SECONDS,      // "about %d s left for this step"
+    UI_MENU_SPLASH_LEFT_MINUTES,      // "about %d min left for this step"
+    UI_MENU_SPLASH_VERSION,           // "v%s · game %s": the port version and the game update
+    UI_MENU_SPLASH_TIP_FULLSCREEN, UI_MENU_SPLASH_TIP_SETTINGS, UI_MENU_SPLASH_TIP_OVERLAY, UI_MENU_SPLASH_TIP_GRAPHICS,
+    UI_MENU_SPLASH_TIP_FRAME_RATE,    // Bananza's Display tab only
+    UI_MENU_SPLASH_TIP_REMAP, UI_MENU_SPLASH_TIP_KEPT, UI_MENU_SPLASH_TIP_TABS,
+    UI_MENU_LAST_ID = UI_MENU_SPLASH_TIP_TABS,
     UI_TEXT_COUNT
 } UiTextId;
 

@@ -73,6 +73,12 @@ static const unsigned char roboto_ttf[] = {
 };
 #pragma clang diagnostic pop
 
+// The start-up screen (splash_text.c) writes its text in the same font
+extern "C" const unsigned char *menu_font_ttf(size_t *size) {
+    *size = sizeof roboto_ttf;
+    return roboto_ttf;
+}
+
 // ---- open state, any thread
 static std::atomic<int> g_open;     // the menu is open
 static std::atomic<int> g_reset;    // opened or closed since the last laid-out frame: drop stale input

@@ -31,6 +31,7 @@
 #include "host.h"
 #include "platform/platform.h"
 #include "sha256.h"
+#include "splash.h"
 #include "vk_driver_env.h"
 
 #define MAX_MODULES 16
@@ -474,6 +475,7 @@ static int selftest(void) {
     CHECK(mem_kernel_alloc(0x200, 16) == k1, "a freed kernel-region block is not reused");
     check_memory();
     CHECK(!vk_backend_selftest(), "the replay write-back deduplication");
+    CHECK(!splash_selftest(), "the start-up screen's estimate, texts and test sequence");
 
     float used, total, proc;
     plat_mem_info(&used, &total, &proc);

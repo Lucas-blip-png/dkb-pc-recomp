@@ -24,6 +24,20 @@ typedef struct { const char *lang; const char *const *text; } Row;
     [UI_SWKBD_CANCEL] = cancel, [UI_SWKBD_PAD_HINT] = hint, LANG_NAMES
 
 static const char *const text_en[UI_TEXT_COUNT] = {
+    [UI_MENU_SPLASH_STARTING] = "STARTING UP", [UI_MENU_SPLASH_SHADERS] = "PREPARING SHADERS",
+    [UI_MENU_SPLASH_PIPELINES] = "BUILDING PIPELINES", [UI_MENU_SPLASH_GAME] = "STARTING THE GAME",
+    [UI_MENU_SPLASH_COUNT_SHADERS] = "%s of %s shaders", [UI_MENU_SPLASH_COUNT_PIPELINES] = "%s of %s pipelines",
+    [UI_MENU_SPLASH_LEFT_SECONDS] = "about %d s left for this step",
+    [UI_MENU_SPLASH_LEFT_MINUTES] = "about %d min left for this step",
+    [UI_MENU_SPLASH_VERSION] = "v%s  \xc2\xb7  game %s",
+    [UI_MENU_SPLASH_TIP_FULLSCREEN] = "F11 switches between a window and full screen.",
+    [UI_MENU_SPLASH_TIP_SETTINGS] = "In the game, F1 or Esc opens the settings, and so does a gamepad's Home button.",
+    [UI_MENU_SPLASH_TIP_OVERLAY] = "In the game, F10 shows the performance overlay.",
+    [UI_MENU_SPLASH_TIP_GRAPHICS] = "The upscaler and HDR are on the Graphics tab of the settings.",
+    [UI_MENU_SPLASH_TIP_FRAME_RATE] = "The frame rate limit and frame generation are on the Display tab of the settings.",
+    [UI_MENU_SPLASH_TIP_REMAP] = "Buttons and keys can be remapped on the Controls tab of the settings.",
+    [UI_MENU_SPLASH_TIP_KEPT] = "What is prepared now is kept, so the next starts are quicker.",
+    [UI_MENU_SPLASH_TIP_TABS] = "In the settings, Q and E switch between the tabs.",
     [UI_MENU_PAD_DEVICE] = "Controller Device",
     [UI_MENU_PAD_DEVICE_DESC] = "Choose which controller to use. Changes take effect immediately.\n\n"
         "Newly connected controllers take over automatically. If the active controller disconnects, another available controller takes over.\n\n"
@@ -441,6 +455,20 @@ static const char *const text_en[UI_TEXT_COUNT] = {
 
 static const char *const text_ru[UI_TEXT_COUNT] = {
     SWKBD("Ввод текста", "Введите имя", "Лошадь", "ОК", "Отмена", "Контроллер: A — ОК, B — отмена"),
+    [UI_MENU_SPLASH_STARTING] = "ЗАПУСК", [UI_MENU_SPLASH_SHADERS] = "ПОДГОТОВКА ШЕЙДЕРОВ",
+    [UI_MENU_SPLASH_PIPELINES] = "СБОРКА КОНВЕЙЕРОВ", [UI_MENU_SPLASH_GAME] = "ЗАПУСК ИГРЫ",
+    [UI_MENU_SPLASH_COUNT_SHADERS] = "%s из %s шейдеров", [UI_MENU_SPLASH_COUNT_PIPELINES] = "%s из %s конвейеров",
+    [UI_MENU_SPLASH_LEFT_SECONDS] = "этот шаг: ещё около %d с",
+    [UI_MENU_SPLASH_LEFT_MINUTES] = "этот шаг: ещё около %d мин",
+    [UI_MENU_SPLASH_VERSION] = "v%s  ·  игра %s",
+    [UI_MENU_SPLASH_TIP_FULLSCREEN] = "F11 переключает окно и полный экран.",
+    [UI_MENU_SPLASH_TIP_SETTINGS] = "В игре настройки открывает F1 или Esc, а также кнопка Home на геймпаде.",
+    [UI_MENU_SPLASH_TIP_OVERLAY] = "В игре F10 показывает панель производительности.",
+    [UI_MENU_SPLASH_TIP_GRAPHICS] = "Апскейлер и HDR — на вкладке «Графика» в настройках.",
+    [UI_MENU_SPLASH_TIP_FRAME_RATE] = "Ограничение частоты кадров и генерация кадров — на вкладке «Экран» в настройках.",
+    [UI_MENU_SPLASH_TIP_REMAP] = "Кнопки и клавиши можно переназначить на вкладке «Управление» в настройках.",
+    [UI_MENU_SPLASH_TIP_KEPT] = "Подготовленное сейчас сохраняется, и следующие запуски быстрее.",
+    [UI_MENU_SPLASH_TIP_TABS] = "В настройках вкладки переключают Q и E.",
 
     [UI_MENU_TITLE] = "Настройки",
     [UI_MENU_TAB_DISPLAY] = "Экран", [UI_MENU_TAB_GRAPHICS] = "Графика",
