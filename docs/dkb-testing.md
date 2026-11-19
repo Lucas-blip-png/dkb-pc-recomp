@@ -181,6 +181,26 @@ present numbers can differ by one). Loading still takes a different number of fr
 load drifts by a second or more: on the Hilltop reload route two runs of one build differed by 14-18 dB PSNR, as
 much as two builds did, and a draw whose pipeline is still building is skipped (the shots do not wait for builds).
 
+### The start-up screen
+
+From the moment the window opens to the game's first picture, the window shows the start-up screen (`splash` in
+`dkb.ini`, the `DKB_SPLASH` rows above): a scene drawn by a compute shader from arithmetic alone, with the step the
+start is in, its percentage and count, and on a long start about how long the step has left. The default, `splash = 1`,
+is a canyon at sunrise. The pictures below come from `dkb.exe --probe-splash` at 1280x720.
+
+![The canyon while the start builds pipelines](images/splash-canyon.png)
+
+On a first start, with minutes of shaders to prepare, the canyon begins in the blue light before sunrise; the sun comes
+up behind the mesas as the start goes on:
+
+![The canyon as the start begins to prepare shaders](images/splash-canyon-start.png)
+
+`splash = 2` is a cavern under the ground, lit from an opening in its roof, and `splash = 3` a dawn over a jungle ridge:
+
+![The cavern while the start builds pipelines](images/splash-cavern.png)
+
+![The jungle ridge while the start prepares shaders](images/splash-jungle.png)
+
 ### Scripted runs without anyone playing
 
 `tools/scenario.py` starts the game from a private save, plays a button script into it and says how the run ended
