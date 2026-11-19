@@ -3,9 +3,11 @@
 // canyon's walls come forward on the left and the right in terraces cut so that their layers of rock show, each
 // terrace's edge catching a line of light; another pair of walls recedes behind them, paler and pinker in the haze.
 // Palms stand on the rims and on two ledges, a river winds along the floor toward the viewer, mist lies low in the
-// canyon and gold glints in the dark rock below. The start is the night ending: at first a moonless night full of
-// stars with the canyon in cool shadow; as the steps go on the sun rises behind the mesas, its light creeps down the
-// walls terrace by terrace and the river turns from dark to gold.
+// canyon and gold glints in the dark rock below. The start is the hour before sunrise: at first the canyon lies in the
+// cool blue-violet light of the sky, its layers of rock plain to see, the last stars out above and a glow low on the
+// horizon where the sun will come up; as the steps go on the sun rises behind the mesas, its light creeps down the
+// walls terrace by terrace and the river turns to gold. The first picture is the one a long first start shows the
+// longest, so it is a picture in its own right rather than a dark one.
 //
 // Two passes over the window (shaders/splash/common.glsl main, which also draws the tunnel along the bottom, the
 // bananas and the text). Pass 0 paints the canyon at the current dawn into the backdrop, with in its alpha what the
@@ -125,8 +127,8 @@ float walls(inout vec3 c, float d, float sc, float shift, float haze, uint seed,
     // the light: the sun reaches the walls above the light line, down the walls terrace by terrace; the shade is cool
     float ll = light_line(d);
     float lit = 1.0 - smoothstep(ll - 0.012, ll + 0.012, f.y + 0.020 * (fbm1(f.x * 4.0, 29u, 2) - 0.5));
-    vec3 amb = mix(vec3(0.20, 0.22, 0.38), vec3(0.36, 0.30, 0.40), DW);
-    vec3 sun = sun_col() * (0.60 + 0.50 * DW);
+    vec3 amb = mix(vec3(0.72, 0.67, 0.95), vec3(0.36, 0.30, 0.40), DW);   // the sky's light: blue-violet before the sun
+    vec3 sun = sun_col() * (0.60 + 0.50 * DW) * (1.0 + 0.45 * (1.0 - DW));   // the first sun strong beside the sky's light
     float face_turn = 0.86 + 0.14 * sat(dcrease * 12.0);   // the face just inside a crease turned from the light
     vec3 col = rock * (amb * face_turn + sun * lit * 0.78 * face_turn);
     col += sun * rock * 0.55 * exp(-pow((f.y - ll) / 0.010, 2.0)) * step(ll, 0.99);   // the edge of the light, where it is now
@@ -135,13 +137,13 @@ float walls(inout vec3 c, float d, float sc, float shift, float haze, uint seed,
     if (own >= 1 || dtop < 0.012) {
         float strip = 1.0 - smoothstep(0.004, 0.010, dtop);
         col = mix(col, hex(0xc89a64u) * (amb * 0.9 + sun * lit * 1.25), strip * 0.75);
-        col += mix(hex(0x8a90c0u) * 0.10, hex(0xffd9a0u) * 0.85, lit * DW + 0.25 * lit) * (1.0 - smoothstep(0.0, 2.0 * U, top_px)) * step(-0.5, top_px);
+        col += mix(hex(0x8a90c0u) * (0.10 + 0.22 * (1.0 - DW)), hex(0xffd9a0u) * 0.85, lit * DW + 0.25 * lit) * (1.0 - smoothstep(0.0, 2.0 * U, top_px)) * step(-0.5, top_px);
         col *= 1.0 - 0.30 * smoothstep(0.010, 0.016, dtop) * (1.0 - smoothstep(0.016, 0.060, dtop));
     }
     // the crease where a terrace meets the one outside it: a dark line, lit on its outer lip
     float cr_px = dcrease * KX * sc * H;
     if (own >= 1) col *= 1.0 - 0.45 * (1.0 - smoothstep(0.0, 2.0 * U, abs(cr_px))) * step(0.0, dtop - 0.01);
-    col *= 1.0 - 0.55 * smoothstep(-0.25, -0.95, f.x - shift);   // the outer edge, far from the light
+    col *= 1.0 - mix(0.25, 0.55, DW) * smoothstep(-0.25, -0.95, f.x - shift);   // the outer edge, far from the sun (the sky lights all)
     col *= 1.0 - 0.07 * float(max(own, 0));                       // the lower terraces deeper in the canyon
     col *= 1.0 - 0.45 * smoothstep(0.62, 1.05, f.y);                                 // the deep
     col = mix(col, air, haze);
@@ -154,10 +156,11 @@ vec3 backdrop_pixel() {
     layout_setup(d);
     float px = 1.0 / H;
     vec2 sp = sun_c(d);
-    // the sky: night blue to violet, through pink to the warm glow round the sun as the day comes
+    // the sky: before sunrise deep blue overhead to a dusty violet low down, through pink to the warm glow round the sun
+    // as the day comes
     float k = sat(S.y / HZ);
-    vec3 top = mix(hex(0x060a20u), hex(0x0f1a3au), DW), up = mix(hex(0x10163au), hex(0x3a2a66u), DW);
-    vec3 low = mix(hex(0x1a1a40u), hex(0xd7607au), DW), hz = mix(hex(0x262448u), hex(0xffcf8au), DW);
+    vec3 top = mix(hex(0x0e1640u), hex(0x0f1a3au), DW), up = mix(hex(0x252a62u), hex(0x3a2a66u), DW);
+    vec3 low = mix(hex(0x5a4886u), hex(0xd7607au), DW), hz = mix(hex(0x9a7096u), hex(0xffcf8au), DW);
     vec3 c = mix(top, up, smoothstep(0.0, 0.40, k));
     c = mix(c, low, smoothstep(0.40, 0.80, k));
     c = mix(c, hz, smoothstep(0.80, 1.0, k));
@@ -166,14 +169,18 @@ vec3 backdrop_pixel() {
     vec3 warm = mix(hex(0xff7a4au), hex(0xffc27au), DW);
     c += warm * smoothstep(0.05, 0.6, DW) * (0.30 * exp(-r2 / 0.10) + 0.20 / (1.0 + r2 * 120.0));
     c += hex(0x6a3a6au) * 0.30 * smoothstep(0.0, 0.4, DW) * exp(-pow((S.y - HZ) / 0.10, 2.0));   // the first light low down
+    // before the sun: a glow on the horizon where it will come up, growing through the shaders, then the sun's own
+    // glow above takes over
+    float pre = 1.0 - DW, grow = smoothstep(0.15, 0.60, d);
+    c += hex(0xffa070u) * (0.36 + 0.20 * grow) * pre * exp(-pow((S.x - sp.x) / (0.45 * KX), 2.0) - pow((S.y - HZ) / 0.17, 2.0));
     // thin bands of cloud, lit pink and gold as the sun comes
     const vec4 cl[3] = vec4[3](vec4(-0.296, 0.231, 0.39, 0.012), vec4(0.389, 0.176, 0.43, 0.011), vec4(0.046, 0.352, 0.31, 0.009));
     for (int i = 0; i < 3; i++) {
         float a = exp(-pow((S.y - cl[i].y - 0.006 * gn(vec2(S.x * 3.0, float(i)), 603u)) / cl[i].w, 2.0));
         a *= 1.0 - smoothstep(cl[i].z * 0.55, cl[i].z, abs(S.x - cl[i].x * KX));
         a *= 0.65 + 0.35 * (gfbm(vec2(S.x * 7.0, float(i) * 3.0), 605u, 2) + 0.5);
-        vec3 cc = mix(hex(0x2c3050u), mix(hex(0xff9a90u), hex(0xffd2b0u), DW), smoothstep(0.1, 0.7, DW));
-        c = mix(c, cc, a * (0.22 + 0.18 * DW));
+        vec3 cc = mix(hex(0x7a6c9cu), mix(hex(0xff9a90u), hex(0xffd2b0u), DW), smoothstep(0.1, 0.7, DW));
+        c = mix(c, cc, a * (0.22 + 0.18 * DW + 0.10 * pre));
     }
     // the sun's disc, soft at its rim, behind the mesas
     float r = length(S - sp) * H, rad = 0.062 * H;
@@ -184,16 +191,16 @@ vec3 backdrop_pixel() {
     vec3 air = mix(hz, c, 0.3);
     float mt = mesa(S.x);
     if (S.y > mt - px) {
-        vec3 m = mix(hex(0x1c1832u), S.x < 0.06 ? hex(0xb65a6eu) : hex(0xa04e66u), smoothstep(0.05, 0.8, DW));
+        vec3 m = mix(hex(0x4a3c68u), S.x < 0.06 ? hex(0xb65a6eu) : hex(0xa04e66u), smoothstep(0.05, 0.8, DW));
         m = mix(m, hz, 0.25 * smoothstep(mt, HZ + 0.01, S.y));
-        m += warm * 0.55 * DW / (1.0 + pow((S.x - sp.x) * 4.0, 2.0)) * (1.0 - smoothstep(0.0, 3.0 * U, (S.y - mt) / px));
+        m += warm * (0.55 * DW + 0.22 * pre) / (1.0 + pow((S.x - sp.x) * 4.0, 2.0)) * (1.0 - smoothstep(0.0, 3.0 * U, (S.y - mt) / px));
         c = mix(c, m, cover((mt - S.y) / px));
     }
-    // the canyon's floor and the river on it, mirroring the sky: dark at night, gold once the sun is up
+    // the canyon's floor and the river on it, mirroring the sky: violet before the sun, gold once it is up
     float open = 0.5;
     if (S.y > HZ - px) {
         float t = sat((S.y - HZ) / (1.0 - HZ));
-        vec3 fl = mix(hex(0x0c0a18u), hex(0x6a2f47u), smoothstep(0.1, 0.8, DW)) * (1.0 - 0.55 * t);
+        vec3 fl = mix(hex(0x2c2644u), hex(0x6a2f47u), smoothstep(0.1, 0.8, DW)) * (1.0 - 0.55 * t);
         fl *= 0.85 + 0.25 * fbm2(S * vec2(20.0, 60.0), 607u, 2);
         float on_floor = cover((HZ - S.y) / px);
         c = mix(c, fl, on_floor);
@@ -201,7 +208,7 @@ vec3 backdrop_pixel() {
         float rv = cover((abs(S.x - xr) - wr) * H) * on_floor;
         if (rv > 0.0) {
             vec3 day = mix(mix(hex(0xffe2a6u), hex(0xe98a5au), smoothstep(0.0, 0.40, t)), hex(0x3a1c2eu), smoothstep(0.40, 1.0, t));
-            vec3 nite = mix(hex(0x2a3058u), hex(0x0a0c1cu), smoothstep(0.0, 0.8, t));
+            vec3 nite = mix(hex(0xa07c9cu), hex(0x262850u), smoothstep(0.0, 0.8, t));
             vec3 w = mix(nite, day, smoothstep(0.15, 0.85, DW));
             float u = (S.x - xr) / wr;
             w *= 0.85 + 0.15 * sin(S.y * 900.0 + 3.0 * n1(S.x * 80.0, 609u));                  // ripples
@@ -226,6 +233,9 @@ vec3 backdrop_pixel() {
             float lift = side < 0.0 ? 0.0 : 0.028;
             float foot_y = ledge_top(int(pl[i].y), fx, lift, 651u + (side < 0.0 ? 0u : 50u));
             vec2 foot = vec2(side * (-fx) * KX, foot_y + 0.004);
+            // a palm whose foot is outside the window is left out: in a narrow window its crown alone would show,
+            // hanging in the sky at the edge
+            if (abs(foot.x) > 0.5 * W / H + 0.01) continue;
             pc = max(pc, palm(vec2(S.x - foot.x, foot.y - S.y), pl[i].z, pl[i].w, float(i) * 1.7 + 0.3));
         }
         c = mix(c, mix(hex(0x0c0610u), hex(0x1a0a12u), DW) + hex(0x3a1e10u) * 0.25 * DW, pc);
@@ -253,6 +263,9 @@ vec3 backdrop_pixel() {
     vec2 v = vec2(X / W - 0.5, Y / H - 0.5);
     c *= 1.0 - 0.30 * smoothstep(0.40, 1.05, length(v * vec2(0.9, 1.1)));
     c *= 1.0 - 0.50 * smoothstep(0.62, 1.0, Y / H);
+    // a second dither beside main's, so the two make a triangular one: the wide, slow gradients of the sky leave no
+    // steps of one code value
+    c += (rnd(uint(X) * 7121u + uint(Y) * 3307u + 811u) - 0.5) / 255.0;
     BACK_A = open;
     return c;
 }
@@ -289,7 +302,7 @@ vec3 frame_pixel(vec3 c) {
     // mist low in the canyon, drifting slowly
     if (open > 0.0) {
         const vec3 mb[3] = vec3[3](vec3(0.625, 0.026, 0.42), vec3(0.715, 0.030, 0.52), vec3(0.810, 0.034, 0.62));
-        vec3 mc = mix(hex(0x3c4468u), hex(0xffd9b0u), smoothstep(0.2, 0.8, DW));
+        vec3 mc = mix(hex(0x6a6c9cu), hex(0xffd9b0u), smoothstep(0.2, 0.8, DW));
         for (int i = 0; i < 3; i++) {
             float m = exp(-pow((S.y - mb[i].x) / mb[i].y, 2.0)) * (1.0 - smoothstep(mb[i].z * 0.4, mb[i].z, abs(S.x - river_x(mb[i].x))));
             m *= 0.55 + 0.45 * n1(S.x * 5.0 + time * (0.04 + 0.02 * float(i)) + float(i) * 9.0, 721u + uint(i));
