@@ -1,11 +1,11 @@
-// The start-up screen's first scene (runtime/vk_splash.c, splash = 1), drawn here from arithmetic alone: no image
+// The start-up screen's jungle scene (runtime/vk_splash.c, splash = 3), drawn here from arithmetic alone: no image
 // file, no game art. Dawn over a jungle ridge, and under the ground a cut through the earth, band after band of rock
 // with gold in it. The progress is a tunnel dug along one of the deep bands toward a bunch of bananas at its far end:
 // its head is a lamp that glows, throws sparks and lights the rock around it. The text (vk_splash.c renders it with
 // stb_truetype into the atlas) goes over the picture with a soft shadow.
 //
 // Two passes over the window (shaders/splash/common.glsl has main, the tunnel, the bananas and the text, which the
-// other scene shares). Pass 0 paints what stays (the sky at the current dawn, the ridges, the plants, the rock and its
+// other scenes share). Pass 0 paints what stays (the sky at the current dawn, the ridges, the plants, the rock and its
 // gold) into the backdrop image, which vk_splash.c paints again only when the size or the dawn changed. Pass 1 copies
 // the backdrop into the frame and adds what moves: stars, fireflies and dust at three depths, gold catching the light,
 // the tunnel and its lamp, the bananas, the text.

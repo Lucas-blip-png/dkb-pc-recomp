@@ -1,7 +1,7 @@
-// What both scenes of the start-up screen share (runtime/vk_splash.c; the scenes are shaders/splash.comp, the dawn over
-// the jungle, and shaders/splash_under.comp, the cavern): the parameters, the noise and drawing tools, the layout of a
-// pixel in scene units, the tunnel that shows the progress with the bunch of bananas at its end, the bunch beside the
-// name, the text, and main. A scene defines backdrop_pixel (pass 0, what stays: painted again only when the size or the
+// What the scenes of the start-up screen share (runtime/vk_splash.c; the scenes are shaders/splash_canyon.comp, the
+// canyon at sunrise, shaders/splash_under.comp, the cavern, and shaders/splash_jungle.comp, the dawn over the jungle):
+// the parameters, the noise and drawing tools, the layout of a pixel in scene units, the tunnel that shows the progress
+// with the bunch of bananas at its end, the bunch beside the name, the text, and main. A scene defines backdrop_pixel (pass 0, what stays: painted again only when the size or the
 // dawn changed) and frame_pixel (pass 1, what moves, over the backdrop); main adds the bunch beside the name and the
 // text over the scene's frame, and the fade-in. The colours are sRGB code values throughout; the frame is RGBA8 and
 // the present treats it as a picture of the game's (HDR10: at the paper white the settings give).

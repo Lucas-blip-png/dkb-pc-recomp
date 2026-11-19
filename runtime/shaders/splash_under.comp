@@ -1,10 +1,10 @@
-// The start-up screen's second scene (runtime/vk_splash.c, splash = 2), drawn here from arithmetic alone: no image
+// The start-up screen's cavern scene (runtime/vk_splash.c, splash = 2), drawn here from arithmetic alone: no image
 // file, no game art. A cavern deep under the ground, seen from inside: a far wall banded with the layers the digging
 // goes through (earth, red rock, dark stone, a seam of gold), a terrace of stalagmites and columns before it, the roof
 // with its stalactites overhead, and in the roof a small opening far above, from which a shaft of light falls into the
 // cave. The start is the night ending: the shaft begins as thin, cool moonlight and widens and warms into daylight as
 // the steps go on. Crystals glow faintly in the wall, small fungi on the terrace, dust drifts in the light, drops fall
-// from the roof now and then. In front, the shelf of rock the progress is dug through: the tunnel of the other scene
+// from the roof now and then. In front, the shelf of rock the progress is dug through: the tunnel of the other scenes
 // (shaders/splash/common.glsl), toward the bunch of bananas, through a layer whose rock tells the step: earth while the
 // start begins, red rock through the shaders, dark stone through the pipelines, gold once the game starts. Gold in the
 // shelf lights up as the start goes on.

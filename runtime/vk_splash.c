@@ -17,9 +17,9 @@
 // cannot be checked ends the screen at once, and so does a minute of black frames, so the screen never hides the game
 // for long. The window closed meanwhile ends it too.
 //
-// Two scenes: splash = 1 (the default) the dawn over a jungle ridge (shaders/splash.comp), splash = 2 a cavern deep
-// under the ground (shaders/splash_under.comp), splash = 3 a canyon at sunrise (shaders/splash_canyon.comp). Each is a
-// pipeline of its own and only the one shown is compiled.
+// Three scenes: splash = 1 (the default) a canyon at sunrise (shaders/splash_canyon.comp), splash = 2 a cavern deep
+// under the ground (shaders/splash_under.comp), splash = 3 the dawn over a jungle ridge (shaders/splash_jungle.comp).
+// Each is a pipeline of its own and only the one shown is compiled.
 //
 // DKB_SPLASH=0 (splash = 0 in dkb.ini) turns it off: the window opens at the game's first present, as before, and
 // DKB_SPLASH_WATCH=1 then logs the first picture's time without holding frames. DKB_SPLASH_TEST=<seconds> shows a
@@ -38,8 +38,8 @@
 #include "nvn_api.h"
 #include "splash.h"
 #include "splash_check_spv.h"
-#include "splash_spv.h"
 #include "splash_canyon_spv.h"
+#include "splash_jungle_spv.h"
 #include "splash_under_spv.h"
 #include "ui_text.h"
 #include "vk.h"
@@ -47,7 +47,7 @@
 
 enum { BOXES = 16 };
 typedef struct { float rect[4], src[4], color[4], shade[4]; } Box;
-typedef struct {   // shaders/splash.comp Params, std430
+typedef struct {   // shaders/splash/common.glsl Params, std430
     int32_t size[4];
     int32_t atlas[4];
     float t[4], bar[4], mark[4], misc[4];
@@ -68,9 +68,10 @@ int vk_splash_up(void) {
 }
 
 // ---- the renderer: everything the screen's thread (or the probe) draws with
+enum { SCENE_CANYON = 1, SCENE_CAVERN = 2, SCENE_JUNGLE = 3 };   // the values of splash = <n>
 typedef struct {
     VkDevice dev;
-    int scene;                              // 1 the dawn over the jungle (shaders/splash.comp), 2 the cavern (splash_under.comp), 3 the canyon (splash_canyon.comp)
+    int scene;                              // SCENE_*
     PFN_vkCmdPushDescriptorSetKHR push;
     VkDescriptorSetLayout dsl;
     VkPipelineLayout layout;
@@ -152,10 +153,10 @@ static VkPipeline compute_pipeline(VkDevice dev, const uint32_t *code, size_t by
     return p;
 }
 
-// The scene splash = <n> asks for: 2 the cavern, 3 the canyon, any other value that is not 0 the dawn over the jungle
+// The scene splash = <n> asks for: 2 the cavern, 3 the jungle, any other value that is not 0 the canyon
 static int scene_of_cfg(void) {
     int n = cfg_int("TOTK_SPLASH");
-    return n == 2 || n == 3 ? n : 1;
+    return n == SCENE_CAVERN || n == SCENE_JUNGLE ? n : SCENE_CANYON;
 }
 
 // Each scene is a pipeline of its own: only the one shown is compiled, so the second costs the start nothing
@@ -164,8 +165,8 @@ static int renderer_init(Renderer *r, int scene) {
     memset(r, 0, sizeof *r);
     r->dev = c->device;
     r->scene = scene;
-    const uint32_t *code = scene == 2 ? splash_under_spv : scene == 3 ? splash_canyon_spv : splash_spv;
-    size_t bytes = scene == 2 ? sizeof splash_under_spv : scene == 3 ? sizeof splash_canyon_spv : sizeof splash_spv;
+    const uint32_t *code = scene == SCENE_CAVERN ? splash_under_spv : scene == SCENE_JUNGLE ? splash_jungle_spv : splash_canyon_spv;
+    size_t bytes = scene == SCENE_CAVERN ? sizeof splash_under_spv : scene == SCENE_JUNGLE ? sizeof splash_jungle_spv : sizeof splash_canyon_spv;
     r->back_dawn = -1;
     r->push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->device, "vkCmdPushDescriptorSetKHR");
     if (!r->push || !(r->text = splash_text_new())) return 0;
@@ -236,7 +237,7 @@ static int ensure_images(Renderer *r, uint32_t w, uint32_t h) {
     return 1;
 }
 
-// ---- layout of the text: sizes in units of 1080 window lines, the margins and the line, as shaders/splash.comp
+// ---- layout of the text: sizes in units of 1080 window lines, the margins and the line, as shaders/splash/common.glsl
 // expects them (the darker pools behind the text are placed from the same numbers)
 static const float CREAM[3] = {0xf3 / 255.f, 0xe9 / 255.f, 0xd2 / 255.f}, MUTED[3] = {0xc4 / 255.f, 0xb4 / 255.f, 0x94 / 255.f},
                    BANANA[3] = {0xf6 / 255.f, 0xc5 / 255.f, 0x2b / 255.f};
@@ -285,7 +286,7 @@ static void layout_text(Renderer *r, const SplashView *v, uint32_t w, uint32_t h
     r->nbox = 0, r->tip_boxes = 0;
     splash_text_begin(t);
     // the name and the version at the top left, beside the mark
-    // the hand of bananas has its crown at mark[0..1], mark[2] pixels a unit of its shape (shaders/splash.comp bunch:
+    // the hand of bananas has its crown at mark[0..1], mark[2] pixels a unit of its shape (shaders/splash/common.glsl bunch:
     // from 0.3 left of the crown to 1.75 right of it, 1.1 above it to 0.66 under it), centred on the name's capitals
     float name_px = 36.0f * u, mark_s = 22.0f * u;
     float ny = 50.0f * u + splash_text_ascent(t, name_px) * 0.78f, nx = x0 + 2.1f * mark_s + 12.0f * u;
@@ -372,7 +373,7 @@ static int render(Renderer *r, const SplashView *v, double secs, uint32_t w, uin
     float u = unit_of(w, h);
     // the dawn moves in steps of 1/64 (1/256 in the cavern and the canyon, whose light moves across the rock in plain
     // sight, so a step would show as a jump): the backdrop is painted again only then
-    float steps = r->scene == 1 ? 64.0f : 256.0f;
+    float steps = r->scene == SCENE_JUNGLE ? 64.0f : 256.0f;
     float dawn = roundf(v->dawn * steps) / steps;
     int paint = r->back_dawn != dawn;
     P->size[0] = (int)w, P->size[1] = (int)h, P->size[3] = r->nbox;
@@ -381,7 +382,7 @@ static int render(Renderer *r, const SplashView *v, double secs, uint32_t w, uin
     P->mark[0] = r->mark[0], P->mark[1] = r->mark[1], P->mark[2] = r->mark[2];
     P->mark[3] = v->fraction >= 0 ? v->fraction * v->fraction : 0.15f;
     // the sun's x (over the jungle; at the canyon's far end), or the opening's in the cavern's roof
-    P->misc[0] = r->scene == 2 ? 0.62f : r->scene == 3 ? 0.515f : 0.70f;
+    P->misc[0] = r->scene == SCENE_CAVERN ? 0.62f : r->scene == SCENE_JUNGLE ? 0.70f : 0.515f;
     for (int i = 0; i < r->nbox; i++) {   // the tip fades every frame without a new atlas
         P->box[i] = r->box[i];
         if (r->tip_boxes >> i & 1) P->box[i].color[3] = v->tip_alpha;
@@ -778,9 +779,10 @@ int probe_splash(void) {
         printf("probe-splash: FAIL no Vulkan device\n");
         return 1;
     }
-    // the scene splash = <n> selects (DKB_SPLASH=2: the cavern, files named under-*.png; 3: the canyon, canyon-*.png)
+    // the scene splash = <n> selects, in files named after it: canyon-*.png (1, the default), under-*.png (DKB_SPLASH=2,
+    // the cavern), jungle-*.png (DKB_SPLASH=3)
     int scene = scene_of_cfg();
-    const char *prefix = scene == 2 ? "under" : scene == 3 ? "canyon" : "splash";
+    const char *prefix = scene == SCENE_CAVERN ? "under" : scene == SCENE_JUNGLE ? "jungle" : "canyon";
     Renderer r;
     uint64_t t_init = plat_now_ns();
     if (!renderer_init(&r, scene)) {

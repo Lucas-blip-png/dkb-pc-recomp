@@ -1,5 +1,5 @@
-// The start-up screen's third scene (runtime/vk_splash.c, splash = 3), drawn here from arithmetic alone: no image file,
-// no game art. A view down a canyon toward the far end, where the sun comes up between two flat-topped mesas. The
+// The start-up screen's default scene (runtime/vk_splash.c, splash = 1), drawn here from arithmetic alone: no image
+// file, no game art. A view down a canyon toward the far end, where the sun comes up between two flat-topped mesas. The
 // canyon's walls come forward on the left and the right in terraces cut so that their layers of rock show, each
 // terrace's edge catching a line of light; another pair of walls recedes behind them, paler and pinker in the haze.
 // Palms stand on the rims and on two ledges, a river winds along the floor toward the viewer, mist lies low in the
@@ -80,7 +80,7 @@ float wall(vec2 q, float lift, uint seed, out int own, out float dtop, out float
     return sd;
 }
 
-// The canyon's layers of rock, as in the first scene's cut: top to bottom by the frame's y
+// The canyon's layers of rock, as in the jungle scene's cut: top to bottom by the frame's y
 vec3 strata(float y) {
     const float edge[8] = float[8](0.231, 0.296, 0.352, 0.404, 0.459, 0.524, 0.580, 0.645);
     const uint col[9] = uint[9](0x5a3320u, 0x8a5a2bu, 0xc08a4au, 0xa8371fu, 0x7a4a22u, 0xd09a52u, 0x8f2f1cu, 0x5a3418u, 0x2a1810u);

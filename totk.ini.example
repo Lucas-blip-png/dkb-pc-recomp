@@ -146,8 +146,8 @@
 # perf_overlay = off
 # The start-up screen: from the moment the window opens to the game's first picture, the window shows a scene of
 # its own with what the start prepares (the shaders, the pipelines earlier runs met), how far each step is and, on a
-# long start, about how long it has left. 1 draws it over a dawn above a jungle ridge, 2 in a cavern deep under the
-# ground, lit by a shaft of light from far above, 3 in a canyon at sunrise; 0 opens the window at the game's first
+# long start, about how long it has left. 1 draws it in a canyon at sunrise, 2 in a cavern deep under the ground,
+# lit by a shaft of light from far above, 3 over a dawn above a jungle ridge; 0 opens the window at the game's first
 # frame instead, as before. Read at start.
 # splash = 1
 # Which GPU to use: its index in the log, or part of its name. Default: the first discrete GPU with Vulkan 1.3.

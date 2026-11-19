@@ -107,7 +107,7 @@ static const CfgMeta metas[] = {
     // vk_driver_env.c sets VK_DRIVER_FILES from it before the loader runs.
     {"VULKAN_DRIVER", "", NULL, RESTART},
     {"PERF_OVERLAY", "off", "off|fps|full|breakdown|counter", LIVE},
-    {"SPLASH", "1", "0|1|2|3", RESTART},   // vk_splash.c: the start-up screen from the window's opening to the game's first picture; 1 the dawn over the jungle, 2 the cavern, 3 the canyon
+    {"SPLASH", "1", "0|1|2|3", RESTART},   // vk_splash.c: the start-up screen from the window's opening to the game's first picture; 1 the canyon at sunrise, 2 the cavern, 3 the dawn over the jungle
     {"OUTPUT_RES", "1920x1080", NULL, RESTART}, {"RENDER_SCALE", "game", "game|50|59|67|75|77|100|125|150|200", RESTART},
     {"SCENE_RES", "auto", "auto|full", RESTART},   // Bananza only (dkb_wide.c)
     // UPSCALER fsr and bilinear both mean the game's own upscaler (bilinear is the older spelling of the plain linear
