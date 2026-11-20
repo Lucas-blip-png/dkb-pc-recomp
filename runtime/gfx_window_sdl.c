@@ -8,9 +8,8 @@
 // exists: the Vulkan instance asks for SDL's surface extensions first (gfx_window_vk_extensions), the window comes with
 // gfx_window_start (wsys_open).
 //
-// TOTK_WINDOW_SIZE is in pixels. On a display that scales windows (Wayland, HiDPI) the window asks for its pixels in
-// the display's units (SDL_GetWindowDisplayScale), and SDL reports mouse positions in those units: input_sdl.c and the
-// menu scale them back (gfx_window_sdl_density).
+// TOTK_WINDOW_SIZE is in pixels. SDL_GetWindowPixelDensity converts between pixels and the units SDL_SetWindowSize
+// and mouse positions use. input_sdl.c and the menu convert mouse positions back through gfx_window_sdl_density.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,9 +89,9 @@ unsigned gfx_window_dpi(void) {
 
 // The window's size in its units for w x h pixels.
 static void set_pixel_size(int w, int h) {
-    float scale = SDL_GetWindowDisplayScale(g_win);
-    if (!(scale > 0)) scale = 1;
-    SDL_SetWindowSize(g_win, (int)(w / scale + 0.5f), (int)(h / scale + 0.5f));
+    float density = SDL_GetWindowPixelDensity(g_win);
+    if (!(density > 0)) density = 1;
+    SDL_SetWindowSize(g_win, (int)(w / density + 0.5f), (int)(h / density + 0.5f));
 }
 
 // Window mode 0 windowed, 1 borderless (the desktop's mode, over the display), 2 fullscreen (the display's current
