@@ -275,6 +275,103 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
             self.assertEqual(self.run_install()[0], 1)
             self.assertFalse(self.dest.exists())
 
+    def test_posix_appimage_with_prebuilt_translator_allows_brackets_in_install_folder(self):
+        with patch.object(b, 'POSIX', True), self.appimage_install():
+            code, events = self.run_install()
+            self.assertEqual(code, 0, events)
+            folder = b.work_folder(self.dest.resolve(), None, None)
+            self.assertEqual(folder.parent, self.dest.resolve() / '.dkb-setup')
+            self.assertTrue((folder / b.OWNER).is_file())
+            self.assertTrue((self.dest / ('dkb' + b.EXE)).is_file())
+
+    def test_posix_source_translator_build_rejects_unsafe_temp_parent_before_writes(self):
+        missing_xlate = self.root / 'bin' / 'missing-xlate'
+        missing_dotnet = self.root / 'toolchain' / 'dotnet' / 'missing-dotnet'
+        self.options.translator = None
+        self.options.dotnet = missing_dotnet
+        self.layout = b.replace(self.layout, xlate=missing_xlate)
+
+        with self.subTest(case='appimage-brackets-in-dest'):
+            with patch.object(b, 'POSIX', True), patch.object(b.shutil, 'which', return_value=None), \
+                    self.appimage_install():
+                code, events = self.run_install()
+            self.assertEqual(code, 1, events)
+            error = next(e for e in events if e['type'] == 'error')
+            self.assertEqual(error['id'], 'dkb.temp_unsafe_path')
+            self.assertEqual(error['params']['path'], str(self.dest.resolve() / '.dkb-setup'))
+            self.assertFalse(self.dest.exists())
+            self.assertEqual(self.calls, [])
+
+        with self.subTest(case='explicit-temp-with-parens'):
+            unsafe_temp = Path(self.work.name) / 'work (2)'
+            self.options.temp = unsafe_temp
+            with patch.object(b, 'POSIX', True), patch.object(b.shutil, 'which', return_value=None):
+                code, events = self.run_install()
+            self.assertEqual(code, 1, events)
+            error = next(e for e in events if e['type'] == 'error')
+            self.assertEqual(error['id'], 'dkb.temp_unsafe_path')
+            self.assertEqual(error['params']['path'], str(unsafe_temp.resolve()))
+            self.assertFalse(self.dest.exists())
+            self.assertFalse(unsafe_temp.exists())
+            self.assertEqual(self.calls, [])
+
+        with self.subTest(case='safe-temp-reaches-dotnet-check'):
+            self.options.temp = self.temp
+            with patch.object(b, 'POSIX', True), patch.object(b.shutil, 'which', return_value=None):
+                code, events = self.run_install()
+            self.assertEqual(code, 1, events)
+            error = next(e for e in events if e['type'] == 'error')
+            self.assertEqual(error['id'], 'dkb.dotnet_missing')
+            self.assertFalse(self.dest.exists())
+            self.assertFalse(self.temp.exists())
+
+    def test_build_game_cmd_arg_quotes_posix_shell_metacharacters_and_escapes_ninja_dollars(self):
+        import shlex
+        sys.path.insert(0, str(ROOT / 'tools'))
+        try:
+            import build_game
+        finally:
+            sys.path.pop(0)
+
+        with patch.object(build_game, 'WIN', False):
+            self.assertEqual(build_game.cmd_arg('plain/path_1-a.c'), 'plain/path_1-a.c')
+            samples = [
+                '/tmp/installed [game]/.dkb-setup/dkb-x/build',
+                '/tmp/DKB (2)/build',
+                '/tmp/cost $100 [a]/build',
+                "/tmp/don't $(rm) [x]/build",
+            ]
+            for raw in samples:
+                quoted = build_game.cmd_arg(raw)
+                # Every literal '$' must be doubled for Ninja before /bin/sh sees the command.
+                self.assertEqual(quoted.count('$$'), raw.count('$'), raw)
+                self.assertNotIn('$', quoted.replace('$$', ''), raw)
+                # After Ninja unescapes '$$' -> '$', POSIX /bin/sh must recover the exact token.
+                self.assertEqual(shlex.split(quoted.replace('$$', '$')), [raw], raw)
+
+            rt = Path(self.work.name) / 'rt [v1]'
+            gen = Path(self.work.name) / 'installed [game]' / 'gen'
+            out = Path(self.work.name) / 'cost $100 (2)' / 'build'
+            for folder in (rt, gen, out):
+                folder.mkdir(parents=True)
+            with patch.object(build_game, 'RUNTIME', rt), patch.object(build_game, 'DARWIN', False), \
+                    patch.object(build_game, 'DEPS', None), patch.object(build_game, 'vma_include', return_value=rt):
+                text = build_game.ninja_file(gen, out, {}, 2)[0]
+            vars_by_name = dict(line.split(' = ', 1) for line in text.splitlines() if ' = ' in line)
+            gen_tokens = shlex.split(vars_by_name['genflags'].replace('$$', '$'))
+            rt_tokens = shlex.split(vars_by_name['rtflags'].replace('$$', '$'))
+            ld_tokens = shlex.split(vars_by_name['ldflags'].replace('$$', '$'))
+            self.assertIn(build_game.flag_path(rt), gen_tokens)
+            self.assertIn(build_game.flag_path(gen), gen_tokens)
+            self.assertIn(build_game.flag_path(out), rt_tokens)
+            self.assertIn(f'-Map={build_game.flag_path(out / "totk.map")}', ld_tokens)
+
+        with patch.object(build_game, 'WIN', True):
+            self.assertEqual(build_game.cmd_arg('plain/path'), 'plain/path')
+            self.assertEqual(build_game.cmd_arg('C:/Program Files/dkb'), '"C:/Program Files/dkb"')
+            self.assertEqual(build_game.cmd_arg('C:/a$b/c d'), '"C:/a$$b/c d"')
+            self.assertEqual(build_game.cmd_arg('C:/a$b/cd'), 'C:/a$$b/cd')
+
     def test_outside_the_appimage_the_work_folder_stays_beside_the_install_folder(self):
         with patch.dict(os.environ):
             os.environ.pop('APPIMAGE', None)

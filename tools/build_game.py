@@ -60,6 +60,7 @@ import hashlib
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -128,8 +129,7 @@ if WIN:
 else:
     # -no-pie: the lifted modules' function tables (hundreds of thousands of pointers) need no load-time relocation.
     # $ORIGIN: a libSDL3.so.0 next to totk comes before the system's (the release's portable folder).
-    LINK_FLAGS = ['-fuse-ld=lld', '-no-pie', '-Wl,-z,noexecstack', "'-Wl,-rpath,$$ORIGIN'",
-                  '"-Wl,-Map=$builddir/totk.map"']
+    LINK_FLAGS = ['-fuse-ld=lld', '-no-pie', '-Wl,-z,noexecstack', "'-Wl,-rpath,$$ORIGIN'"]
     LINK_LIBS = ['-lvulkan', '-lSDL3', '-lopus', '-lvpx', '-lzstd', '-l:libstdc++.a', '-lm', '-lpthread', '-ldl']
     VMA_INCLUDE = Path('/usr/include')   # vk_mem_alloc.h; Arch (AUR) vulkan-memory-allocator, Debian libvulkan-memory-allocator-dev
 if DARWIN:
@@ -224,8 +224,11 @@ def flag_path(p):
 
 
 def cmd_arg(s):
-    """s for a Ninja command line: Ninja-escaped, and quoted when it holds a space (a user or folder name), as clang and
-    lld split their Windows command line at unquoted spaces."""
+    """s for a Ninja command line: shell-quoted on POSIX (Ninja passes rules to /bin/sh) or double-quoted on Windows
+    when it holds a space (clang and lld split their Windows command line at unquoted spaces), with '$' escaped for
+    Ninja."""
+    if not WIN:
+        return shlex.quote(s).replace('$', '$$')
     s = s.replace('$', '$$')
     return f'"{s}"' if ' ' in s else s
 
@@ -391,6 +394,10 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
     # A compiler cache (sccache) may front clang: every lift rewrites the generated chunks with the same contents, so
     # the cached objects save the compile step on the next build.
     cache = f'{cmd_arg(os.environ["SCCACHE"])} ' if os.environ.get('SCCACHE') else ''
+    ldflags = list(LINK_FLAGS)
+    if not WIN and not DARWIN:
+        # -Xlinker passes the map flag as one argument (avoiding -Wl, comma splitting), and cmd_arg single-quotes it for /bin/sh.
+        ldflags += ['-Xlinker', cmd_arg(f'-Map={flag_path(out / "totk.map")}')]
     lines = [
         '# Written by tools/build_game.py; do not edit.',
         'ninja_required_version = 1.10',
@@ -398,7 +405,7 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         f'cc = {cache}{cmd_arg(CLANG.as_posix())}',
         f'genflags = {" ".join(GEN_FLAGS)} {inc}',
         f'rtflags = {" ".join(RT_FLAGS)} {rt_inc}',
-        f'ldflags = {" ".join(LINK_FLAGS)}',
+        f'ldflags = {" ".join(ldflags)}',
         f'libs = {" ".join(libs)}',
         '',
         'pool gen',
@@ -904,7 +911,7 @@ def main():
         RT_FLAGS.append('-march=' + march)
     if args.sysroot and not WIN:
         # Every compile and the link: the game then needs no newer glibc than the sysroot's (the Steam Runtime's)
-        sysroot = ['--target=x86_64-linux-gnu', f'--sysroot={cmd_path(args.sysroot.resolve())}']
+        sysroot = ['--target=x86_64-linux-gnu', cmd_arg(f'--sysroot={flag_path(args.sysroot.resolve())}')]
         GEN_FLAGS[:0] = sysroot
         RT_FLAGS[:0] = sysroot
         LINK_FLAGS[:0] = sysroot

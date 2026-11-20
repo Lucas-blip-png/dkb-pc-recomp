@@ -35,6 +35,7 @@ NESTED = '.dkb-setup'   # the work folder's parent: beside the install folder, o
 GAME = 'dkb100'
 TARGETS = (GAME, 'dkb458752')   # 1.0.0 and 3.2.0 (title version 458752); tools/data/expected-<target>.json
 NUP_SELECT = ('latest', 'base')
+POSIX = os.name != 'nt'
 EXE = '.exe' if os.name == 'nt' else ''
 CHUNK = 8 << 20
 WIDE_SIZES = ('2560x1080', '3440x1440', '3840x1600', '5120x2160', '3840x1080', '5120x1440')
@@ -447,6 +448,8 @@ def preflight(layout, options, dest, temp, rep):
     if not dotnet.is_file():
         dotnet = Path(shutil.which('dotnet') or dotnet)
     if not translator:
+        if POSIX and unsafe_temp_chars(temp.parent):
+            raise InstallError('dkb.temp_unsafe_path', path=str(temp.parent))
         proc = subprocess.run([str(dotnet), '--list-sdks'], capture_output=True, text=True) if dotnet.is_file() else None
         if proc is None or proc.returncode or not any(line.startswith('10.') for line in proc.stdout.splitlines()):
             raise InstallError('dkb.dotnet_missing')
@@ -1303,8 +1306,6 @@ def main(options):
                     setattr(options, name, Path(value))
         layout = tool_layout(found, options)
         temp = work_folder(dest, options.temp, layout.temp)
-        if os.name != 'nt' and unsafe_temp_chars(temp.parent):
-            raise InstallError('dkb.temp_unsafe_path', path=str(temp.parent))
         info = preflight(layout, options, dest, temp, rep)
         # All read-only validation succeeded. Logs and owned output may now be created.
         temp.mkdir(parents=True, exist_ok=True)
