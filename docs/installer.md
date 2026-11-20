@@ -152,6 +152,10 @@ removes those too and the install folder itself. It refuses a folder without thi
 before deleting anything, and exits 1 while a setup runs. The finish screen has an Uninstall button that asks for
 confirmation, then asks separately whether to delete the saves (default No).
 
+To reinstall after keeping player files, choose the same destination and provide a `.nup` or dump folders for the same
+game version. Setup recognizes the record left by uninstall and reuses `profile/`, `dkb.ini` and `mods/`. For a folder
+left by an older uninstaller without that record, install in an empty folder and copy the player files there afterward.
+
 CLI exit codes and JSON events are the same as below. Lightweight checks, with no game files:
 
 ```

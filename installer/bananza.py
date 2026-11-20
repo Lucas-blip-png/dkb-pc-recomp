@@ -31,6 +31,8 @@ from .runner import Context, InstallError, Step, run_steps
 STATE = 'dkb-install.json'
 OWNER = '.dkb-setup-owner.json'
 DEST_OWNER = '.dkb-install-owner.json'
+SAVES_OWNER = '.dkb-saves-owner.json'
+KEPT_SAVES = ('profile', 'dkb.ini', 'mods')
 NESTED = '.dkb-setup'   # the work folder's parent: beside the install folder, or inside it for the AppImage
 GAME = 'dkb100'
 TARGETS = (GAME, 'dkb458752')   # 1.0.0 and 3.2.0 (title version 458752); tools/data/expected-<target>.json
@@ -100,7 +102,8 @@ def plain_tree(root):
 
 def plain_destination(dest, dlls=()):
     # profile/ and caches belong to the player and are never traversed or written by setup.
-    files = (STATE, STATE + '.tmp', DEST_OWNER, '.dkb-setup.lock', 'dkb.ini', 'dkb.ini.tmp', 'totk.ini',
+    files = (STATE, STATE + '.tmp', DEST_OWNER, DEST_OWNER + '.tmp', SAVES_OWNER, '.dkb-setup.lock', 'dkb.ini',
+             'dkb.ini.tmp', 'totk.ini',
              'totk.ini.tmp', 'romfs-index.bin', 'seed-nvn2.bin', 'dkb' + EXE, 'totk_xlate' + EXE, 'totk_xlate.id', *(p.name for p in dlls))
     for name in ('exefs', 'romfs', *WIDE_FOLDERS, *files, *(name + '.setup-part' for name in files)):
         plain_tree(dest / name)
@@ -291,6 +294,14 @@ def unsafe_temp_chars(path):
     return ''.join(sorted({ch for ch in str(path) if ch in "()&;|<>$`'\"!*?[]{}#~"}))
 
 
+def matches_owner(path, expected):
+    ensure_plain(path)
+    try:
+        return json.loads(path.read_text(encoding='utf-8')) == expected
+    except (OSError, ValueError):
+        return False
+
+
 def preflight(layout, options, dest, temp, rep):
     if options.base or options.update or options.keys:
         raise InstallError('dkb.update_unsupported')
@@ -364,14 +375,16 @@ def preflight(layout, options, dest, temp, rep):
             continue   # the AppImage's default work folder lives in the install folder, and nowhere else may
         if contains(a, b) or contains(b, a):
             raise InstallError('dkb.path_overlap', path=str(a), other=str(b))
-    if dest.exists() and old is None and any(dest.iterdir()):
-        try:
-            ensure_plain(dest / DEST_OWNER)
-            partial = json.loads((dest / DEST_OWNER).read_text(encoding='utf-8'))
-            ours = partial == {'game': game, 'destination': str(dest)}
-            ours &= {p.name for p in dest.iterdir()} <= {DEST_OWNER, '.dkb-setup.lock', NESTED}
-        except (OSError, ValueError):
-            ours = False
+    entries = {p.name for p in dest.iterdir()} if dest.exists() else set()
+    dest_owner = {'game': game, 'destination': str(dest)}
+    from_saved_folder = SAVES_OWNER in entries and matches_owner(dest / SAVES_OWNER, dest_owner)
+    if old is None and entries:
+        resume_files = {'.dkb-setup.lock', NESTED}
+        if from_saved_folder:
+            allowed = {SAVES_OWNER, STATE + '.tmp', *resume_files}
+            ours = all(name in allowed or name.lower() in KEPT_SAVES for name in entries)
+        else:
+            ours = entries <= {DEST_OWNER, *resume_files} and matches_owner(dest / DEST_OWNER, dest_owner)
         if not ours:
             raise InstallError('dkb.dest_unrelated', path=str(dest))
     if nuget_needs_fallback(temp) and any(c.isspace() for c in tempfile.gettempdir()):
@@ -450,7 +463,7 @@ def preflight(layout, options, dest, temp, rep):
         proc = subprocess.run([str(dotnet), '--list-sdks'], capture_output=True, text=True) if dotnet.is_file() else None
         if proc is None or proc.returncode or not any(line.startswith('10.') for line in proc.stdout.splitlines()):
             raise InstallError('dkb.dotnet_missing')
-    return dict(old=old, game=game, sources=sources, hashes=hashes, files=files,
+    return dict(old=old, from_saved_folder=from_saved_folder, game=game, sources=sources, hashes=hashes, files=files,
                 romfs_id=romfs_id, romfs_size=romfs_size, owner=owner, translator=translator, identity=identity,
                 dotnet=dotnet, packed=packed, in_place=in_place, dest_source=dest_source,
                 pipeline=digest(*(sha256(Path(__file__).with_name(n)) for n in ('bananza.py', 'runner.py', 'state.py'))))
@@ -463,6 +476,11 @@ class BananzaContext(Context):
         ensure_plain(self.dest / (STATE + '.tmp'))
         self.dest.mkdir(parents=True, exist_ok=True)
         statefile.save(self.dest, self.state, STATE)
+        if self.info['from_saved_folder']:
+            # The install record now establishes ownership. Until it is written, the marker only permits setup.
+            statefile.save(self.dest, {'game': self.info['game'], 'destination': str(self.dest)}, DEST_OWNER)
+            (self.dest / SAVES_OWNER).unlink(missing_ok=True)
+            self.info['from_saved_folder'] = False
 
 
 def owned_dir(ctx, path):
@@ -1212,23 +1230,18 @@ def clean_main(options):
     return 0
 
 
-KEPT_SAVES = ('profile', 'dkb.ini', 'mods')   # the player's own files (saves, settings, loose mods), kept unless asked
-
-
 def uninstall(dest, temp=None, layout_temp=None, keep_saves=True):
     """Remove the install at dest and its work folder; returns (removed paths, bytes freed). Needs our state or owner
-    record for this destination. With keep_saves, profile/ and dkb.ini stay and dest itself stays; links are refused
-    before anything is deleted and never followed."""
+    record for this destination. With keep_saves, the destination and player files stay. Links in paths to be deleted
+    are refused before anything is deleted."""
     ensure_plain(dest.absolute())
     dest = dest.resolve()
     ensure_plain(dest / STATE)
     ensure_plain(dest / DEST_OWNER)
     try:
         old = statefile.load(dest, STATE)
-        ours = old is not None and old.get('game') in TARGETS and old.get('destination') == str(dest)
-        if not ours and old is None:
-            owner = json.loads((dest / DEST_OWNER).read_text(encoding='utf-8'))
-            ours = isinstance(owner, dict) and owner.get('destination') == str(dest) and owner.get('game') in TARGETS
+        owner = old if old is not None else json.loads((dest / DEST_OWNER).read_text(encoding='utf-8'))
+        ours = isinstance(owner, dict) and owner.get('destination') == str(dest) and owner.get('game') in TARGETS
     except (OSError, ValueError, statefile.StateError):
         ours = False
     if not ours:
@@ -1236,7 +1249,9 @@ def uninstall(dest, temp=None, layout_temp=None, keep_saves=True):
     # dkb.busy while a setup runs. Taken before the listing, since it creates the lock file the listing must include;
     # released before the deletes, since Windows cannot delete a file this process holds open.
     lock_temp(dest).close()
-    entries = [p for p in dest.iterdir() if not (keep_saves and p.name.lower() in KEPT_SAVES)]
+    entries = list(dest.iterdir())
+    kept = {p for p in entries if keep_saves and p.name.lower() in KEPT_SAVES}
+    entries = [p for p in entries if p not in kept]
     for p in entries:
         plain_tree(p)
         if linked(p):
@@ -1252,7 +1267,15 @@ def uninstall(dest, temp=None, layout_temp=None, keep_saves=True):
         except InstallError as e:
             if e.id != 'dkb.clean_nothing':
                 raise
-    for p in entries:
+    if kept:
+        # Leave separate proof for a later setup. This marker alone never authorizes deletion.
+        marker, pending_marker = dest / SAVES_OWNER, dest / (SAVES_OWNER + '.tmp')
+        for p in (marker, pending_marker):
+            ensure_plain(p)
+        statefile.save(dest, {'game': owner['game'], 'destination': str(dest)}, SAVES_OWNER)
+        entries = [p for p in entries if p not in (marker, pending_marker)]
+    # Keep the install's authority until the rest is removed so an interrupted uninstall can resume.
+    for p in sorted(entries, key=lambda p: p.name in (STATE, DEST_OWNER)):
         if p.is_dir():
             freed += folder_size(p)
             shutil.rmtree(p)
@@ -1311,7 +1334,8 @@ def main(options):
         write_owner(temp / OWNER, info['owner'])
         locks.append(lock_temp(temp))
         dest.mkdir(parents=True, exist_ok=True)
-        write_owner(dest / DEST_OWNER, {'game': info['game'], 'destination': str(dest)})
+        if info['old'] is not None or not info['from_saved_folder']:
+            write_owner(dest / DEST_OWNER, {'game': info['game'], 'destination': str(dest)})
         locks.append(lock_temp(dest))
         plain_tree(temp)
         plain_destination(dest, layout.dlls)
