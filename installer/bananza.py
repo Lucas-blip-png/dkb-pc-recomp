@@ -303,39 +303,44 @@ def preflight(layout, options, dest, temp, rep):
     if old is not None and (old.get('game') not in TARGETS or old.get('destination') != str(dest)):
         raise InstallError('dkb.dest_unrelated', path=str(dest))
     nup_arg = getattr(options, 'nup', None)
+    nup_package = getattr(options, 'nup_package', None)
     # A package choice only means something for a .nup, so it counts as asking for one next to folders too.
-    if (nup_arg or getattr(options, 'nup_package', None)) and (options.exefs or options.romfs):
+    if (nup_arg or nup_package) and (options.exefs or options.romfs):
         raise InstallError('dkb.nup_and_folders')
     recorded = old['sources'] if old else {}
-    if not nup_arg and not options.exefs and not options.romfs and recorded.get('nup'):
+    use_recorded_source = not (nup_arg or options.exefs or options.romfs)
+    if use_recorded_source and recorded.get('nup'):
         nup_arg = Path(recorded['nup'])
-    select = getattr(options, 'nup_package', None) or (recorded.get('nup_package') if nup_arg else None) or 'latest'
+    select = nup_package or (recorded.get('nup_package') if nup_arg else None) or 'latest'
     if select not in NUP_SELECT:
         raise InstallError('dkb.nup_invalid', path=str(nup_arg), detail=f'unknown package choice {select}')
-    dest_source = False
     if nup_arg:
         for p in (nup_arg, dest, temp):
             ensure_plain(p.absolute())
-        nup = nup_arg.resolve()
-        if not nup.is_file():
-            raise InstallError('dkb.need_nup')
-        rep.progress('check', 'dkb_base')
-        game, hashes, files = nup_source(layout, nup, select)
-        inputs, sources = (nup,), {'nup': str(nup), 'nup_package': select}
+        nup_arg = nup_arg.resolve()
+        source_missing = not nup_arg.is_file()
     else:
         exefs_arg = options.exefs or (Path(recorded['exefs']) if recorded.get('exefs') else None)
         romfs_arg = options.romfs or (Path(recorded['romfs']) if recorded.get('romfs') else None)
-        # The recorded dump folders were moved or deleted: the verified copy in the install folder (ExeFS files and
-        # the packed RomFS) is the source, used where it is. Only when nothing was given on the command line, the
-        # last run packed the RomFS (not a loose in-place install) and its Data step left a record to verify against.
-        dest_source = bool(
-            old and not options.exefs and not options.romfs and not recorded.get('romfs_in_place') and
-            'sha256' in old.get('steps', {}).get('dkb_data', {}) and
-            not (exefs_arg and romfs_arg and exefs_arg.is_dir() and romfs_arg.is_dir()) and
-            (dest / 'exefs').is_dir() and (dest / 'romfs' / 'romfs.bin').is_file() and
-            (dest / 'romfs' / 'index.json').is_file())
-        if dest_source:
-            exefs_arg, romfs_arg = dest / 'exefs', dest / 'romfs'
+        source_missing = use_recorded_source and not (
+            exefs_arg and romfs_arg and exefs_arg.is_dir() and romfs_arg.is_dir())
+    # An update without explicit sources can use the installed ExeFS and packed RomFS if the recorded dump is gone.
+    # The Data checkpoint identifies the verified copy. A loose in-place RomFS still needs its original folder.
+    dest_source = bool(
+        old and use_recorded_source and not nup_package and source_missing and not recorded.get('romfs_in_place') and
+        'sha256' in old.get('steps', {}).get('dkb_data', {}) and
+        (dest / 'exefs').is_dir() and (dest / 'romfs' / 'romfs.bin').is_file() and
+        (dest / 'romfs' / 'index.json').is_file())
+    if dest_source:
+        nup_arg = None
+        exefs_arg, romfs_arg = dest / 'exefs', dest / 'romfs'
+    if nup_arg:
+        if source_missing:
+            raise InstallError('dkb.need_nup')
+        rep.progress('check', 'dkb_base')
+        game, hashes, files = nup_source(layout, nup_arg, select)
+        inputs, sources = (nup_arg,), {'nup': str(nup_arg), 'nup_package': select}
+    else:
         if not exefs_arg or not romfs_arg:
             raise InstallError('dkb.need_folders')
         for p in (exefs_arg, romfs_arg, dest, temp):
@@ -612,6 +617,9 @@ class Data(Step):
     id = 'dkb_data'
 
     def key(self, ctx):
+        if ctx.info['dest_source']:
+            # Keep the checkpoint for data already in the install folder, so moving the source does not rebuild it.
+            return ctx.state['steps']['dkb_data']['key']
         parts = [ctx.info['hashes'], ctx.info['romfs_id'], ctx.info['pipeline'],
                  sha256(ctx.layout.tools / 'dkb_pack_romfs.py')]
         if ctx.info['in_place']:
@@ -620,10 +628,6 @@ class Data(Step):
             parts += [sha256(ctx.layout.tools / 'extract_nup.py'), ctx.info['sources']['nup_package']]
             if ctx.info['sources']['nup'].lower().endswith('.nx'):
                 parts.append(sha256(ctx.layout.tools / 'extract_nx.py'))
-        if ctx.info['dest_source']:
-            # Sourced from the install folder itself: keep the key the copying run recorded, so the steps after this
-            # one are not rebuilt because the source moved.
-            return ctx.state['steps']['dkb_data']['key']
         return digest(*parts)
 
     def current(self, ctx, record):

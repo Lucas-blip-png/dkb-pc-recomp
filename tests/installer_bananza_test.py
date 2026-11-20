@@ -1126,6 +1126,59 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
         self.assertEqual(self.run_install()[0], 0)
         self.assertEqual(self.calls, [])
 
+    def test_removed_recorded_nup_updates_from_installed_game_data(self):
+        path = self.write_nup()
+        self.assertEqual(self.run_install()[0], 0)
+        old = b.statefile.load(self.dest, b.STATE)
+        path.unlink()
+
+        # An explicit archive or package choice still needs the archive.
+        for archive, package in ((path, None), (None, 'base')):
+            with self.subTest(archive=archive, package=package):
+                self.options.nup, self.options.nup_package = archive, package
+                code, events = self.run_install()
+                self.assertEqual(code, 1, events)
+                self.assertIn('dkb.need_nup', [e.get('id') for e in events])
+
+        self.options.nup = self.options.nup_package = None
+        self.layout = b.replace(self.layout, release='test-update')
+        (self.root / 'runtime/nvn2_lower.cpp').write_text('// changed synthetic runtime')
+        self.calls.clear()
+        code, events = self.run_install()
+        self.assertEqual(code, 0, events)
+        self.assertIn('compile', [step for step, _ in self.calls])
+        state = b.statefile.load(self.dest, b.STATE)
+        self.assertEqual(state['release'], 'test-update')
+        self.assertEqual(state['sources'], old['sources'])
+        self.assertEqual(state['steps']['dkb_data'], old['steps']['dkb_data'])
+
+        # Even an internally valid image must match the install's recorded RomFS hash.
+        (self.romfs / 'other.bin').write_bytes(b'changed RomFS')
+        other_pack = self.loose_pack(self.romfs)
+        for name in ('romfs.bin', 'index.json'):
+            shutil.copyfile(other_pack / name, self.dest / 'romfs' / name)
+        code, events = self.run_install()
+        self.assertEqual(code, 1, events)
+        self.assertIn('dkb.input_changed', [e.get('id') for e in events])
+
+    def test_changed_nup_is_read_when_present_or_explicitly_selected(self):
+        self.write_nup()
+        self.assertEqual(self.run_install()[0], 0)
+        for name in ('game.nup', 'different.nup'):
+            with self.subTest(archive=name):
+                (self.romfs / 'other.bin').write_bytes(name.encode())
+                path = self.write_nup(name=name)
+                if name == 'game.nup':
+                    self.options.nup = None  # use the original archive at its recorded path
+                self.calls.clear()
+                code, events = self.run_install()
+                self.assertEqual(code, 0, events)
+                self.assertIn('dkb_data', [step for step, _ in self.calls])
+                state = b.statefile.load(self.dest, b.STATE)
+                self.assertEqual(state['sources']['nup'], str(path.resolve()))
+                self.assertEqual(b.sha256(self.dest / 'romfs/romfs.bin'),
+                                 b.sha256(self.loose_pack(self.romfs) / 'romfs.bin'))
+
     def test_nup_with_update_builds_the_update_with_merged_romfs(self):
         base_romfs = tree(self.romfs)
         base_exefs = tree(self.exefs)

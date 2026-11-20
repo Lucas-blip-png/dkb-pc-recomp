@@ -135,10 +135,12 @@ Cancellation stops the installer's child process tree, leaves completed steps re
 source files, saves or other user settings. Partial files are not recorded as completed steps.
 
 Resume with the same command, or `python -m installer --game bananza --dest "<install folder>"`. Recorded source and
-tool paths are reused, input contents are fingerprinted again, and intact completed steps are skipped. Keep the source
-folders available until setup completes. `--verify` also hashes kept output. Changed input, generator, required patch
-table, runtime, dependencies or translator identity invalidates the corresponding steps. `--temp` selects a workspace
-base; it is kept separate from the destination and sources. Re-running setup preserves `profile/`.
+tool paths are reused, input contents are fingerprinted again, and intact completed steps are skipped. If the recorded
+`.nup` or dump folders have moved or been removed, leave the source fields empty to reuse and verify the installed
+ExeFS and packed RomFS. A loose in-place RomFS still needs its original folder. `--verify` also hashes kept output.
+Changed input, generator, required patch table, runtime, dependencies or translator identity invalidates the
+corresponding steps. `--temp` selects a workspace base, separate from the destination and sources. Re-running setup
+preserves `profile/`.
 
 A finished Bananza install keeps its generated C and objects in the work folder so a later run does not lift or compile
 again. `python -m installer --dest "<install folder>" --clean` (add `--temp` if setup used it) deletes that folder, only
@@ -242,9 +244,9 @@ asks once. `--no-update-check` and `DKB_NO_UPDATE_CHECK=1` turn it off as well.
    left behind.
 6. It runs the setup on the recorded install folder (`--dest` only, as a resume). The step keys decide what runs
    again: a release that changes the runtime recompiles, one that changes the lifter relifts, one that changes nothing
-   game-derived skips the build. For 3.2.0 the generated code and objects in the shared `temp/` are reused. The dump
-   recorded at install is read again only when the data step must run again, so keep it where it was. Saves
-   (`profile/`) and the `dkb.ini` settings are kept, as on every setup run.
+   game-derived skips the build. For 3.2.0 the generated code and objects in the shared `temp/` are reused. If the
+   recorded dump is unavailable, setup verifies and reuses the installed ExeFS and packed RomFS. Saves (`profile/`)
+   and the `dkb.ini` settings are kept, as on every setup run.
 
 A failure in the tools part (steps 1 to 4) changes nothing that runs: the installed version and the game folder are
 as they were. A failure or cancel of the setup run in step 6 leaves what the setup's resume handles. Before a rerun
