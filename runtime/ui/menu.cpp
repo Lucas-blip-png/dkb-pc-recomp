@@ -850,15 +850,22 @@ static bool settings_section(UiTextId title, const char *id, bool first = false)
     return open;
 }
 
+static void row_dkb_preset(void) {
+    if (!strcmp(cfg_device_profile(), "deck")) {
+        opt_disable_next(UI_MENU_PRESET_DECK_ACTIVE);
+        opt_button("TOTK_PRESET", UI_MENU_PRESET, UI_MENU_PRESET_DECK_DESC);
+        return;
+    }
+    static const UiTextId presets[] = {UI_MENU_PRESET_CUSTOM, UI_MENU_PRESET_RECOMMENDED, UI_MENU_PRESET_MINIMUM,
+                                       UI_MENU_PRESET_LOW, UI_MENU_PRESET_MEDIUM, UI_MENU_PRESET_HIGH,
+                                       UI_MENU_PRESET_ULTRA};
+    opt_choice("TOTK_PRESET", UI_MENU_PRESET, presets, 7, UI_MENU_PRESET_DESC);
+}
+
 static void tab_display(float scale) {
     opt_begin("##screen", scale);
     if (settings_section(UI_MENU_RESOLUTION_GROUP, "resolution", true)) {
-        if (!rt_game_version) {   // cfg.c PRESETS: the options below that the player set by hand win over it
-            static const UiTextId presets[] = {UI_MENU_PRESET_CUSTOM, UI_MENU_PRESET_RECOMMENDED, UI_MENU_PRESET_MINIMUM,
-                                               UI_MENU_PRESET_LOW, UI_MENU_PRESET_MEDIUM, UI_MENU_PRESET_HIGH,
-                                               UI_MENU_PRESET_ULTRA};
-            opt_choice("TOTK_PRESET", UI_MENU_PRESET, presets, 7, UI_MENU_PRESET_DESC);
-        }
+        if (!rt_game_version) row_dkb_preset();
         row_window_mode();
         if (!rt_game_version) row_dkb_resolution();
         else row_output_res();

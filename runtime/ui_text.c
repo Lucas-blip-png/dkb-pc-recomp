@@ -154,6 +154,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_PRESET_CUSTOM] = "Custom", [UI_MENU_PRESET_RECOMMENDED] = "Recommended", [UI_MENU_PRESET_MINIMUM] = "1 Minimum",
     [UI_MENU_PRESET_LOW] = "2 Low", [UI_MENU_PRESET_MEDIUM] = "3 Medium", [UI_MENU_PRESET_HIGH] = "4 High",
     [UI_MENU_PRESET_ULTRA] = "5 Ultra",
+    [UI_MENU_PRESET_DECK_ACTIVE] = "Steam Deck profile active",
+    [UI_MENU_PRESET_DECK_DESC] = "The Steam Deck profile supplies its own defaults. You can adjust individual settings. "
+                                 "To use performance presets, set device_profile to desktop and restart.",
     [UI_MENU_DLSS_MODE] = "Upscaler quality mode",
     [UI_MENU_DLSS_MODE_DESC] = "How far the 3D scene is scaled up by DLSS, FSR 3.1 or FSR 4: DLAA draws it at the output size, "
                                "Ultra Performance at a third of it. Used while the 3D scene resolution is Auto. Applies at the next start.",
@@ -577,6 +580,9 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_PRESET_CUSTOM] = "Свои настройки", [UI_MENU_PRESET_RECOMMENDED] = "Рекомендуемый",
     [UI_MENU_PRESET_MINIMUM] = "1 Минимальный", [UI_MENU_PRESET_LOW] = "2 Низкий", [UI_MENU_PRESET_MEDIUM] = "3 Средний",
     [UI_MENU_PRESET_HIGH] = "4 Высокий", [UI_MENU_PRESET_ULTRA] = "5 Ультра",
+    [UI_MENU_PRESET_DECK_ACTIVE] = "Активен профиль Steam Deck",
+    [UI_MENU_PRESET_DECK_DESC] = "Профиль Steam Deck задаёт свои значения по умолчанию. Отдельные параметры можно менять вручную. "
+                                 "Чтобы выбирать наборы настроек, задайте для device_profile значение desktop и перезапустите игру.",
     [UI_MENU_DLSS_MODE] = "Режим качества апскейлера",
     [UI_MENU_DLSS_MODE_DESC] = "Во сколько раз DLSS, FSR 3.1 или FSR 4 увеличивают 3D-сцену: DLAA рисует её в размере "
                                "вывода, «Ультра-производительность» втрое меньше. Работает, пока разрешение 3D-сцены «Авто». "
