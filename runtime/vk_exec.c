@@ -2968,7 +2968,11 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
     npiece = 0;   // par_piece_key counts the pieces of each target set per submission
     x_here = 1;
     int memory = n || work;
-    if (memory) vk_mem_mirror_begin(), vk_usnap_begin(handles, n, fence);
+    if (memory) {
+        vk_usnap_cpu_reads(n && vk_exec_draw_merge_on());
+        vk_mem_mirror_begin();
+        vk_usnap_begin(handles, n, fence);
+    }
     P.next = NULL;
     if (work) work(ex, context);
     else {

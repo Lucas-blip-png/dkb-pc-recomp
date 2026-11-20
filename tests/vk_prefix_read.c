@@ -77,6 +77,8 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t f) {
     NEED(x_here && f == X.fence && (!n || handles)); snapshot_begin++;
 }
 void vk_usnap_end(uint64_t f) { NEED(!x_here && f == X.fence); snapshot_end++; }
+void vk_usnap_cpu_reads(int on) { (void)on; }
+int vk_exec_draw_merge_on(void) { return 0; }
 void vk_exec_pass_end(VkExec *ex) { NEED(ex == &X); ex->in_pass = 0; }
 static void par_flush(VkExec *ex) { (void)ex; }
 // No pass end is held back (TOTK_PAR_DEFER off): nothing to settle, and no slice contexts wait for their merge.

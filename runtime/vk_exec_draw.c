@@ -4206,10 +4206,9 @@ static void merge_pick(VkExec *ex, VkPipeState *s, VkPipeline *p, const VkPipeIn
         uint8_t *dst = scratch(ex, (uint64_t)n * MERGE_BLOCK, &b, &o);
         for (int i = 0; i < n; i++, dst += MERGE_BLOCK) {
             uint32_t sz = dc->MR.size[k][i];
-            VkDescriptorBufferInfo bi;
             const void *src = NULL;
             // As ubo_info would bind it: the snapshot range at the uniform alignment; a zero size binds zeros.
-            if (sz && (!vk_usnap_find(dc->MR.addr[k][i], sz, LIM.ubo_align, &bi) || !(src = vk_usnap_bytes(dc->MR.addr[k][i], sz))))
+            if (sz && !(src = vk_usnap_bytes_aligned(dc->MR.addr[k][i], sz, LIM.ubo_align)))
                 goto fall;
             if (sz) memcpy(dst, src, sz);
             if (sz < MERGE_BLOCK) memset(dst + sz, 0, MERGE_BLOCK - sz);
@@ -5332,9 +5331,14 @@ void vk_exec_draw_prefetch(VkExec *ex, uint32_t op, const void *payload) {
 // instances are rasterized in order, so blending and depth see the draws as they were. "ab" alternates with the draw
 // by draw replay in blocks (rt_ab).
 
+DRAW_SHARED int draw_merge_mode_val DRAW_SHARED_INIT(-1);
+
 static int draw_merge_mode(void) {
-    static int mode = -1;
-    if (mode < 0 && (mode = rt_knob("DRAW_MERGE", "0"))) vk_usnap_cpu_reads();   // merge_pick reads every block it copies
+    int mode = __atomic_load_n(&draw_merge_mode_val, __ATOMIC_ACQUIRE);
+    if (mode < 0) {
+        mode = rt_knob("DRAW_MERGE", "0");
+        __atomic_store_n(&draw_merge_mode_val, mode, __ATOMIC_RELEASE);
+    }
     return mode;
 }
 
