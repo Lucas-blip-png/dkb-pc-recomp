@@ -1505,9 +1505,13 @@ static void perf_picture(const MenuTarget *t, const ImVec4 &c) {
     } else {
         snprintf(v[3], sizeof v[3], "%s", menu_text(t->scaler ? UI_MENU_OV_SCALE_BILINEAR : UI_MENU_OV_SCALE_NONE));
     }
-    double hz = frame_step_limit_hz();
-    snprintf(v[4], sizeof v[4], "%s", menu_text(UI_MENU_OV_NONE));
-    if (hz > 0) snprintf(v[4], sizeof v[4], menu_text(UI_MENU_OV_FPS), hz);
+    if (!rt_game_version && !frame_step_realtime()) {
+        snprintf(v[4], sizeof v[4], "%s", menu_text(UI_MENU_OV_GAME_TIMING));
+    } else {
+        double hz = frame_step_limit_hz();
+        if (hz > 0) snprintf(v[4], sizeof v[4], menu_text(UI_MENU_OV_FPS), hz);
+        else snprintf(v[4], sizeof v[4], "%s", menu_text(UI_MENU_OV_NONE));
+    }
     const char *pm = present_name(gfx_window_present_mode());
     snprintf(v[5], sizeof v[5], "%s", pm ? pm : menu_text(UI_MENU_OV_NONE));
     static const UiTextId labels[6] = {UI_MENU_OV_WINDOW, UI_MENU_OV_OUTPUT, UI_MENU_OV_SCENE,
