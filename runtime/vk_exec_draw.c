@@ -5349,19 +5349,19 @@ void vk_exec_draw_prefetch(VkExec *ex, uint32_t op, const void *payload) {
 //
 // Bananza draws much of its scenery as runs of one indexed draw repeated with only uniform block c4 (256 bytes, an
 // object's transform and parameters) rebound between the draws: in the Hilltop area about 17,000 draws a frame are in
-// runs of 16 or more, and each costs the recording thread the descriptor work of a whole draw. With TOTK_DRAW_MERGE=1
-// such a run becomes one instanced draw per MERGE_MAX draws: the run's c4 blocks are copied one after another into
-// transient memory, and the vertex stage, and the fragment stage if it reads c4, are variants that read block
-// gl_InstanceIndex of it (gfx_shader_instance_c4; the vertex stage hands the instance to the fragment stage). The
-// instances are rasterized in order, so blending and depth see the draws as they were. "ab" alternates with the draw
-// by draw replay in blocks (rt_ab).
+// runs of 16 or more, and each costs the recording thread the descriptor work of a whole draw. On by default
+// (TOTK_DRAW_MERGE=0 turns it off): such a run becomes one instanced draw per MERGE_MAX draws: the run's c4 blocks are
+// copied one after another into transient memory, and the vertex stage, and the fragment stage if it reads c4, are
+// variants that read block gl_InstanceIndex of it (gfx_shader_instance_c4; the vertex stage hands the instance to the
+// fragment stage). The instances are rasterized in order, so blending and depth see the draws as they were. "ab"
+// alternates with the draw by draw replay in blocks (rt_ab).
 
 DRAW_SHARED int draw_merge_mode_val DRAW_SHARED_INIT(-1);
 
 static int draw_merge_mode(void) {
     int mode = __atomic_load_n(&draw_merge_mode_val, __ATOMIC_ACQUIRE);
     if (mode < 0) {
-        mode = rt_knob("DRAW_MERGE", "0");
+        mode = rt_knob("DRAW_MERGE", "1");
         __atomic_store_n(&draw_merge_mode_val, mode, __ATOMIC_RELEASE);
     }
     return mode;
