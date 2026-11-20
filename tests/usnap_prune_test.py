@@ -36,6 +36,7 @@ static void rt_fatal(const char *m) { puts(m); fflush(stdout); abort(); }
 typedef struct { uint64_t lo, hi, fence; } Wrote;
 typedef struct { uint64_t lo, hi; } Rng;
 #define ALIGN 256u
+#define RNG_C4 1ull
 static struct { Wrote *wr; int nwr, cwr; int fast; Rng *col; int ncol, ccol; uint64_t repeats; int mode, on;
                 uint64_t wr_added, wr_coalesced, fence; } U;
 static void *grow(void *p, int *cap, size_t elem) {
@@ -253,6 +254,102 @@ static int seen_cases(void) {
     return fails;
 }
 
+// Mixed c4/non-c4 arrival orders in add_range (RNG_C4 bit in Rng.lo) and sort_col parity across fast=0/1.
+typedef struct { uint64_t lo, hi, c4; } MergedRng;
+static int merge_col(MergedRng *out) {
+    int m = 0;
+    for (int i = 0; i < U.ncol;) {
+        uint64_t lo = U.col[i].lo & ~RNG_C4, hi = U.col[i].hi, c4 = U.col[i].lo & RNG_C4;
+        for (i++; i < U.ncol && (U.col[i].lo & ~RNG_C4) <= hi; i++) {
+            c4 |= U.col[i].lo & RNG_C4;
+            if (U.col[i].hi > hi) hi = U.col[i].hi;
+        }
+        out[m++] = (MergedRng){lo, hi, c4};
+    }
+    return m;
+}
+static int c4_seen_cases(void) {
+    int fails = 0;
+    // Case 1: non-c4 followed by c4 upgrades the slot and appends; later non-c4 or c4 repeats are skipped.
+    U.fast = 1, U.ncol = 0, U.repeats = 0;
+    memset(seen, 0, sizeof seen);
+    add_range((Rng){0x400001000ull, 0x400001100ull});
+    add_range((Rng){0x400001000ull | RNG_C4, 0x400001100ull});
+    add_range((Rng){0x400001000ull, 0x400001100ull});
+    add_range((Rng){0x400001000ull | RNG_C4, 0x400001100ull});
+    checks++;
+    if (U.ncol != 2 || U.repeats != 2 || (U.col[1].lo & RNG_C4) == 0)
+        fails++, printf("FAIL: c4 upgrade case ncol=%d repeats=%llu\n", U.ncol, (unsigned long long)U.repeats);
+    // Case 2: c4 followed by non-c4 and c4 skips both.
+    U.ncol = 0, U.repeats = 0;
+    memset(seen, 0, sizeof seen);
+    add_range((Rng){0x400002000ull | RNG_C4, 0x400002100ull});
+    add_range((Rng){0x400002000ull, 0x400002100ull});
+    add_range((Rng){0x400002000ull | RNG_C4, 0x400002100ull});
+    checks++;
+    if (U.ncol != 1 || U.repeats != 2 || (U.col[0].lo & RNG_C4) == 0)
+        fails++, printf("FAIL: c4-first case ncol=%d repeats=%llu\n", U.ncol, (unsigned long long)U.repeats);
+    // Randomized streams: merged (lo, hi, c4) under fast=1 must equal fast=0.
+    static MergedRng m0[50000], m1[50000];
+    for (int round = 0; round < 16; round++) {
+        int n = 1 + (int)(rnd() % 20000), pool = 1 + (int)(rnd() % 1500);
+        for (int i = 0; i < n; i++) {
+            uint64_t k = rnd() % (uint64_t)pool;
+            uint64_t lo = 0x400000000ull + k * ALIGN * (1 + k % 5);
+            uint64_t hi = lo + 16 + (rnd() % 3) * 256;
+            uint64_t c4 = (rnd() % 5 == 0) ? RNG_C4 : 0;
+            given[i] = (Rng){lo | c4, hi};
+        }
+        int nm[2];
+        for (int fast = 0; fast < 2; fast++) {
+            U.fast = fast, U.ncol = 0, U.repeats = 0;
+            memset(seen, 0, sizeof seen);
+            for (int i = 0; i < n; i++) add_range(given[i]);
+            if (fast) {
+                checks++;
+                if ((uint64_t)U.ncol + U.repeats != (uint64_t)n)
+                    fails++, printf("FAIL: c4 round %d ncol+repeats mismatch\n", round);
+            }
+            sort_col();
+            nm[fast] = merge_col(fast ? m1 : m0);
+        }
+        checks++;
+        if (nm[0] != nm[1] || memcmp(m0, m1, (size_t)nm[0] * sizeof *m0))
+            fails++, printf("FAIL: c4 merged mismatch round %d (%d vs %d)\n", round, nm[0], nm[1]);
+    }
+    // sort_col parity between fast=0 and fast=1 with mixed RNG_C4 across span boundaries.
+    static const uint64_t spans[] = {2047, 2048, (1u << 22) - 1, 1u << 22};
+    if (U.ccol < 20000) U.col = realloc(U.col, 20000 * sizeof *U.col), U.ccol = 20000;
+    if (!U.col) return fails + 1;
+    static Rng r[2][20000];
+    for (int s = 0; s < 4; s++)
+        for (int round = 0; round < 6; round++) {
+            int n = 2 + (int)(rnd() % 19998);
+            uint64_t base = 0x200000000ull + rnd() % 4096 * ALIGN;
+            for (int i = 0; i < n; i++) {
+                uint64_t k = i == 0 ? 0 : i == 1 ? spans[s] : rnd() % (spans[s] + 1);
+                uint64_t c4 = (rnd() & 1) ? RNG_C4 : 0;
+                c0[i] = (Rng){(base + k * ALIGN) | c4, base + k * ALIGN + 16 + rnd() % 4096};
+            }
+            for (int fast = 0; fast < 2; fast++) {
+                U.fast = fast, U.ncol = n;
+                memcpy(U.col, c0, (size_t)n * sizeof *c0);
+                sort_col();
+                memcpy(r[fast], U.col, (size_t)n * sizeof *c0);
+            }
+            checks += 2;
+            if (memcmp(r[0], r[1], (size_t)n * sizeof *c0))
+                fails++, printf("FAIL: c4 sort_col span %llu: modes differ\n", (unsigned long long)spans[s]);
+            for (int i = 1; i < n; i++)
+                if ((r[1][i - 1].lo & ~RNG_C4) > (r[1][i].lo & ~RNG_C4)) {
+                    fails++, printf("FAIL: c4 sort_col span %llu: not sorted\n", (unsigned long long)spans[s]);
+                    break;
+                }
+        }
+    U.fast = 0, U.ncol = 0;
+    return fails;
+}
+
 // TOTK_USNAP_DROP_LOCAL: per submission, random writes (often repeating a thread's previous range, sometimes with an
 // older fence) noted by six threads. The reference makes them in their global order with drop_local 0 (into U.wr, under
 // the lock); the other with drop_local 1, each into its thread's list, then wr_take with the lists linked in a shuffled
@@ -379,6 +476,7 @@ int main(void) {
     fails += sort_cases();
     fails += col_cases();
     fails += seen_cases();
+    fails += c4_seen_cases();
     for (int fast = 0; fast < 2; fast++) {
         U.fast = fast;
         fails += coalesce_cases();

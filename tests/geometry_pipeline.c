@@ -20,8 +20,11 @@ uint64_t perf_begin(void) { return 0; }
 void perf_end(int kind, uint64_t start) { (void)kind; (void)start; }
 void perf_count(int kind) { (void)kind; }
 void rt_log(const char *format, ...) { (void)format; }
-// gfx_spirv_final reads the FMZ switches; every other key stays forbidden.
-const char *cfg_get(const char *name) { if (!strcmp(name, "TOTK_FMZ") || !strcmp(name, "TOTK_FMZ_SEL")) return NULL; abort(); }
+// gfx_spirv_final reads the FMZ switches and pcache_gate_on reads TOTK_PCACHE_GATE; every other key stays forbidden.
+const char *cfg_get(const char *name) {
+    if (!strcmp(name, "TOTK_FMZ") || !strcmp(name, "TOTK_FMZ_SEL") || !strcmp(name, "TOTK_PCACHE_GATE")) return NULL;
+    abort();
+}
 int cfg_int(const char *name) { (void)name; abort(); }
 int tex_vk_format(int format, TexVkFormat *out) { (void)format; (void)out; abort(); }
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFormatProperties(VkPhysicalDevice device,

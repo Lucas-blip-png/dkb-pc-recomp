@@ -2276,10 +2276,11 @@ static struct {
 // with another magic, version or record size is ignored and rewritten. Bump KEYS_VERSION when VkPipeState or the
 // record changes meaning without changing size.
 #define KEYS_VERSION 3                 // 3: shaders named by input id (gfx_shader.c)
+enum { KEY_VS_INST_C4 = 1u << 0, KEY_FS_INST_C4 = 1u << 1 };
 typedef struct { char magic[8]; uint32_t version, rec_size; } KeysHeader;
 typedef struct {
     uint8_t vs[32], fs[32];            // gfx_shader_input_id of each stage; fs all zero with has_fs 0
-    uint32_t has_fs, pad;
+    uint32_t has_fs, flags;            // flags: KEY_*_INST_C4 (0 in earlier v3 files, where this word was pad)
     // Frozen two-stage prefix. Adding the experimental GS pointer must not
     // change existing version-3 records or reinterpret their bytes at boot.
     _Alignas(VkPipeState) uint8_t state[offsetof(VkPipeState, gs)];
@@ -2336,6 +2337,8 @@ static void rec_fill(KeyRec *r, const VkPipeState *s) {
     memset(r, 0, sizeof *r);
     memcpy(r->vs, gfx_shader_input_id(s->vs), 32);
     if (s->fs) memcpy(r->fs, gfx_shader_input_id(s->fs), 32), r->has_fs = 1;
+    if (gfx_shader_is_variant(s->vs)) r->flags |= KEY_VS_INST_C4;
+    if (s->fs && gfx_shader_is_variant(s->fs)) r->flags |= KEY_FS_INST_C4;
     VkPipeState legacy = *s;
     legacy.vs = legacy.fs = legacy.gs = NULL;
     legacy.prim_restart = 0;   // dynamic state: the same pipeline either way
@@ -2345,8 +2348,6 @@ static void rec_fill(KeyRec *r, const VkPipeState *s) {
 // A pipeline was built for a draw: queue its record for the file. Caller holds P.lock.
 static void keys_note(const VkPipeState *s) {
     if (s->gs || !A.on || !K.path[0]) return;             // GS prewarm records need a future explicit format
-    // A draw-merge copy (gfx_shader_instance_c4) has its source's input id: its record would name the source's pipeline
-    if (gfx_shader_is_variant(s->vs) || (s->fs && gfx_shader_is_variant(s->fs))) return;
     KeyRec r;
     rec_fill(&r, s);
     if (!seen_add(rec_hash(&r))) return;
@@ -2903,6 +2904,10 @@ static void warm_builder(void *arg) {
 
 static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]);
 
+static const GfxShader *prewarm_stage(const GfxShader *s, uint32_t flag) {
+    return s && flag ? gfx_shader_instance_c4(s) : s;
+}
+
 void vk_pipeline_prewarm(void) {
     const char *gpu = rt_config()->gpu;
     uint32_t pr_hist[16] = {0}, fs_hist[4] = {0};   // library state of the recorded pipelines (lb_start)
@@ -2944,12 +2949,15 @@ void vk_pipeline_prewarm(void) {
     if (P.indep) {   // vertex output unions first: workers may take a job before the queue is complete
         uint64_t pair = 0, uni = 0, pairs = 0;
         for (size_t i = 0; i < n; i++) {
+            if (r[i].flags & ~(KEY_VS_INST_C4 | KEY_FS_INST_C4)) continue;
             const uint8_t (*v)[32] = bsearch(r[i].vs, ids, u, 32, id_cmp);
             const uint8_t (*f)[32] = r[i].has_fs ? bsearch(r[i].fs, ids, u, 32, id_cmp) : NULL;
-            if (!v || !f || !sh[v - ids] || !sh[f - ids]) continue;
+            const GfxShader *vs = prewarm_stage(v ? sh[v - ids] : NULL, r[i].flags & KEY_VS_INST_C4);
+            const GfxShader *fs = prewarm_stage(f ? sh[f - ids] : NULL, r[i].flags & KEY_FS_INST_C4);
+            if (!vs || !fs) continue;
             GfxShaderIo io[32];
-            vs_outs(sh[v - ids], sh[f - ids], io);
-            pair += (uint64_t)__builtin_popcount(gfx_shader_inputs(sh[f - ids], NULL)), pairs++;
+            vs_outs(vs, fs, io);
+            pair += (uint64_t)__builtin_popcount(gfx_shader_inputs(fs, NULL)), pairs++;
         }
         for (uint32_t j = 0; j < VS_OUTS_CAP; j++) uni += VO.vs[j] ? (uint64_t)__builtin_popcount(VO.mask[j]) : 0;
         rt_log("vk_pipeline: vertex output unions: %u vertex shaders, %.2f locations each; %llu pairs read %.2f each",
@@ -2961,9 +2969,14 @@ void vk_pipeline_prewarm(void) {
     K.t0 = t1;
     K.loading = 1;
     for (size_t i = 0; i < n; i++) {
+        if (r[i].flags & ~(KEY_VS_INST_C4 | KEY_FS_INST_C4)) {
+            dropped++;
+            continue;
+        }
         const uint8_t (*v)[32] = bsearch(r[i].vs, ids, u, 32, id_cmp);
         const uint8_t (*f)[32] = r[i].has_fs ? bsearch(r[i].fs, ids, u, 32, id_cmp) : NULL;
-        const GfxShader *vs = v ? sh[v - ids] : NULL, *fs = f ? sh[f - ids] : NULL;
+        const GfxShader *vs = prewarm_stage(v ? sh[v - ids] : NULL, r[i].flags & KEY_VS_INST_C4);
+        const GfxShader *fs = prewarm_stage(f ? sh[f - ids] : NULL, r[i].flags & KEY_FS_INST_C4);
         if (!vs || (r[i].has_fs && !fs)) {
             dropped++;
             continue;

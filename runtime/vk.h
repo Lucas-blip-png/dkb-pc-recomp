@@ -373,7 +373,8 @@ void vk_usnap_quiet(int on);   // the calling thread's finds are not counted whi
 uint64_t vk_usnap_drops(void);
 void vk_usnap_view(uint64_t upto);
 const void *vk_usnap_bytes(uint64_t addr, uint64_t n);   // the copy's bytes for the CPU; NULL: not copied or dropped
-void vk_usnap_cpu_reads(void);   // vk_usnap_bytes is read often: keep each copy in cached host memory too
+const void *vk_usnap_bytes_aligned(uint64_t addr, uint64_t n, uint64_t align);   // same, requiring arena offset % align == 0
+void vk_usnap_cpu_reads(int on);   // on: keep c4 copies in cached host memory for subsequent submissions
 int vk_usnap_covers(uint64_t addr, uint64_t n);   // a copy of this submission overlaps the range
 void vk_usnap_drop(uint64_t addr, uint64_t n);   // the replay makes the GPU write [addr, addr+n) of guest memory
 void vk_usnap_drop_many(const uint64_t (*r)[2], uint32_t n);   // vk_usnap_drop of each [r[i][0], r[i][1]), one lock

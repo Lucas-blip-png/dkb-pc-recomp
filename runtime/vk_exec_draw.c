@@ -4156,6 +4156,23 @@ static void merge_count(int k, int64_t n) {
            c[MC_SNAP] / fr);
 }
 
+static uint32_t pm_set_of(const VkPipeState *s) {
+    return (uint32_t)((((uintptr_t)s->vs >> 4) * 0x9e3779b1u ^ ((uintptr_t)s->fs >> 4)) * 0x85ebca6bu >> 27) &
+           (PM_SETS - 1);
+}
+
+static const VkPipeInfo *pm_way_find(const DrawCtx *dc, uint32_t set, const VkPipeState *s) {
+    for (int w = 0; w < PM_WAYS; w++)
+        if (dc->PM.way[set][w].info && !memcmp(&dc->PM.way[set][w].s, s, sizeof *s))
+            return dc->PM.way[set][w].info;
+    return NULL;
+}
+
+static void pm_way_put(DrawCtx *dc, uint32_t set, const VkPipeState *s, const VkPipeInfo *info) {
+    int w = dc->PM.next[set]++ % PM_WAYS;
+    dc->PM.way[set][w].s = *s, dc->PM.way[set][w].info = info;
+}
+
 // The draw being prepared heads a run of dc->MR.n draws (vk_exec_draw_merge) that differ only in their c4 blocks.
 // When the pipeline found for it, *p and *info under state *s, can take them as instances, this puts in its place
 // the one whose vertex stage, and fragment stage if it reads c4, index c4 by the instance (gfx_shader_instance_c4),
@@ -4191,7 +4208,15 @@ static void merge_pick(VkExec *ex, VkPipeState *s, VkPipeline *p, const VkPipeIn
     why = MC_PENDING;
     VkPipeState s2 = *s;
     s2.vs = vs, s2.fs = fs;
-    p2 = vk_pipeline_graphics_async(&s2, &info2, &pending, 0);
+    int pmemo = pipe_memo_on(dc);
+    uint32_t set2 = pmemo ? pm_set_of(&s2) : 0;
+    if (pmemo && (info2 = pm_way_find(dc, set2, &s2))) {
+        p2 = __atomic_load_n(&info2->pipeline, __ATOMIC_ACQUIRE);
+        pending = 0;
+    } else {
+        p2 = vk_pipeline_graphics_async(&s2, &info2, &pending, 0);
+        if (pmemo && !pending && p2 && info2) pm_way_put(dc, set2, &s2, info2);
+    }
     if (pending || !p2 || !info2) goto fall;
     why = MC_SNAP;
     for (int k = 0; k < 2; k++) {
@@ -4206,10 +4231,9 @@ static void merge_pick(VkExec *ex, VkPipeState *s, VkPipeline *p, const VkPipeIn
         uint8_t *dst = scratch(ex, (uint64_t)n * MERGE_BLOCK, &b, &o);
         for (int i = 0; i < n; i++, dst += MERGE_BLOCK) {
             uint32_t sz = dc->MR.size[k][i];
-            VkDescriptorBufferInfo bi;
             const void *src = NULL;
             // As ubo_info would bind it: the snapshot range at the uniform alignment; a zero size binds zeros.
-            if (sz && (!vk_usnap_find(dc->MR.addr[k][i], sz, LIM.ubo_align, &bi) || !(src = vk_usnap_bytes(dc->MR.addr[k][i], sz))))
+            if (sz && !(src = vk_usnap_bytes_aligned(dc->MR.addr[k][i], sz, LIM.ubo_align)))
                 goto fall;
             if (sz) memcpy(dst, src, sz);
             if (sz < MERGE_BLOCK) memset(dst + sz, 0, MERGE_BLOCK - sz);
@@ -4352,11 +4376,12 @@ static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
     const char *why = NULL;
     uint64_t w0 = 0;
     int pmemo = pipe_memo_on(dc);
-    uint32_t pm_set = (uint32_t)((((uintptr_t)s.vs >> 4) * 0x9e3779b1u ^ ((uintptr_t)s.fs >> 4)) * 0x85ebca6bu >> 27) & (PM_SETS - 1);
+    uint32_t pm_set = pm_set_of(&s);
     int pm_hit = pmemo && dc->PM.valid && !memcmp(&dc->PM.s, &s, sizeof s);
-    for (int w = 0; pmemo && !pm_hit && w < PM_WAYS; w++)
-        if (dc->PM.way[pm_set][w].info && !memcmp(&dc->PM.way[pm_set][w].s, &s, sizeof s))
-            pm_hit = 1, dc->PM.valid = 1, dc->PM.s = s, dc->PM.info = dc->PM.way[pm_set][w].info;
+    if (pmemo && !pm_hit) {
+        const VkPipeInfo *wi = pm_way_find(dc, pm_set, &s);
+        if (wi) pm_hit = 1, dc->PM.valid = 1, dc->PM.s = s, dc->PM.info = wi;
+    }
     if (pm_hit) {
         info = dc->PM.info, pending = 0;
         p = __atomic_load_n(&info->pipeline, __ATOMIC_ACQUIRE);
@@ -4379,8 +4404,7 @@ static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
         dc->PM.valid = !pending && p && info;
         if (dc->PM.valid) {
             dc->PM.s = s, dc->PM.info = info;
-            int w = dc->PM.next[pm_set]++ % PM_WAYS;
-            dc->PM.way[pm_set][w].s = s, dc->PM.way[pm_set][w].info = info;
+            pm_way_put(dc, pm_set, &s, info);
         }
     }
     uint64_t waited = w0 ? kern_now_ns() - w0 : 0;
@@ -5325,16 +5349,21 @@ void vk_exec_draw_prefetch(VkExec *ex, uint32_t op, const void *payload) {
 //
 // Bananza draws much of its scenery as runs of one indexed draw repeated with only uniform block c4 (256 bytes, an
 // object's transform and parameters) rebound between the draws: in the Hilltop area about 17,000 draws a frame are in
-// runs of 16 or more, and each costs the recording thread the descriptor work of a whole draw. With TOTK_DRAW_MERGE=1
-// such a run becomes one instanced draw per MERGE_MAX draws: the run's c4 blocks are copied one after another into
-// transient memory, and the vertex stage, and the fragment stage if it reads c4, are variants that read block
-// gl_InstanceIndex of it (gfx_shader_instance_c4; the vertex stage hands the instance to the fragment stage). The
-// instances are rasterized in order, so blending and depth see the draws as they were. "ab" alternates with the draw
-// by draw replay in blocks (rt_ab).
+// runs of 16 or more, and each costs the recording thread the descriptor work of a whole draw. On by default
+// (TOTK_DRAW_MERGE=0 turns it off): such a run becomes one instanced draw per MERGE_MAX draws: the run's c4 blocks are
+// copied one after another into transient memory, and the vertex stage, and the fragment stage if it reads c4, are
+// variants that read block gl_InstanceIndex of it (gfx_shader_instance_c4; the vertex stage hands the instance to the
+// fragment stage). The instances are rasterized in order, so blending and depth see the draws as they were. "ab"
+// alternates with the draw by draw replay in blocks (rt_ab).
+
+DRAW_SHARED int draw_merge_mode_val DRAW_SHARED_INIT(-1);
 
 static int draw_merge_mode(void) {
-    static int mode = -1;
-    if (mode < 0 && (mode = rt_knob("DRAW_MERGE", "0"))) vk_usnap_cpu_reads();   // merge_pick reads every block it copies
+    int mode = __atomic_load_n(&draw_merge_mode_val, __ATOMIC_ACQUIRE);
+    if (mode < 0) {
+        mode = rt_knob("DRAW_MERGE", "1");
+        __atomic_store_n(&draw_merge_mode_val, mode, __ATOMIC_RELEASE);
+    }
     return mode;
 }
 
