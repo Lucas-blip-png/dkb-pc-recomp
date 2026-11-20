@@ -727,6 +727,50 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
         code, events = self.run_install()
         self.assertEqual(code, 1)
 
+    def test_moved_source_folders_reject_changed_installed_romfs_index(self):
+        self.assertEqual(self.run_install()[0], 0)
+        self.romfs.rename(self.root / 'moved romfs')
+        self.exefs.rename(self.root / 'moved exefs')
+        self.options.exefs = self.options.romfs = None
+        original = b.statefile.load(self.dest, b.STATE)['steps']['dkb_data']
+
+        # Change a file's name without touching the packed image or the index's recorded image checksum.
+        index = self.dest / 'romfs' / 'index.json'
+        original_index = index.read_bytes()
+        manifest = json.loads(original_index)
+        manifest['files'][0]['path'] = 'renamed-resource.bin'
+        index.write_text(json.dumps(manifest), encoding='utf-8')
+        self.calls.clear()
+        for verify in (False, True):
+            with self.subTest(verify=verify):
+                self.options.verify = verify
+                code, events = self.run_install()
+                self.assertEqual(code, 1, events)
+                error = next(e for e in events if e['type'] == 'error')
+                self.assertEqual(error['id'], 'dkb.input_changed')
+                self.assertEqual(error['params']['path'], str(index.resolve()))
+                self.assertEqual(b.statefile.load(self.dest, b.STATE)['steps']['dkb_data'], original)
+                self.assertEqual(self.calls, [])
+
+        index.write_bytes(original_index)
+        code, events = self.run_install()
+        self.assertEqual(code, 0, events)
+        self.assertEqual(self.calls, [])
+
+    def test_moved_source_folders_need_a_recorded_romfs_index_hash(self):
+        self.assertEqual(self.run_install()[0], 0)
+        self.romfs.rename(self.root / 'moved romfs')
+        self.options.exefs = self.options.romfs = None
+        state = b.statefile.load(self.dest, b.STATE)
+        state['steps']['dkb_data'].pop('index_sha256')
+        b.statefile.save(self.dest, state, b.STATE)
+
+        code, events = self.run_install()
+        self.assertEqual(code, 1, events)
+        error = next(e for e in events if e['type'] == 'error')
+        self.assertEqual(error['id'], 'dkb.input_changed')
+        self.assertEqual(error['params']['path'], str(self.dest.resolve() / 'romfs' / 'index.json'))
+
     def test_concurrent_setup_lock_and_release(self):
         self.temp.mkdir()
         first = b.lock_temp(self.temp)

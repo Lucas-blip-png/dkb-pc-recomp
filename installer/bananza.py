@@ -711,16 +711,19 @@ class Data(Step):
 
 
     def verify_in_place(self, ctx):
-        """The ExeFS files against the expected hashes and the packed RomFS against the digest the copying run
-        recorded; nothing is copied, onto itself least of all."""
+        """Check the installed ExeFS and both parts of the packed RomFS before reusing them."""
         expected_exefs(ctx.layout, ctx.dest / 'exefs', ctx.info['game'])
         romfs = ctx.dest / 'romfs'
-        recorded = ctx.state['steps']['dkb_data']['sha256']
-        if pack_manifest(romfs)['romfs_sha256'] != recorded:
+        recorded = ctx.state['steps']['dkb_data']
+        if pack_manifest(romfs)['romfs_sha256'] != recorded['sha256']:
             raise InstallError('dkb.input_changed', path=str(romfs))
+        index = romfs / 'index.json'
+        index_sha256 = sha256(index)
+        if index_sha256 != recorded.get('index_sha256'):
+            raise InstallError('dkb.input_changed', path=str(index))
         image = romfs / 'romfs.bin'
-        return {'sha256': recorded, 'size': image.stat().st_size, 'mtime_ns': image.stat().st_mtime_ns,
-                'index_sha256': sha256(romfs / 'index.json')}
+        return {'sha256': recorded['sha256'], 'size': image.stat().st_size, 'mtime_ns': image.stat().st_mtime_ns,
+                'index_sha256': index_sha256}
 
     def in_place(self, ctx, stage, romfs):
         """index.json of the folder as dkb_pack_romfs.py would pack it (the offsets only size the index), with each
