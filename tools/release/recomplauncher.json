@@ -16,5 +16,40 @@
   "start": {
     "program": ["play.sh"]
   },
-  "saves": ["{install}/game/profile"]
+  "saves": ["{install}/game/profile"],
+  "config": [
+    { "id": "main", "format": "ini", "file": [{ "path": "{install}/game/dkb.ini" }] }
+  ],
+  "settings": [
+    {
+      "id": "perf_overlay",
+      "label": "Performance overlay",
+      "choices": [
+        { "label": "Off", "set": { "perf_overlay": "off" } },
+        { "label": "FPS", "set": { "perf_overlay": "fps" } },
+        { "label": "Large FPS counter", "set": { "perf_overlay": "counter" } },
+        { "label": "Full", "set": { "perf_overlay": "full" } },
+        { "label": "Breakdown", "set": { "perf_overlay": "breakdown" } }
+      ],
+      "defaults": { "perf_overlay": "off" }
+    },
+    {
+      "id": "hdr",
+      "label": "HDR output",
+      "choices": [
+        { "label": "Off", "set": { "hdr": "0" } },
+        { "label": "On", "set": { "hdr": "1" } }
+      ],
+      "defaults": { "hdr": "0" }
+    },
+    {
+      "id": "mouse_camera",
+      "label": "Direct mouse camera",
+      "choices": [
+        { "label": "Off", "set": { "mouse_camera": "0" } },
+        { "label": "On", "set": { "mouse_camera": "1" } }
+      ],
+      "defaults": { "mouse_camera": "0" }
+    }
+  ]
 }

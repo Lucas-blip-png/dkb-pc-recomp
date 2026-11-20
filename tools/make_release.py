@@ -411,7 +411,7 @@ def runtime_lib(out, llvm):
         shutil.copy2(ROOT / 'runtime' / name, rt / name)
 
 
-def build_sources(out):
+def build_sources(out, *, setup_program=None):
     copy_tree(ROOT / 'recomp', out / 'recomp', lambda r: not r.endswith(('.py', '.txt')) or '__pycache__' in r)
     for f in TOOLS_FILES:
         (out / 'tools').mkdir(exist_ok=True)
@@ -428,8 +428,12 @@ def build_sources(out):
         (out / 'data' / 'shader_list.tsv').write_text(text, encoding='utf-8', newline='\n')
     copy_tree(ROOT / 'installer', out / 'installer', lambda r: '__pycache__' in r or r.startswith('launcher/'))
     shutil.copy2(ROOT / 'totk.ini.example', out / ('dkb.ini.example' if GAME == 'dkb' else 'totk.ini.example'))
-    if GAME == 'dkb':   # RecompLauncher's profile for Windows (docs/recomp-launcher.md): the setup exe prepares and plays
-        shutil.copy2(ROOT / 'tools' / 'release' / 'recomplauncher-windows.json', out / 'recomplauncher.json')
+    if GAME == 'dkb':
+        profile = json.loads((ROOT / 'tools' / 'release' / 'recomplauncher.json').read_text(encoding='utf-8'))
+        if setup_program:   # The bundled installers can both prepare and play. Source packages use play.sh.
+            profile['prepare']['program'] = [setup_program]
+            profile['start'] = {'program': [setup_program], 'args': ['--play', '{install}/game']}
+        (out / 'recomplauncher.json').write_text(json.dumps(profile, indent=2) + '\n', encoding='utf-8')
     shutil.copy2(ROOT / 'THIRD_PARTY_NOTICES.md', out / 'THIRD_PARTY_NOTICES.md')
     for lic in sorted(ROOT.glob('LICENSE*')):   # GPL-3.0-or-later, and MIT for the files from TotK Recomp
         shutil.copy2(lic, out / lic.name)
@@ -694,7 +698,7 @@ def main():
     build_bin(out)
     build_deps(out)
     runtime_lib(out, llvm)
-    build_sources(out)
+    build_sources(out, setup_program='DKB-Setup.exe')
     build_launcher(out, llvm)
     collect_licenses(out)
     check_folder(out)

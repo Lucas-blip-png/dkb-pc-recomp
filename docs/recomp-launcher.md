@@ -2,8 +2,9 @@
 
 RecompLauncher is a third-party launcher (elripalda/RecompLauncher) that lists recompiled games, downloads their
 releases and runs them. It lists DKB Recomp since [#213](https://github.com/Lucas-blip-png/dkb-pc-recomp/pull/213).
-It supports the Linux and macOS packages, and the Windows zip carries a profile too (source:
-`tools/release/recomplauncher-windows.json`: `DKB-Setup.exe --prepare ...` to build, `DKB-Setup.exe --play` to start). The Windows installer is separate ([installer.md](installer.md)), and so is
+Every package uses the profile in `tools/release/recomplauncher.json`. Players can set HDR output, the performance
+overlay and the direct mouse camera in the launcher. These settings use the installed game's `game/dkb.ini`.
+The Windows installer is separate ([installer.md](installer.md)), and so is
 the project's own Windows launcher, `DKB-Launcher.exe`, which installs and updates the tools from GitHub releases
 ([installer.md](installer.md), "Launcher and updates").
 
@@ -13,9 +14,10 @@ The package carries `recomplauncher.json` (source: `tools/release/recomplauncher
 
 1. Asks for your own copy of the game: a `.nup` file, or a folder with `exefs/` and `romfs/`. Base 1.0.0 and update
    3.2.0 are both accepted.
-2. Runs the prepare step, `setup.sh --prepare --source <copy> --dest <package folder>/game` (`setup.command` on
-   macOS). The step builds the game on your computer and takes a while. The profile allows 4 hours.
-3. Starts `play.sh`, which runs `game/dkb` from the `game/` folder. If the game is not built yet, it says so and exits.
+2. Runs the prepare step with `--prepare --source <copy> --dest <package folder>/game` using `DKB-Setup.exe` on
+   Windows, `setup.sh` on Linux or `setup.command` on macOS. The profile allows 4 hours for the build.
+3. Starts the installed game. The Windows and bundled Linux installers take `--play <package folder>/game`.
+   The Linux and macOS source packages start `play.sh`.
 4. Backs up `game/profile` (the saves).
 
 `--source PATH` stands for `--nup` (a file) or `--exefs` and `--romfs` (a folder). `--prepare` prints

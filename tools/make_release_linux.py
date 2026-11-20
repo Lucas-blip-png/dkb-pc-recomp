@@ -726,7 +726,7 @@ def main():
     rtlib = runtime_lib(out, llvm, sysroot)
     build_sysroot(out, sysroot, used_sysroot_files(out, llvm, sysroot, rtlib))
     build_python(out, llvm, sysroot)
-    mr.build_sources(out)
+    mr.build_sources(out, setup_program='setup.sh')
     collect_licenses(out, sysroot)
     build_entry(out)
     mr.check_folder(out)

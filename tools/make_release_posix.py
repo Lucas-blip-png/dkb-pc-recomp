@@ -94,8 +94,6 @@ def main():
     for lic in sorted(ROOT.glob('LICENSE*')):
         shutil.copy2(lic, out / lic.name)
     shutil.copy2(ROOT / 'tools' / 'release' / 'setup.sh', out / SETUP[plat])   # one script, named setup.command on macOS
-    # RecompLauncher's profile: it asks for the copy, runs the setup with --prepare and starts play.sh (docs/installer.md)
-    shutil.copy2(ROOT / 'tools' / 'release' / 'recomplauncher.json', out / 'recomplauncher.json')
     shutil.copy2(ROOT / 'tools' / 'release' / 'play.sh', out / 'play.sh')
     (out / 'README-SETUP.txt').write_text(
         README_SETUP.format(label=f'{plat} {ARCH[plat]}', status=STATUS[plat], requirements=REQUIREMENTS[plat],
