@@ -459,6 +459,14 @@ cmd = ["{python}", "tests/switch_rumble_test.py", "--cc", "{cc}", "--out", "{out
 needs = ["cc"]
 
 [[test]]
+name = "windows-console"
+tier = 1
+area = "os"
+cmd = ["{python}", "tests/windows_console_test.py", "--cc", "{cc}", "--out", "{out}"]
+platform = "windows"
+needs = ["cc"]
+
+[[test]]
 name = "mods-scan"
 tier = 1
 area = "os"

@@ -256,26 +256,35 @@ uint64_t plat_counter_hz(void) { return qpc_freq(); }
 // The default timer tick is 15.6 ms; a 1 ms wait would cost a full tick.
 void plat_timer_1ms(void) { timeBeginPeriod(1); }
 
-// Only a console this process got for itself (the only process attached to it): a console the game was started from,
-// such as a command prompt, stays visible. The console is freed rather than its window hidden: with Windows Terminal
-// as the default terminal, GetConsoleWindow returns a stand-in that ShowWindow does not hide, while detaching closes
-// the terminal window (#238). The standard streams then go to NUL, so no write reaches a closed console handle whose
-// value a later file or pipe could take. Runs on the main thread before the boot starts other threads.
+static int std_handle_redirected(DWORD slot) {
+    DWORD type = GetFileType(GetStdHandle(slot));
+    return type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE;
+}
+
+// A console shared with a command prompt stays visible. Detach only from a console with this process as its sole
+// client, including consoles without a visible window. Detaching also works with Windows Terminal, where
+// GetConsoleWindow can return a stand-in that ShowWindow does not hide (#238).
 const char *plat_console_hide(void) {
+    DWORD pid;
+    DWORD count = GetConsoleProcessList(&pid, 1);
+    if (!count) return "no attached console";
+    if (count != 1 || pid != GetCurrentProcessId()) return "the console is shared with another process";
     HWND w = GetConsoleWindow();
-    DWORD pids[2];
-    if (!w) return "no console window";
-    if (GetConsoleProcessList(pids, 2) != 1) return "the console is shared with another process";
+    int keep_in = std_handle_redirected(STD_INPUT_HANDLE);
+    int keep_out = std_handle_redirected(STD_OUTPUT_HANDLE);
+    int keep_err = std_handle_redirected(STD_ERROR_HANDLE);
     fflush(stdout);
     fflush(stderr);
     if (!FreeConsole()) {
+        if (!w) return "FreeConsole failed";
         ShowWindow(w, SW_HIDE);
         return "FreeConsole failed, window hidden";
     }
-    // The UCRT's freopen on the standard streams also points the process's standard handles at the new file.
-    freopen("NUL", "r", stdin);
-    freopen("NUL", "w", stdout);
-    freopen("NUL", "w", stderr);
+    // Keep caller-provided files and pipes. The UCRT's freopen replaces both the stream and its standard handle,
+    // so subsequent I/O on a former console stream cannot reach a new file that reused the closed handle.
+    if (!keep_in) freopen("NUL", "r", stdin);
+    if (!keep_out) freopen("NUL", "w", stdout);
+    if (!keep_err) freopen("NUL", "w", stderr);
     return NULL;
 }
 
