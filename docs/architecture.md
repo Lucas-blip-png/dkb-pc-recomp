@@ -72,7 +72,13 @@ Every guest thread is a host thread. TotK assumes Horizon's scheduler: three app
   saves the volatile registers and gives the core up there. A holder of a guest mutex counts at the priority of its
   best waiter, and one inside an SDK spin lock (TLR+0x100 `disable_count`) is not preempted: its interrupt flag is set
   and the switch happens at SVC 0x36. `TOTK_ASYNC_PREEMPT=2` keeps those two without interrupting. The interruption is
-  Win32 (SuspendThread, SetThreadContext); another host needs a signal handler there, as MacNativeGames has.
+  Win32 (SuspendThread, SetThreadContext); another host needs a signal handler there, as MacNativeGames has. A holder
+  stopped inside an exception's dispatch or a system call (Windows reports `CONTEXT_EXCEPTION_ACTIVE` /
+  `CONTEXT_SERVICE_ACTIVE`) is not redirected: the handler's return would overwrite the redirect, and a lost one left
+  the holder uninterruptible for good. A redirect still pending after 2 ms is expired as lost when the holder runs lifted
+  code again (`TOTK_AP_SAFE=0` turns both off). By default (`TOTK_AP_FAULT=0` turns it off), a holder that still has a
+  preemption request when `fault_veh` finishes handling its lazy-heap fault is redirected by updating the exception's
+  saved context before `NtContinue` returns to lifted code, without blocking inside the exception handler.
 - Core wait counters (`TOTK_CORE_WAITS=1`, off by default; `ab` for an in-run A/B). Each wait for a core is classed by what
   holds the cores the thread may use: a worse thread in game code or in a host call (Horizon would have switched at
   once), an equal one, only better ones; also the host's wake-up latency and guest mutex waits. The waits of the main

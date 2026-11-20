@@ -103,6 +103,7 @@ struct RtThread {
     PlatIntr *hthr;            // the host thread, for plat_intr_stop / resume; open while it may own a core
     uint64_t ap_rip;           // the interrupted host rip kern_ap_stub returns to
     uint64_t ap_last;          // the last redirect attempt on this owner
+    uint64_t ap_sent_at;       // when the pending redirect was sent
     int ap_pending;            // redirected to kern_ap_stub, which has not reached kern_ap_yield yet
     // TOTK_CORE_DIAG (holding G, except dg_host_end, which only the thread itself writes)
     uint64_t dg_since;         // as a waiter: core wait start
@@ -110,10 +111,11 @@ struct RtThread {
     uint64_t dg_kick;          // as an owner: the preempt request
     uint64_t dg_host_end;      // as an owner: the return from the host call or SVC it was in at the request
     uint64_t dg_pc, dg_lr;     // as an owner: guest pc and lr at the checkpoint that gave the core up
+    uint64_t dg_hrip;          // as an owner: the host rip kern_ap_stub interrupted, when that gave the core up
     int dg_host_kick;          // as an owner: in a host call or SVC at the request
     uint32_t dg_svc;           // the thread's latest SVC (TOTK_CORE_DIAG: what an owner in a host call is in)
-    struct DgRel { uint64_t kick, host_end, pc, lr; int host, pre, prio; uint32_t h; } dg_rel;   // as a waiter: the
-                                                                                                 // owner that released
+    // as a waiter: the owner that released
+    struct DgRel { uint64_t kick, host_end, pc, lr, hrip; int host, pre, prio; uint32_t h; } dg_rel;
     // core wait counters (holding G)
     uint64_t cw_woke_at;       // when wake() ended the current wait
     uint64_t cw_core0;         // set by block: the core wait that follows starts here
@@ -666,7 +668,24 @@ static int g_ap_log;              // redirects logged so far (AP_LOG_N)
 #define AP_LOG_N 40
 static uintptr_t g_gen_lo, g_gen_hi;   // host code of the lifted modules: first and last function start
 static uint64_t g_ap_sent, g_ap_taken, g_ap_host, g_ap_pc, g_ap_deferred, g_ap_fail, g_ap_spin_ok;
+// Redirects that reached kern_ap_yield (taken or not: the waiter may have got a core meanwhile), fault-handler
+// redirects, pending ones found lost, and refusals because the owner was stopped inside an exception's dispatch,
+// inside a system call, or without the OS saying (platform.h plat_intr_stop).
+static uint64_t g_ap_reached, g_ap_lost, g_ap_exc, g_ap_svc, g_ap_unrep, g_ap_fault;
+// TOTK_AP_SAFE (on unless 0; ab for an in-run A/B): refuse a redirect the OS could lose and expire a pending one that
+// was lost. 0 redirects as before. TOTK_AP_FAULT (on unless 0; ab for an in-run A/B): when a guest thread has a
+// pending preemption while returning from a page fault, redirect it via the fault handler's saved context instead of
+// waiting for ap_try between faults.
+static int g_ap_safe_mode = 1, g_ap_fault_mode = 1;
+#define AP_LOST_NS 2000000ull   // a pending redirect this old is checked for loss
+static int g_ap_lost_log;
+#define AP_LOST_LOG_N 20
 void kern_ap_stub(void);
+uint64_t kern_ap_rip(void);
+void kern_ap_yield(void);
+#if defined(_WIN32) && defined(__x86_64__)
+static void kern_ap_fault(uint64_t *rip);
+#endif
 
 static void ap_init(void) {
     if (g_ap >= 0) return;
@@ -683,11 +702,13 @@ static void ap_init(void) {
                 if (f < lo) lo = f;
                 if (f > hi) hi = f;
             }
-        // The store exclusives must lie outside too: a thread stopped in one holds its granule (cpu.h, excl.c).
-        const uintptr_t host[] = {(uintptr_t)kern_ap_stub, (uintptr_t)kern_checkpoint, (uintptr_t)rt_svc,
-                                  (uintptr_t)rt_dispatch, (uintptr_t)rt_call, (uintptr_t)excl_store8,
-                                  (uintptr_t)excl_store16, (uintptr_t)excl_store32, (uintptr_t)excl_store64,
-                                  (uintptr_t)excl_store128};
+        // The store exclusives must lie outside too: a thread stopped in one holds its granule (cpu.h, excl.c). So
+        // must the stub and what it calls before kern_ap_yield clears ap_pending: ap_try takes a rip inside the range
+        // as proof that a pending redirect is not on its way (it expires it and may redirect again).
+        const uintptr_t host[] = {(uintptr_t)kern_ap_stub, (uintptr_t)kern_ap_rip, (uintptr_t)kern_ap_yield,
+                                  (uintptr_t)kern_checkpoint, (uintptr_t)rt_svc, (uintptr_t)rt_dispatch,
+                                  (uintptr_t)rt_call, (uintptr_t)excl_store8, (uintptr_t)excl_store16,
+                                  (uintptr_t)excl_store32, (uintptr_t)excl_store64, (uintptr_t)excl_store128};
         int bad = !n || lo >= hi;
         for (unsigned i = 0; i < sizeof host / sizeof *host; i++) bad |= host[i] >= lo && host[i] <= hi;
         if (bad) {
@@ -699,6 +720,17 @@ static void ap_init(void) {
             g_gen_hi = hi;
             kern_host_track = 1;
         }
+        g_ap_safe_mode = rt_knob("AP_SAFE", "1");
+        if (g_ap_safe_mode != 1)
+            rt_log("kernel: redirects the OS could lose are %s (TOTK_AP_SAFE)",
+                   g_ap_safe_mode ? "refused in the B blocks of TOTK_AB only" : "sent as before, and never expired");
+        g_ap_fault_mode = rt_knob("AP_FAULT", "1");
+        if (g_ap_fault_mode != 1)
+            rt_log("kernel: fault-handler preemption redirect %s (TOTK_AP_FAULT)",
+                   g_ap_fault_mode ? "in the B blocks of TOTK_AB only" : "off");
+#if defined(_WIN32) && defined(__x86_64__)
+        if (g_ap_int && g_ap_fault_mode != 0) plat_mem_fault_ret_hook(kern_ap_fault);
+#endif
     }
     rt_log("kernel: asynchronous preemption of virtual cores %s, priority inheritance and preemption disable %s; lifted "
            "code exe+%#llx-exe+%#llx", g_ap_int ? "on" : "off", g_ap ? "on (TOTK_ASYNC_PREEMPT=0 turns all off)" : "off",
@@ -966,10 +998,26 @@ enum { AP_NONE, AP_RETRY, AP_SENT };
 
 // The waiter w interrupts its target owner if that runs top-level game code (holding G; the owner is stopped only
 // between plat_intr_stop and plat_intr_resume, during which nothing here takes a lock).
+// A redirect the OS can lose (TOTK_AP_SAFE): Windows reports an owner stopped inside an exception's dispatch, where a
+// context write is overwritten when the handler continues (platform/win32.c plat_intr_stop), and ap_pending is cleared
+// only in kern_ap_yield, so one lost redirect used to leave its owner uninterruptible for good: every later ap_try
+// returned at ap_pending, and its waiters woke each millisecond and gave up without a trace. Such stops are refused now
+// (the waiter tries again a millisecond later), and a redirect still pending after AP_LOST_NS is expired as lost at
+// the next stop that finds the owner's rip in lifted code, whatever lost it. That is safe: kern_ap_stub, kern_ap_rip
+// and kern_ap_yield, which clears ap_pending, lie outside the lifted range (ap_init checks it), so an owner running
+// lifted code is not on its way to the stub and cannot take the old redirect after the new one; ap_rip is only ever
+// written there, so the stub never jumps back through a value meant for another redirect.
 static int ap_try(RtThread *w) {
     RtThread *o = w->target;
     if (!o || o->cur_core < 0 || !o->preempt) return AP_NONE;
-    if (!o->hthr || o->ap_pending) return AP_RETRY;
+    if (!o->hthr) return AP_RETRY;
+    int safe = RT_KNOB_ON(g_ap_safe_mode);
+    uint64_t now = kern_now_ns();
+    int stale = 0;   // a pending redirect old enough to be checked for loss
+    if (o->ap_pending) {
+        if (!safe || now - o->ap_sent_at < AP_LOST_NS) return AP_RETRY;
+        stale = 1;
+    }
     volatile uint16_t *tl = ap_tlr(o);
     if (__atomic_load_n(&o->host_depth, __ATOMIC_RELAXED) > 0) {
         g_ap_host++;
@@ -980,26 +1028,43 @@ static int ap_try(RtThread *w) {
         g_ap_deferred++;
         return AP_RETRY;
     }
-    uint64_t now = kern_now_ns();
     if (o->ap_last && now - o->ap_last < AP_GAP_NS) return AP_RETRY;
     o->ap_last = now;
     uint64_t rip, rsp;
-    if (!plat_intr_stop(o->hthr, &rip, &rsp)) {
+    int st = plat_intr_stop(o->hthr, &rip, &rsp);
+    if (!st) {
         g_ap_fail++;
         return AP_RETRY;
     }
-    int r = AP_RETRY;
+    int r = AP_RETRY, in_gen = rip >= g_gen_lo && rip <= g_gen_hi;
     uint64_t to = 0;
-    if (rip < g_gen_lo || rip > g_gen_hi)
+    if (stale && in_gen) {
+        g_ap_lost++;
+        if (g_ap_lost_log < AP_LOST_LOG_N) {
+            g_ap_lost_log++;
+            rt_log("kernel: the redirect of %#x p%d sent %.2f ms ago at exe+%#llx was lost (it runs at exe+%#llx)",
+                   o->handle, o->prio, (now - o->ap_sent_at) / 1e6, (unsigned long long)(o->ap_rip - plat_exe_base()),
+                   (unsigned long long)(rip - plat_exe_base()));
+        }
+        o->ap_pending = 0;
+    }
+    if (!in_gen)
         g_ap_pc++;
     else if (__atomic_load_n(&o->host_depth, __ATOMIC_RELAXED) > 0)
         g_ap_host++;
     else if (tl[0]) {
         tl[1] = 1;
         g_ap_deferred++;
-    } else {
+    } else if (safe && st == PLAT_INTR_IN_EXCEPTION)
+        g_ap_exc++;
+    else if (safe && st == PLAT_INTR_IN_SERVICE)
+        g_ap_svc++;
+    else if (safe && st == PLAT_INTR_UNREPORTED)
+        g_ap_unrep++;
+    else {
         o->ap_rip = rip;
         o->ap_pending = 1;
+        o->ap_sent_at = now;
         to = (uint64_t)(uintptr_t)kern_ap_stub;
     }
     if (!plat_intr_resume(o->hthr, to)) {
@@ -1130,9 +1195,13 @@ static void dg_done(RtThread *t) {
     if ((part[DG_GAME] >= 2000000 || part[DG_HOST] >= 2000000) && g_dg_lines < DG_LONG_LINES) {
         g_dg_lines++;
         char a[128], l[128];
+        // An owner interrupted by kern_ap_stub gave its core up at a host rip in lifted code (an exe RVA); its guest pc
+        // there is the one of its last dispatch, so it is not shown.
+        if (r->hrip)
+            snprintf(a, sizeof a, "exe+%#llx (interrupted)", (unsigned long long)(r->hrip - plat_exe_base()));
         rt_log("core-diag: wait %.2f ms (game %.2f host %.2f): %#x p%d mask %llx; released by %#x p%d%s at %s lr %s",
                w / 1e6, part[DG_GAME] / 1e6, part[DG_HOST] / 1e6, t->handle, t->prio, (unsigned long long)t->mask, r->h,
-               r->prio, r->pre ? " (preempted)" : "", r->pc ? ldr_describe(r->pc, a, sizeof a) : "-",
+               r->prio, r->pre ? " (preempted)" : "", r->hrip ? a : r->pc ? ldr_describe(r->pc, a, sizeof a) : "-",
                r->lr ? ldr_describe(r->lr, l, sizeof l) : "-");
     }
     t->target = NULL;
@@ -1208,9 +1277,12 @@ static void stall_dump(uint64_t idle_ns) {
                o->tlr ? ap_tlr(o)[0] : 0, o->ap_pending);
     }
     rt_log("stall: asynchronous preemption: %llu interrupted, %llu given up there; refused %llu in a host call, %llu "
-           "outside game code, %llu disabled, %llu failed",
+           "outside game code, %llu disabled, %llu failed, %llu in an exception's dispatch, %llu in a system call, %llu "
+           "unreported; %llu reached the stub, %llu redirected in fault handler, %llu lost",
            (unsigned long long)g_ap_sent, (unsigned long long)g_ap_taken, (unsigned long long)g_ap_host,
-           (unsigned long long)g_ap_pc, (unsigned long long)g_ap_deferred, (unsigned long long)g_ap_fail);
+           (unsigned long long)g_ap_pc, (unsigned long long)g_ap_deferred, (unsigned long long)g_ap_fail,
+           (unsigned long long)g_ap_exc, (unsigned long long)g_ap_svc, (unsigned long long)g_ap_unrep,
+           (unsigned long long)g_ap_reached, (unsigned long long)g_ap_fault, (unsigned long long)g_ap_lost);
     int k = 0;
     for (const RtThread *w = g_core_wait; w; w = w->cnext) {
         snprintf(what, sizeof what, "core waiter %d", k++);
@@ -1265,6 +1337,37 @@ void kern_cores_report(const char *tag) {
     }
 }
 
+// The TOTK_ASYNC_PREEMPT counters since the start: copied holding G (ap_snap), logged without it (ap_log), at every
+// 600th present and at exit.
+#define AP_SNAP_N 14
+static void ap_snap(uint64_t v[AP_SNAP_N]) {
+    const uint64_t s[AP_SNAP_N] = {g_ap_sent, g_ap_taken,   g_ap_host, g_ap_pc,  g_ap_deferred, g_ap_fail,  g_ap_spin_ok,
+                                   g_sync36,  g_ap_reached, g_ap_exc,  g_ap_svc, g_ap_unrep,    g_ap_fault, g_ap_lost};
+    memcpy(v, s, sizeof s);
+}
+
+static void ap_log(const char *when, const uint64_t v[AP_SNAP_N]) {
+    rt_log("kernel: %s: asynchronous preemption: %llu interrupted, %llu cores given up there; refused: %llu in a host "
+           "call, %llu outside game code, %llu preemption disabled, %llu failed; %llu waits ended in the first spin; "
+           "SVC 0x36 %llu; %llu reached the stub; %llu redirected in fault handler; refused %llu in an exception's "
+           "dispatch, %llu in a system call, %llu unreported; %llu lost",
+           when, (unsigned long long)v[0], (unsigned long long)v[1], (unsigned long long)v[2],
+           (unsigned long long)v[3], (unsigned long long)v[4], (unsigned long long)v[5], (unsigned long long)v[6],
+           (unsigned long long)v[7], (unsigned long long)v[8], (unsigned long long)v[12], (unsigned long long)v[9],
+           (unsigned long long)v[10], (unsigned long long)v[11], (unsigned long long)v[13]);
+}
+
+void kern_ap_exit(void) {   // on an exit path: a lock that stays held does not stop the exit
+    if (g_ap <= 0) return;
+    int got = 0;
+    for (int i = 0; i < 200 && !(got = plat_mutex_trylock(&G)); i++) plat_sleep_ms(1);
+    if (!got) return;
+    uint64_t v[AP_SNAP_N];
+    ap_snap(v);
+    unlock();
+    ap_log("exit", v);
+}
+
 static void stall_main(void *arg) {
     uint64_t lim = (uint64_t)(uintptr_t)arg * 1000000000ull, next = 0;
     for (;;) {
@@ -1291,15 +1394,13 @@ void kern_core_diag_frame(uint64_t frame, uint64_t interval_ns) {
             rt_log("kernel: TOTK_STALL_DUMP: the watchdog thread could not start");
     }
     if (g_ap > 0 && frame && frame % 600 == 0) {   // TOTK_ASYNC_PREEMPT counters since the start
+        uint64_t v[AP_SNAP_N];
+        char when[32];
         lock();
-        uint64_t v[8] = {g_ap_sent, g_ap_taken, g_ap_host, g_ap_pc, g_ap_deferred, g_ap_fail, g_ap_spin_ok, g_sync36};
+        ap_snap(v);
         unlock();
-        rt_log("kernel: frame %llu: asynchronous preemption: %llu interrupted, %llu cores given up there; refused: "
-               "%llu in a host call, %llu outside game code, %llu preemption disabled, %llu failed; %llu waits ended "
-               "in the first spin; SVC 0x36 %llu",
-               (unsigned long long)frame, (unsigned long long)v[0], (unsigned long long)v[1], (unsigned long long)v[2],
-               (unsigned long long)v[3], (unsigned long long)v[4], (unsigned long long)v[5], (unsigned long long)v[6],
-               (unsigned long long)v[7]);
+        snprintf(when, sizeof when, "frame %llu", (unsigned long long)frame);
+        ap_log(when, v);
     }
     if (g_diag <= 0) return;
     DgWindow w;
@@ -1400,8 +1501,9 @@ static int core_release(RtThread *t) {
     t->pre_since = 0;
     if (g_diag > 0) {
         g_dg_rel = (struct DgRel){.kick = t->dg_kick, .host_end = t->dg_host_end, .pc = t->dg_pc, .lr = t->dg_lr,
-                                  .host = t->dg_host_kick, .pre = t->preempt, .prio = t->prio, .h = t->handle};
-        t->dg_kick = t->dg_host_end = t->dg_pc = t->dg_lr = 0;
+                                  .hrip = t->dg_hrip, .host = t->dg_host_kick, .pre = t->preempt, .prio = t->prio,
+                                  .h = t->handle};
+        t->dg_kick = t->dg_host_end = t->dg_pc = t->dg_lr = t->dg_hrip = 0;
         t->dg_host_kick = 0;
     }
     t->cur_core = -1;
@@ -1798,9 +1900,11 @@ void kern_ap_yield(void) {
     RtThread *t = tcur;
     lock();
     t->ap_pending = 0;
+    g_ap_reached++;
     if (t->preempt && t->cur_core >= 0 && !ap_disabled(t) && core_better_waiter(t, t->cur_core)) {
-        if (g_diag > 0) {
-            t->dg_pc = t->cur->pc;
+        if (g_diag > 0) {   // the guest pc is the one of the last dispatch: the interrupted host rip says where it was
+            t->dg_pc = 0;
+            t->dg_hrip = t->ap_rip;
             t->dg_lr = t->cur->x[30];
         }
         g_ap_taken++;
@@ -1811,6 +1915,33 @@ void kern_ap_yield(void) {
     }
     unlock();
 }
+
+#if defined(_WIN32) && defined(__x86_64__)
+// Runs inside fault_veh on the faulting guest thread right before NtContinue resumes execution. Writing *rip here
+// modifies the exception's saved context so NtContinue enters kern_ap_stub cleanly outside exception dispatch.
+static void kern_ap_fault(uint64_t *rip) {
+    if (!RT_KNOB_ON(g_ap_fault_mode)) return;
+    RtThread *t = tcur;
+    if (!t || !__atomic_load_n(&t->preempt, __ATOMIC_ACQUIRE)) return;
+    if (__atomic_load_n(&t->host_depth, __ATOMIC_RELAXED) > 0) return;
+    uint64_t r = *rip;
+    if (r < g_gen_lo || r > g_gen_hi) return;
+    lock();
+    if (t->cur_core >= 0 && t->preempt && !t->ap_pending && __atomic_load_n(&t->host_depth, __ATOMIC_RELAXED) == 0) {
+        if (ap_disabled(t)) {
+            ap_tlr(t)[1] = 1;
+            g_ap_deferred++;
+        } else if (core_better_waiter(t, t->cur_core)) {
+            t->ap_rip = r;
+            t->ap_pending = 1;
+            t->ap_sent_at = kern_now_ns();
+            *rip = (uint64_t)(uintptr_t)kern_ap_stub;
+            g_ap_fault++;
+        }
+    }
+    unlock();
+}
+#endif
 
 // SVC 0x36 SynchronizePreemptionState: a preemption deferred by disable_count happens here.
 static void ap_sync(RtThread *t) {

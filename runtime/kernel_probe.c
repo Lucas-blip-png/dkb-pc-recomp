@@ -857,6 +857,167 @@ static void test_platform(void) {
     bench_sched();
 }
 
+// ---- a redirect of a thread that faults in a loop (kernel.c ap_try against the lazy heap's first touches), plus the
+// synchronous fault-handler redirect hook (platform/win32.c plat_mem_fault_ret_hook). A host thread writes every 64th
+// byte of a 64 MiB guest heap that SetHeapSize leaves reserved under TOTK_HEAP_LAZY, so each chunk faults into
+// fault_veh, then shrinks the heap to nothing and starts again. Another thread stops it as ap_try does, and when its
+// rip is in the loop sends it to a stub that counts its arrival, clears the pending flag and jumps back. A redirect still
+// pending after RF_LOST_NS is lost (the stub never ran). Two async rounds (redirecting every stop vs refusing stops
+// above 1, TOTK_AP_SAFE), followed by a synchronous pass with plat_mem_fault_ret_hook registered. x86-64 Windows only.
+#if defined(_WIN32) && defined(__x86_64__)
+#define RF_HEAP (64ull << 20)
+#define RF_STOPS 6000
+#define RF_LOST_NS 50000000ull
+void probe_rf_touch(uint8_t *p, uint64_t n);
+void probe_rf_touch_end(void);
+void probe_rf_stub(void);
+volatile uint64_t probe_rf_ret, probe_rf_taken;
+volatile int probe_rf_pending;
+__asm__(".text\n"
+        ".globl probe_rf_touch\n"
+        ".globl probe_rf_touch_end\n"
+        ".globl probe_rf_stub\n"
+        ".p2align 4\n"
+        "probe_rf_touch:\n"   // rcx: p, rdx: n
+        "    xorl %eax, %eax\n"
+        "1:  movq %rax, (%rcx,%rax)\n"
+        "    addq $64, %rax\n"
+        "    cmpq %rdx, %rax\n"
+        "    jb 1b\n"
+        "    ret\n"
+        "probe_rf_touch_end:\n"
+        "    nop\n"
+        ".p2align 4\n"
+        "probe_rf_stub:\n"   // as kernel.c kern_ap_stub: the flags are the loop's, the return slot is reserved first
+        "    leaq -8(%rsp), %rsp\n"
+        "    pushfq\n"
+        "    pushq %rax\n"
+        "    movq probe_rf_ret(%rip), %rax\n"
+        "    movq %rax, 16(%rsp)\n"
+        "    lock incq probe_rf_taken(%rip)\n"
+        "    movl $0, probe_rf_pending(%rip)\n"
+        "    popq %rax\n"
+        "    popfq\n"
+        "    ret\n");
+
+static PlatIntr *volatile g_rf_intr;
+static volatile int g_rf_stop;
+static volatile uint64_t g_rf_passes, g_rf_hook_sent;
+
+static void rf_worker(void *arg) {
+    (void)arg;
+    g_rf_intr = plat_intr_self();
+    while (!__atomic_load_n(&g_rf_stop, __ATOMIC_RELAXED)) {
+        uint64_t base = 0;
+        if (mem_set_heap_size(RF_HEAP, &base) != 0) break;
+        probe_rf_touch((uint8_t *)(uintptr_t)base, RF_HEAP);
+        mem_set_heap_size(0, NULL);
+        g_rf_passes++;
+    }
+}
+
+static void rf_fault_ret_hook(uint64_t *rip) {
+    const uintptr_t lo = (uintptr_t)probe_rf_touch, hi = (uintptr_t)probe_rf_touch_end;
+    if (*rip < lo || *rip >= hi) return;
+    probe_rf_ret = *rip;
+    __atomic_add_fetch(&g_rf_hook_sent, 1, __ATOMIC_RELAXED);
+    *rip = (uint64_t)(uintptr_t)probe_rf_stub;
+}
+
+static void test_redirect_fault(void) {
+    uint64_t faults0 = plat_mem_lazy_faults();
+    g_rf_stop = 0;
+    g_rf_passes = 0;
+    PlatThread *w = plat_thread_new(rf_worker, NULL, "probe-kernel faulter");
+    while (w && !g_rf_intr) plat_yield();
+    if (!w || !g_rf_intr) {
+        CHECK(0, "redirect-fault: worker did not start");
+        return;
+    }
+    const uintptr_t lo = (uintptr_t)probe_rf_touch, hi = (uintptr_t)probe_rf_touch_end;
+    for (int safe = 0; safe < 2; safe++) {
+        uint64_t seen[5] = {0}, sent[5] = {0}, lost[5] = {0}, refused = 0, outside = 0, taken0 = probe_rf_taken;
+        for (int i = 0; i < RF_STOPS; i++) {
+            uint64_t rip, rsp;
+            int st = plat_intr_stop(g_rf_intr, &rip, &rsp);
+            if (!st) continue;
+            seen[st]++;
+            if (rip < lo || rip >= hi) {
+                outside++;
+                plat_intr_resume(g_rf_intr, 0);
+            } else if (safe && st > 1) {
+                refused++;
+                plat_intr_resume(g_rf_intr, 0);
+            } else {
+                probe_rf_ret = rip;
+                __atomic_store_n(&probe_rf_pending, 1, __ATOMIC_SEQ_CST);
+                if (!plat_intr_resume(g_rf_intr, (uint64_t)(uintptr_t)probe_rf_stub)) {
+                    probe_rf_pending = 0;
+                    continue;
+                }
+                sent[st]++;
+                uint64_t t0 = plat_now_ns();
+                while (__atomic_load_n(&probe_rf_pending, __ATOMIC_SEQ_CST) && plat_now_ns() - t0 < RF_LOST_NS)
+                    plat_pause();
+                if (__atomic_load_n(&probe_rf_pending, __ATOMIC_SEQ_CST)) {
+                    lost[st]++;
+                    probe_rf_pending = 0;
+                }
+            }
+            for (volatile int s = 0; s < (i * 7919) % 20000; s++) {}   // stop at a varying point of the loop
+        }
+        uint64_t ns = 0, nl = 0;
+        for (int k = 0; k < 5; k++) ns += sent[k], nl += lost[k];
+        printf("  redirect-fault (%s): stops: plain %llu, in an exception's dispatch %llu, in a system call %llu, "
+               "unreported %llu; outside the loop %llu, refused %llu; sent %llu (plain %llu, exception %llu, system "
+               "call %llu, unreported %llu), reached the stub %llu, lost %llu (plain %llu, exception %llu, system call "
+               "%llu, unreported %llu)\n",
+               safe ? "refusing stops above 1" : "redirecting every stop in the loop", (unsigned long long)seen[1],
+               (unsigned long long)seen[2], (unsigned long long)seen[3], (unsigned long long)seen[4],
+               (unsigned long long)outside, (unsigned long long)refused, (unsigned long long)ns,
+               (unsigned long long)sent[1], (unsigned long long)sent[2], (unsigned long long)sent[3],
+               (unsigned long long)sent[4], (unsigned long long)(probe_rf_taken - taken0), (unsigned long long)nl,
+               (unsigned long long)lost[1], (unsigned long long)lost[2], (unsigned long long)lost[3],
+               (unsigned long long)lost[4]);
+        CHECK(probe_rf_taken - taken0 + nl == ns, "redirect-fault: %llu reached the stub and %llu lost of %llu sent",
+              (unsigned long long)(probe_rf_taken - taken0), (unsigned long long)nl, (unsigned long long)ns);
+        if (safe) CHECK(nl == 0 && ns > 0, "redirect-fault: %llu of %llu redirects lost while refusing",
+                        (unsigned long long)nl, (unsigned long long)ns);
+    }
+    g_rf_stop = 1;
+    plat_thread_join(w);
+    plat_intr_free(g_rf_intr);
+    g_rf_intr = NULL;
+    printf("  redirect-fault: %llu heap passes, %llu lazy-heap faults\n", (unsigned long long)g_rf_passes,
+           (unsigned long long)(plat_mem_lazy_faults() - faults0));
+
+    uint64_t base = 0, hfaults0 = plat_mem_lazy_faults(), htaken0 = probe_rf_taken;
+    g_rf_hook_sent = 0;
+    CHECK(mem_set_heap_size(RF_HEAP, &base) == 0 && base, "fault-ret-hook: SetHeapSize(%llu) failed",
+          (unsigned long long)RF_HEAP);
+    if (base) {
+        plat_mem_fault_ret_hook(rf_fault_ret_hook);
+        probe_rf_touch((uint8_t *)(uintptr_t)base, RF_HEAP);
+        plat_mem_fault_ret_hook(NULL);
+        uint64_t hfaults = plat_mem_lazy_faults() - hfaults0, htaken = probe_rf_taken - htaken0, mismatches = 0;
+        for (uint64_t off = 0; off < RF_HEAP; off += 64)
+            if (*(const volatile uint64_t *)(uintptr_t)(base + off) != off) mismatches++;
+        mem_set_heap_size(0, NULL);
+        printf("  fault-ret-hook: %llu lazy-heap faults, %llu redirected, %llu reached the stub, %llu store "
+               "mismatches\n",
+               (unsigned long long)hfaults, (unsigned long long)g_rf_hook_sent, (unsigned long long)htaken,
+               (unsigned long long)mismatches);
+        CHECK(g_rf_hook_sent > 0 && htaken == g_rf_hook_sent,
+              "fault-ret-hook: %llu redirected vs %llu reached the stub", (unsigned long long)g_rf_hook_sent,
+              (unsigned long long)htaken);
+        CHECK(mismatches == 0, "fault-ret-hook: %llu store mismatches after fault redirect",
+              (unsigned long long)mismatches);
+    }
+}
+#else
+static void test_redirect_fault(void) { printf("  redirect-fault: skipped (x86-64 Windows only)\n"); }
+#endif
+
 int probe_kernel(void) {
     a_lock_waiter = hostfn_register("probe-kernel lock waiter", lock_waiter);
     a_cv_waiter = hostfn_register("probe-kernel condvar waiter", cv_waiter);
@@ -884,6 +1045,7 @@ int probe_kernel(void) {
         return 1;
     }
     test_platform();
+    test_redirect_fault();
     kern_run_on_guest_main(probe_main);
     RtStats s = rt_stats();
     printf("stats: %llu SVCs, %llu threads, %llu host calls\n", (unsigned long long)s.svcs,

@@ -48,7 +48,12 @@ typedef struct PlatIntr PlatIntr;
 PlatIntr *plat_intr_self(void);           // NULL on failure
 void plat_intr_free(PlatIntr *t);
 // Stops t and reads its instruction and stack pointers: 1 when stopped, 0 when it did not stop in time (a thread
-// blocked in the OS); t then runs on untouched.
+// blocked in the OS); t then runs on untouched. A value above 1 also means stopped, but a redirection now could be lost
+// or unsafe: t is inside the dispatch of an exception (PLAT_INTR_IN_EXCEPTION), inside a system call
+// (PLAT_INTR_IN_SERVICE), or the OS did not say (PLAT_INTR_UNREPORTED). Callers that only read where t is treat any
+// nonzero value as stopped. Only Windows reports these: a signal handler (Linux, macOS) writes the context the kernel
+// restores, so a redirection there is never lost.
+enum { PLAT_INTR_IN_EXCEPTION = 2, PLAT_INTR_IN_SERVICE, PLAT_INTR_UNREPORTED };
 int plat_intr_stop(PlatIntr *t, uint64_t *rip, uint64_t *rsp);
 // Lets a stopped t go on: at to when to is nonzero, else where it stopped. 0 when the redirection failed (t then goes
 // on where it stopped).
@@ -234,9 +239,11 @@ int plat_mem_access_hook(int (*fn)(uint64_t addr));
 // A write that faulted on a read-only page at addr goes to fn first; fn returns 1 when it made the page writable and
 // the write should run again, 0 to let the fault go on (to the crash handler). One hook per process.
 void plat_mem_fault_hook(int (*fn)(uint64_t addr));
-// Windows only: a read or write that faults on a reserved page inside [base, base + size) commits the 64 KiB chunk
-// around it and retries (the guest heap with TOTK_HEAP_LAZY). Lock-free in the handler; plat_mem_lazy_faults counts them.
+// Windows only: a read or write that faults on a reserved page inside [base, base + size) commits the chunk around
+// it (64 KiB by default; plat_mem_lazy_chunk changes it) and retries (the guest heap with TOTK_HEAP_LAZY). Lock-free
+// in the handler; plat_mem_lazy_faults counts them.
 void plat_mem_lazy(uint64_t base, uint64_t size);
+void plat_mem_lazy_chunk(uint64_t bytes);   // fault-handler commit size, power of two in [64 KiB, 4 MiB]
 // Windows only: what the platform knows about the commit state of the lazy range, without a system call. The end (at
 // most e) of the run of 64 KiB chunks from a that share a's state; *known is 1 when the run's chunks are known to be
 // wholly committed (by the fault handler or a plat_mem_lazy_mark), 0 when nothing is known about them.
@@ -251,6 +258,10 @@ uint64_t plat_mem_lazy_faults(void);
 // none.
 void plat_mem_probe_hooks(int (*fault)(uint64_t addr, int write, uint64_t rip), int (*marked)(uint64_t addr, uint64_t n),
                           void (*release)(uint64_t addr, uint64_t n, uintptr_t caller));
+// Windows only: called right before fault_veh returns EXCEPTION_CONTINUE_EXECUTION, with a pointer to the saved rip
+// that NtContinue will resume at. The callee may rewrite *rip to redirect the thread (e.g. to a yield stub) on its
+// normal execution stack without blocking inside the vectored exception handler.
+void plat_mem_fault_ret_hook(void (*fn)(uint64_t *rip));
 uint32_t plat_mem_lazy_failure(uint64_t *addr);   // error and address of the last failed lazy commit, 0 when none
 // Starts this program again with the same arguments and ends this process with the new one's exit code (Windows), or
 // replaces this process with it (Linux). Environment changes made before the call are passed on.

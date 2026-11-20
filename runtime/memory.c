@@ -1129,6 +1129,24 @@ void mem_commit_later_stats(uint64_t out[4]) {
     out[2] = (uint64_t)plat_xchg64(&cl_ns, 0), out[3] = (uint64_t)plat_xchg64(&cl_dropped, 0);
 }
 
+#ifdef _WIN32
+static void heap_lazy_chunk_init(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    const char *e = cfg_get("TOTK_LAZY_CHUNK_KB");
+    if (!e || !*e) return;
+    uint64_t kb = strtoull(e, NULL, 0);
+    if (!kb) return;
+    if (kb < 64) kb = 64;
+    if (kb > 4096) kb = 4096;
+    uint64_t p = 64;
+    while ((p << 1) <= kb) p <<= 1;
+    plat_mem_lazy_chunk(p << 10);
+    if (p != 64) rt_log("mem: lazy heap fault commit chunk %llu KiB (TOTK_LAZY_CHUNK_KB)", (unsigned long long)p);
+}
+#endif
+
 uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
     int op = plat_op_begin(PLAT_OP_HEAP_SIZE, L.heap.base, size);
     plat_mutex_lock(&lock);
@@ -1148,6 +1166,7 @@ uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
     // mem_touch before a kernel or driver access. Shrinking decommits (a no-op on pages never committed).
     if (size > heap_size && !heap_lazy()) commit(L.heap.base + heap_size, size - heap_size, "heap");
 #ifdef _WIN32
+    if (heap_lazy()) heap_lazy_chunk_init();
     // On a shrink the handler's range drops first, so no fault recommits what decommit gives back.
     if (heap_lazy() && size < heap_size) plat_mem_lazy(L.heap.base, size);
 #endif

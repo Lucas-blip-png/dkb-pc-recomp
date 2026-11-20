@@ -132,16 +132,29 @@ void plat_intr_free(PlatIntr *t) {
     _aligned_free(t);
 }
 
+// CONTEXT_EXCEPTION_REQUEST makes GetThreadContext report whether the thread was stopped inside the dispatch of an
+// exception (CONTEXT_EXCEPTION_ACTIVE) or inside a system call (CONTEXT_SERVICE_ACTIVE), with
+// CONTEXT_EXCEPTION_REPORTING set when the OS reports either. A thread stopped while the kernel dispatches an access
+// violation (the lazy heap's first touch of each 64 KiB, fault_veh) reads with the faulting instruction as its rip, but
+// the kernel has already captured, or is about to capture, the context the handler's EXCEPTION_CONTINUE_EXECUTION
+// returns to; a SetThreadContext then changes a trap frame that the dispatch overwrites, and the thread goes on where
+// it faulted as if never redirected. --probe-kernel (test_redirect_fault) measured about 2% of such redirects lost,
+// every one of them with CONTEXT_EXCEPTION_ACTIVE set, and none lost with the flags clear. CoreCLR refuses to redirect
+// in both states for the same reason (dotnet/runtime src/coreclr/vm/threadsuspend.cpp, Thread::IsContextSafeToRedirect).
 int plat_intr_stop(PlatIntr *t, uint64_t *rip, uint64_t *rsp) {
     if (SuspendThread(t->h) == (DWORD)-1) return 0;
     memset(&t->ctx, 0, sizeof t->ctx);
-    t->ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;   // set back whole, so the kernel restores every GPR
+    t->ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_EXCEPTION_REQUEST;
     if (!GetThreadContext(t->h, &t->ctx)) {
         ResumeThread(t->h);
         return 0;
     }
     *rip = t->ctx.Rip;
     *rsp = t->ctx.Rsp;
+    DWORD f = t->ctx.ContextFlags;
+    if (!(f & CONTEXT_EXCEPTION_REPORTING)) return PLAT_INTR_UNREPORTED;
+    if (f & CONTEXT_EXCEPTION_ACTIVE) return PLAT_INTR_IN_EXCEPTION;
+    if (f & CONTEXT_SERVICE_ACTIVE) return PLAT_INTR_IN_SERVICE;
     return 1;
 }
 
@@ -149,6 +162,9 @@ int plat_intr_resume(PlatIntr *t, uint64_t to) {
     int ok = 1;
     if (to) {
         t->ctx.Rip = to;
+        // Set back whole (CONTEXT_CONTROL | CONTEXT_INTEGER), so the kernel restores every GPR, without the reporting
+        // flags GetThreadContext added.
+        t->ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
         ok = SetThreadContext(t->h, &t->ctx) != 0;
     }
     ResumeThread(t->h);
@@ -755,37 +771,66 @@ uint32_t plat_mem_lazy_failure(uint64_t *addr) {
     return __atomic_load_n(&lazy_fail_err, __ATOMIC_RELAXED);
 }
 
-// Commits the reserved pages (only those: VirtualAlloc over a committed read-only page would make it writable) of the
-// 64 KiB chunk around addr, clipped to the lazy range. 1 when no reserved page of it is left to commit, 0 when a commit
-// failed. Check-then-commit is not atomic against mem_freeze: a run found reserved here could be committed by another
-// fault and frozen read-only before our VirtualAlloc makes it writable. memory.c freeze_locked refuses a region with a
-// reserved hole in the lazy heap, which closes it for holes that exist at the freeze; the gap left is this narrow
-// window, and the handler takes no lock on purpose.
-static int lazy_commit(uint64_t addr, uint64_t lo, uint64_t hi) {
+static volatile uint64_t lazy_chunk_sz = 0x10000ull;
+
+void plat_mem_lazy_chunk(uint64_t bytes) {
+    if (bytes < 0x10000ull) bytes = 0x10000ull;
+    if (bytes > 0x400000ull) bytes = 0x400000ull;
+    uint64_t p = 0x10000ull;
+    while ((p << 1) <= bytes) p <<= 1;
+    __atomic_store_n(&lazy_chunk_sz, p, __ATOMIC_RELEASE);
+}
+
+// Commits [x, x+n) as PAGE_READWRITE, retrying briefly on commit-limit failures while a system-managed page file
+// grows asynchronously. 1 on success, 0 on failure (recording lazy_fail_addr / lazy_fail_err).
+static int lazy_commit_retry(uint64_t x, size_t n) {
+    DWORD err = 0;
+    int ok = 0;
+    for (int t = 0; t < 5 && !ok; t++) {
+        if (t) Sleep(20);
+        int op = plat_op_begin(PLAT_OP_COMMIT, x, n);
+        ok = VirtualAlloc((void *)(uintptr_t)x, n, MEM_COMMIT, PAGE_READWRITE) != NULL;
+        if (!ok) err = GetLastError();
+        plat_op_end(op, 0);
+    }
+    if (!ok) {
+        __atomic_store_n(&lazy_fail_addr, x, __ATOMIC_RELAXED);
+        __atomic_store_n(&lazy_fail_err, (uint32_t)err, __ATOMIC_RELAXED);
+        return 0;
+    }
+    return 1;
+}
+
+// Commits the reserved pages (only those: VirtualAlloc over a committed read-only page would make it writable) around
+// addr, clipped to [lo, hi). When the caller already queried addr and saw mbi->State == MEM_RESERVE, commit the chunk
+// clamped to mbi's reserved run without another VirtualQuery; when mbi is NULL (lazy_fill), walk the 64 KiB chunk by
+// region state. Check-then-commit is not atomic against mem_freeze: a run found reserved here could be committed by
+// another fault and frozen read-only before our VirtualAlloc makes it writable. memory.c freeze_locked refuses a region
+// with a reserved hole in the lazy heap, which closes it for holes that exist at the freeze; the gap left is this
+// narrow window, and the handler takes no lock on purpose.
+static int lazy_commit_mbi(uint64_t addr, uint64_t lo, uint64_t hi, const MEMORY_BASIC_INFORMATION *mbi) {
+    if (mbi && mbi->State == MEM_RESERVE) {
+        uint64_t chunk = __atomic_load_n(&lazy_chunk_sz, __ATOMIC_ACQUIRE);
+        uint64_t a = addr & ~(chunk - 1), e = a + chunk;
+        uint64_t r_lo = (uint64_t)(uintptr_t)mbi->BaseAddress, r_hi = r_lo + mbi->RegionSize;
+        if (a < lo) a = lo;
+        if (a < r_lo) a = r_lo;
+        if (e > hi) e = hi;
+        if (e > r_hi) e = r_hi;
+        if (a >= e || !lazy_commit_retry(a, (size_t)(e - a))) return 0;
+        plat_mem_lazy_mark(a, e);
+        return 1;
+    }
     uint64_t a = addr & ~0xffffull, e = a + 0x10000;
     if (a < lo) a = lo;
     if (e > hi) e = hi;
     for (uint64_t x = a, y; x < e; x = y) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!vm_query(x, &mbi, PLAT_VM_LAZY)) return 0;
-        y = (uint64_t)(uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        MEMORY_BASIC_INFORMATION q;
+        if (!vm_query(x, &q, PLAT_VM_LAZY)) return 0;
+        y = (uint64_t)(uintptr_t)q.BaseAddress + q.RegionSize;
         if (y > e) y = e;
-        if (mbi.State != MEM_RESERVE) continue;
-        // A system-managed page file grows asynchronously: a failure at the commit limit may pass in a moment.
-        DWORD err = 0;
-        int ok = 0;
-        for (int t = 0; t < 5 && !ok; t++) {
-            if (t) Sleep(20);
-            int op = plat_op_begin(PLAT_OP_COMMIT, x, y - x);
-            ok = VirtualAlloc((void *)(uintptr_t)x, y - x, MEM_COMMIT, PAGE_READWRITE) != NULL;
-            if (!ok) err = GetLastError();
-            plat_op_end(op, 0);
-        }
-        if (!ok) {
-            __atomic_store_n(&lazy_fail_addr, x, __ATOMIC_RELAXED);
-            __atomic_store_n(&lazy_fail_err, (uint32_t)err, __ATOMIC_RELAXED);
-            return 0;
-        }
+        if (q.State != MEM_RESERVE) continue;
+        if (!lazy_commit_retry(x, (size_t)(y - x))) return 0;
     }
     if (a == (addr & ~0xffffull) && e == a + 0x10000) plat_mem_lazy_mark(a, e);   // a whole chunk, not one clipped at an end
     return 1;
@@ -796,7 +841,7 @@ static int lazy_commit(uint64_t addr, uint64_t lo, uint64_t hi) {
 static void lazy_fill(uint64_t addr, uint64_t n) {
     uint64_t hi = __atomic_load_n(&lazy_end, __ATOMIC_ACQUIRE), lo = __atomic_load_n(&lazy_base, __ATOMIC_RELAXED);
     if (!n || addr >= hi || addr + n <= lo) return;
-    for (uint64_t c = addr & ~0xffffull; c < addr + n && c < hi; c += 0x10000) lazy_commit(c < lo ? lo : c, lo, hi);
+    for (uint64_t c = addr & ~0xffffull; c < addr + n && c < hi; c += 0x10000) lazy_commit_mbi(c < lo ? lo : c, lo, hi, NULL);
 }
 
 // An access violation inside the lazy heap range on a page that is reserved, or that another thread committed
@@ -806,11 +851,26 @@ static void lazy_fill(uint64_t addr, uint64_t n) {
 static int (*probe_fault)(uint64_t addr, int write, uint64_t rip);
 static int (*probe_marked)(uint64_t addr, uint64_t n);
 static void (*probe_release)(uint64_t addr, uint64_t n, uintptr_t caller);
+static void (*fault_ret_hook)(uint64_t *rip);
 
 void plat_mem_probe_hooks(int (*fault)(uint64_t addr, int write, uint64_t rip), int (*marked)(uint64_t addr, uint64_t n),
                           void (*release)(uint64_t addr, uint64_t n, uintptr_t caller)) {
     probe_marked = marked, probe_release = release;
     __atomic_store_n(&probe_fault, fault, __ATOMIC_RELEASE);
+}
+
+void plat_mem_fault_ret_hook(void (*fn)(uint64_t *rip)) {
+    __atomic_store_n(&fault_ret_hook, fn, __ATOMIC_RELEASE);
+}
+
+static LONG fault_continue(EXCEPTION_POINTERS *ep) {
+    void (*fn)(uint64_t *) = __atomic_load_n(&fault_ret_hook, __ATOMIC_ACQUIRE);
+    if (fn) {
+        uint64_t rip = (uint64_t)ep->ContextRecord->Rip;
+        fn(&rip);
+        ep->ContextRecord->Rip = (DWORD64)rip;
+    }
+    return EXCEPTION_CONTINUE_EXECUTION;
 }
 
 static LONG CALLBACK fault_veh(EXCEPTION_POINTERS *ep) {
@@ -821,23 +881,27 @@ static LONG CALLBACK fault_veh(EXCEPTION_POINTERS *ep) {
     // the lazy-heap path below lets a read on a committed page that is not readable go to the crash handler.
     int (*pf)(uint64_t, int, uint64_t) = __atomic_load_n(&probe_fault, __ATOMIC_ACQUIRE);
     if (pf && er->ExceptionInformation[0] <= 1 && pf(a, (int)er->ExceptionInformation[0], (uint64_t)ep->ContextRecord->Rip))
-        return EXCEPTION_CONTINUE_EXECUTION;
+        return fault_continue(ep);
     uint64_t hi = __atomic_load_n(&lazy_end, __ATOMIC_ACQUIRE), lo = __atomic_load_n(&lazy_base, __ATOMIC_RELAXED);
     if (er->ExceptionInformation[0] <= 1 && a >= lo && a < hi) {
         MEMORY_BASIC_INFORMATION mbi;
-        if (vm_query(a, &mbi, PLAT_VM_LAZY) && mbi.State == MEM_RESERVE) {
-            lazy_commit(a, lo, hi);
-            __atomic_add_fetch(&lazy_faults, 1, __ATOMIC_RELAXED);
-        }
-        // Whoever committed it (this thread or the one that won the race): retry when the access is allowed now.
-        if (vm_query(a, &mbi, PLAT_VM_LAZY) && mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_GUARD)) {
-            DWORD p = mbi.Protect & 0xff;
-            if (p == PAGE_READWRITE || (p == PAGE_READONLY && er->ExceptionInformation[0] == 0))
-                return EXCEPTION_CONTINUE_EXECUTION;
+        if (vm_query(a, &mbi, PLAT_VM_LAZY)) {
+            int ok = 0;
+            if (mbi.State == MEM_RESERVE) {
+                ok = lazy_commit_mbi(a, lo, hi, &mbi);
+                __atomic_add_fetch(&lazy_faults, 1, __ATOMIC_RELAXED);
+                if (ok) return fault_continue(ep);
+                if (!vm_query(a, &mbi, PLAT_VM_LAZY)) mbi.State = 0;   // commit failed: check if a concurrent thread committed it
+            }
+            if (mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_GUARD)) {
+                DWORD p = mbi.Protect & 0xff;
+                if (p == PAGE_READWRITE || (p == PAGE_READONLY && er->ExceptionInformation[0] == 0))
+                    return fault_continue(ep);
+            }
         }
     }
     if (er->ExceptionInformation[0] != 1) return EXCEPTION_CONTINUE_SEARCH;
-    return fault_hook(a) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+    return fault_hook(a) ? fault_continue(ep) : EXCEPTION_CONTINUE_SEARCH;
 }
 
 void plat_mem_fault_hook(int (*fn)(uint64_t addr)) {

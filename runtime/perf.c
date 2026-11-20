@@ -249,12 +249,14 @@ static void ft_report(uint64_t now, const char *tag) {
 }
 
 __attribute__((weak)) void gfx_exit_log(void) {}
+__attribute__((weak)) void kern_ap_exit(void) {}
 
 void perf_summary_flush(void) {   // at exit (prof_write)
     if (summary_t0) {
         ft_report(kern_now_ns(), "exit");
         gfx_exit_log();
         mem_commit_report("exit");
+        kern_ap_exit();
         if (rt_trace & RT_TRACE_PERF) kern_core_waits_exit();
     }
     summary_t0 = 0;
