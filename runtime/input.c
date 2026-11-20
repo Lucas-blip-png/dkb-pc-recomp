@@ -514,6 +514,20 @@ int input_pad_automatic(void) {
     return automatic;
 }
 
+static SDL_Gamepad *pad2;
+static int pad2_east_a;
+static uint64_t pad2_next_scan;
+
+// Under lock. Stop any remaining player 2 vibration before this gamepad changes roles.
+static void pad2_release(void) {
+    if (!pad2) return;
+    SDL_RumbleGamepad(pad2, 0, 0, 0);
+    SDL_CloseGamepad(pad2);
+    pad2 = NULL;
+    pad2_next_scan = 0;
+    rt_log("input: player 2 gamepad released");
+}
+
 // Polling owns the connection history; UI enumeration only reads device identities. Arrivals take over,
 // disconnections fall back, and an explicit preference applies at startup or when changed by the user.
 static void scan_pads(void) {
@@ -537,6 +551,9 @@ static void scan_pads(void) {
             if (devices[i].id != wanted) next = open_pad_locked(devices[i].id);
     if (next && SDL_GetGamepadID(next) != wanted) pad_selection.automatic = 1;
     free(devices);
+    if (pad != next) pad2_next_scan = 0;
+    // Release the old player 2 slot before the same SDL handle can carry player 1 input or rumble.
+    if (pad2 && (!next || SDL_GetGamepadID(pad2) == SDL_GetGamepadID(next))) pad2_release();
     if (pad) {
         SDL_RumbleGamepad(pad, 0, 0, 0);
         SDL_RumbleGamepadTriggers(pad, 0, 0, 0);
@@ -885,21 +902,13 @@ int input_pad_read(uint64_t *buttons, int32_t *lx, int32_t *ly) {
 
 // Player 2 (coop = 1, ov_input.c): the first connected gamepad in SDL's order that is not player 1's. With no gamepad
 // on player 1 there is no player 2 either, so one gamepad always plays player 1. Under lock.
-static SDL_Gamepad *pad2;
-static int pad2_east_a;
-static uint64_t pad2_next_scan;
-
 static void pad2_scan(void) {
     SDL_JoystickID p1 = pad && SDL_GamepadConnected(pad) ? SDL_GetGamepadID(pad) : 0;
-    if (pad2 && SDL_GamepadConnected(pad2) && SDL_GetGamepadID(pad2) != p1) return;
-    if (pad2) {   // SDL counts opens per gamepad, so this keeps player 1's handle when both were the same pad
-        SDL_RumbleGamepad(pad2, 0, 0, 0);
-        SDL_CloseGamepad(pad2);
-        pad2 = NULL;
-        rt_log("input: player 2 gamepad released");
-    }
+    if (p1 && pad2 && SDL_GamepadConnected(pad2) && SDL_GetGamepadID(pad2) != p1) return;
+    pad2_release();
+    if (!p1) return;
     uint64_t now = plat_now_ns() / 1000000u;
-    if (!p1 || now < pad2_next_scan) return;
+    if (now < pad2_next_scan) return;
     pad2_next_scan = now + RESCAN_MS;
     InputPadDevice *devices;
     int n = devices_locked(&devices);
@@ -918,11 +927,7 @@ int input_poll2(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_
     int on = 0;
     plat_mutex_lock(&lock);
     if (!state) start();
-    if (state == 1 && !cfg_bool("TOTK_COOP") && pad2) {
-        SDL_RumbleGamepad(pad2, 0, 0, 0);
-        SDL_CloseGamepad(pad2);
-        pad2 = NULL;
-    }
+    if (state == 1 && !cfg_bool("TOTK_COOP")) pad2_release();
     if (state == 1 && cfg_bool("TOTK_COOP")) {
         pad2_scan();
         if (pad2) {
@@ -1090,7 +1095,8 @@ int input_rumble(uint16_t low, uint16_t high, uint32_t ms) {
 int input_rumble2(uint16_t low, uint16_t high, uint32_t ms) {
     int ok = 0;
     plat_mutex_lock(&lock);
-    if (state == 1 && pad2 && SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad2), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false))
+    if (state == 1 && pad2 && pad && SDL_GamepadConnected(pad) &&
+        SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad2), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false))
         ok = SDL_RumbleGamepad(pad2, low, high, ms);
     plat_mutex_unlock(&lock);
     return ok;
