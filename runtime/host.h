@@ -200,6 +200,8 @@ int mem_frozen(uint64_t a);                                // the 2 MiB region o
 void mem_freeze_exclude(uint64_t a, uint64_t n);
 // Called by mem_thaw, before its lock, for a range with such regions.
 void mem_thaw_hook(void (*fn)(uint64_t a, uint64_t n));
+// Called by memory.c after decommitting [a, a+n) (under memory.c's lock, after frz_lock is released).
+void mem_decommit_hook(void (*fn)(uint64_t a, uint64_t n));
 void mem_thaw(uint64_t a, uint64_t n);                     // makes the frozen regions over [a, a+n) writable again;
                                                            // before a kernel write (file read) into guest memory
 int mem_guest_readable(uint64_t a, uint64_t n);            // 1 a read of [a, a+n) succeeds (heap, mapped alias pages;

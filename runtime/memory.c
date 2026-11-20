@@ -117,6 +117,7 @@ static int frz_whole = -1;
 // pages of a range before a kernel write into it (a file read), which fails on a sealed page as on a read-only one.
 static volatile uint8_t frz_never[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
 static void (*thaw_hook)(uint64_t a, uint64_t n);
+static void (*decommit_hook)(uint64_t a, uint64_t n);
 
 static int heap_lazy(void);
 
@@ -219,6 +220,10 @@ void mem_freeze_exclude(uint64_t a, uint64_t n) {
 }
 
 void mem_thaw_hook(void (*fn)(uint64_t a, uint64_t n)) { thaw_hook = fn; }
+
+void mem_decommit_hook(void (*fn)(uint64_t a, uint64_t n)) {
+    __atomic_store_n(&decommit_hook, fn, __ATOMIC_RELEASE);
+}
 
 static int prb_mode;
 static int (*volatile own_hook)(uint64_t page, int write, uint64_t rip, int kernel);
@@ -752,6 +757,8 @@ static void decommit(uint64_t a, uint64_t n, const char *what) {
     int ok = !n || plat_mem_decommit(a, n);
     plat_mutex_unlock(&frz_lock);
     if (!ok) rt_fatal("memory: decommit %s %#llx+%#llx failed", what, (unsigned long long)a, (unsigned long long)n);
+    void (*fn)(uint64_t, uint64_t) = __atomic_load_n(&decommit_hook, __ATOMIC_ACQUIRE);
+    if (n && fn) fn(a, n);
 }
 
 static void protect(uint64_t a, uint64_t n, int prot, const char *what) {
@@ -1079,12 +1086,12 @@ static void cl_thread(void *arg) {
         plat_mutex_unlock(&CL.lock);
         uint64_t t0 = plat_now_ns();
         for (uint64_t x = a; x < a + n; x += CL_SLICE) {
-            plat_mutex_lock(&lock);
+            plat_mutex_lock_shared(&lock);
             int ok = touch_range(x, a + n - x < CL_SLICE ? a + n - x : CL_SLICE, 0);
-            plat_mutex_unlock(&lock);
-            // `lock` is not fair, and this loop would take it again at once: a guest thread waiting for it in SetHeapSize,
-            // MapMemory or QueryMemory could be passed over for a whole range (about 225 slices for the terrain pool).
-            // Giving up the time slice lets a waiter in after one slice.
+            plat_mutex_unlock_shared(&lock);
+            // `lock` is not fair, and this loop would take it again at once: a guest thread waiting exclusively for it
+            // in SetHeapSize or MapMemory could be passed over for a whole range (about 225 slices for the terrain
+            // pool). Giving up the time slice lets an exclusive waiter in after one slice.
             plat_yield();
             if (!ok) {
                 if (plat_inc64(&cl_failed) <= 4)

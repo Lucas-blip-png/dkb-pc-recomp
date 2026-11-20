@@ -133,6 +133,8 @@ static PoolRec **retiring;
 static uint32_t pool_gen;
 #define GEN_CHUNKS 2
 static void *gen_chunk[GEN_CHUNKS];
+static void *cpu_written_chunk[GEN_CHUNKS];
+void mem_decommit_hook(void (*fn)(uint64_t a, uint64_t n)) { (void)fn; }
 static void destroy_rec(VkCtx *c, PoolRec *r) { (void)c; (void)r; check(0, "fixture has no pool records"); }
 
 void plat_mutex_lock(PlatMutex *m) {

@@ -251,6 +251,20 @@ area = "gfx"
 cmd = ["{python}", "tests/staged_blocked_test.py", "--cc", "{cc}", "--out", "{out}"]
 
 [[test]]
+name = "staged-mirror-opt"
+tier = 1
+area = "gfx"
+cmd = ["{python}", "tests/staged_mirror_opt_test.py", "--cc", "{cc}", "--deps", "{deps}", "--out", "{out}"]
+
+[[test]]
+name = "commit-later-lock"
+tier = 1
+area = "os"
+platform = "windows"
+paths = ["runtime/memory.c"]
+cmd = ["{python}", "tests/commit_later_lock_test.py", "--cc", "{cc}", "--out", "{out}"]
+
+[[test]]
 name = "rec-capture-alone"
 tier = 1
 area = "gfx"
