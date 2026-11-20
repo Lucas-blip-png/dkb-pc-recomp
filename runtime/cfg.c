@@ -354,7 +354,7 @@ int vk_driver_env_apply(void) { return 0; }
 // A NULL cell leaves the key at the built-in default. On Bananza OUTPUT_RES is the game's virtual display (built-in
 // 2880x1620); the game draws its 3D smaller and upscales it unless SCENE_RES = full (level 4: DLAA with DLSS). No
 // frame limit here: below or above 60 it needs the experimental real-time step (frame_rate.c frame_limit_live).
-// "dlss|fsr3" is DLSS on an NVIDIA GPU with nvngx_dlss.dll next to dkb.exe, FSR 3.1
+// "dlss|fsr3" is DLSS in the Windows build on an NVIDIA GPU with nvngx_dlss.dll next to dkb.exe, FSR 3.1
 // otherwise (cfg_preset_resolve). Not applied on the Steam Deck profile, which has its own table.
 static const struct { const char *key, *level[5]; } PRESETS[] = {
     {"OUTPUT_RES", {"1280x720", "1920x1080", NULL, "2560x1440", "3840x2160"}},
@@ -385,9 +385,10 @@ void cfg_preset_resolve(void) {
     int recommended = set && !strcasecmp(set, "recommended");
     if (profile_of()) p = 0, recommended = 0;
     unsigned vram = 0;
-    int integrated = 0, ok = 0;
+    int integrated = 0, nvidia = 0, ok = 0;
     if (recommended || p >= 3) vk_driver_env_apply();
-    if (recommended || p >= 3) ok = vk_hw_probe(&vram, &integrated, &preset_nvidia);   // the Vulkan device is not up yet here
+    if (recommended || p >= 3) ok = vk_hw_probe(&vram, &integrated, &nvidia);   // the Vulkan device is not up yet here
+    preset_nvidia = CFG_HAS_DLSS && nvidia;
     if (preset_nvidia) {   // DLSS only with its model next to dkb.exe, where vk_dlss.c init looks for it
         char path[1024] = "";
         char *cut = plat_exe_path(path, sizeof path - 16) ? strrchr(path, '\\') : NULL;

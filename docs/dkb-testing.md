@@ -350,7 +350,7 @@ integrated GPU; `dkb.log` says `[host] preset: recommended -> N (VRAM ..., RAM .
 
 On Bananza `output_res` is the game's virtual display (built-in 2880x1620); under `scene_res = auto` the game draws the
 3D smaller and upscales it (at the built-in output on update 3.2.0, `dkb.log` says `dlss: Quality 1280x720 -> 1920x1080`).
-DLSS is picked only on an NVIDIA GPU with `nvngx_dlss.dll` next to `dkb.exe`, FSR 3.1 otherwise.
+The Windows build picks DLSS on an NVIDIA GPU with `nvngx_dlss.dll` next to `dkb.exe`. Other configurations use FSR 3.1.
 
 | Level | Output | Scene | Upscaler | ASTC to BC3 | Frame generation | Aimed at |
 | - | - | - | - | - | - | - |

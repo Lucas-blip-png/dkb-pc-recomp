@@ -757,12 +757,23 @@ static void rows_render_options(const MenuTarget &target) {
     }
     // DLSS (runtime/vk_dlss.c) takes effect at the next start: NGX adds its Vulkan extensions when the device is made.
     // fsr and bilinear both mean the game's own upscaler (cfg.c UPSCALER): bilinear shows as the first choice
-    static const char *const up_vals[] = {"fsr", "dlss", "fsr3", "fsr4"};
-    const char *up_names[] = {menu_text(UI_MENU_UPSCALER_GAME), menu_text(UI_MENU_UPSCALER_DLSS),
-                              menu_text(UI_MENU_UPSCALER_FSR3), menu_text(UI_MENU_UPSCALER_FSR4)};
-    int up_cur = 0;
-    for (int i = 1; i < 4; i++)
-        if (!strcmp(cfg_value("TOTK_UPSCALER"), up_vals[i])) up_cur = i;
+    static const struct { const char *value; UiTextId label; } choices[] = {
+        {"fsr", UI_MENU_UPSCALER_GAME},
+#if CFG_HAS_DLSS
+        {"dlss", UI_MENU_UPSCALER_DLSS},
+#endif
+        {"fsr3", UI_MENU_UPSCALER_FSR3}, {"fsr4", UI_MENU_UPSCALER_FSR4}
+    };
+    enum { N = sizeof choices / sizeof *choices };
+    const char *up_vals[N], *up_names[N];
+    const char *requested = cfg_value("TOTK_UPSCALER");
+    bool unavailable = !CFG_HAS_DLSS && !strcmp(requested, "dlss");
+    int up_cur = unavailable ? -1 : 0;   // keep a saved DLSS value visible until the player picks a replacement
+    for (int i = 0; i < N; i++) {
+        up_vals[i] = choices[i].value;
+        up_names[i] = menu_text(choices[i].label);
+        if (!strcmp(requested, up_vals[i])) up_cur = i;
+    }
     int fitted[4];
     gfx_fit_rect(target.image_w, target.image_h, target.width, target.height, fitted);
     bool no_upscale = target.image_w > 0 && target.image_h > 0 &&
@@ -771,7 +782,8 @@ static void rows_render_options(const MenuTarget &target) {
     // whether or not the final image fits the display, so the row stays open there: greyed out at the default
     // 2880x1620 virtual display on a 1440p or 1080p screen, it hid DLSS from the players of issues #152 and #306.
     if (no_upscale && rt_game_version) opt_disable_next(UI_MENU_NO_UPSCALING);
-    opt_choice_list("TOTK_UPSCALER", UI_MENU_UPSCALER, up_vals, up_names, 4, UI_MENU_UPSCALER_DESC, up_cur);
+    opt_choice_list("TOTK_UPSCALER", UI_MENU_UPSCALER, up_vals, up_names, N, UI_MENU_UPSCALER_DESC, up_cur,
+                    unavailable ? menu_text(UI_MENU_DLSS_WINDOWS_ONLY) : nullptr);
     if (!rt_game_version && rt_patch_set("dkbscene") >= 0 && up_cur > 0) {   // dkb_wide.c dkb_scene_ratio
         static const UiTextId modes[] = {UI_MENU_AUTO, UI_MENU_DLSS_MODE_DLAA, UI_MENU_DLSS_MODE_QUALITY,
                                          UI_MENU_DLSS_MODE_BALANCED, UI_MENU_DLSS_MODE_PERFORMANCE,

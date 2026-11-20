@@ -28,6 +28,12 @@ int cfg_from_env(const char *name);
 int cfg_is_set(const char *name);
 // The device profile in use, "deck" or "desktop" (TOTK_DEVICE_PROFILE, else what the machine is).
 const char *cfg_device_profile(void);
+// vk_dlss.c loads NGX in Windows builds. Presets and menu choices can offer DLSS in those builds.
+#ifdef _WIN32
+#define CFG_HAS_DLSS 1
+#else
+#define CFG_HAS_DLSS 0
+#endif
 // The performance preset (TOTK_PRESET: custom, recommended or 1..5) as a defaults table below the environment and
 // totk.ini. cfg_init resolves it (recommended probes the GPU, the memory and the processors); the probe calls it after
 // loading its own file. cfg_preset_score is the level a machine fits; parts (optional) gets the VRAM, RAM and CPU levels.

@@ -142,11 +142,12 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                "sharper picture at a higher GPU cost, and the upscaler and DLSS are not used. Applies at the next start.",
     [UI_MENU_SCENE_RES_AUTO] = "Auto (game)", [UI_MENU_SCENE_RES_FULL] = "Full",
     [UI_MENU_UPSCALER] = "Upscaling method",
-    [UI_MENU_UPSCALER_DESC] = "What scales the game's 3D scene up. Game's own keeps the game's upscaler. NVIDIA DLSS (RTX GPU, "
+    [UI_MENU_UPSCALER_DESC] = "What scales the game's 3D scene up. Game's own keeps the game's upscaler. NVIDIA DLSS (Windows build, RTX GPU, "
                               "nvngx_dlss.dll next to dkb.exe), AMD FSR 3.1 and AMD FSR 4 replace it; DLSS applies at the next start. "
                               "How the finished picture is then fitted to the window is the Window scaling filter's.",
     [UI_MENU_UPSCALER_GAME] = "Game's own", [UI_MENU_UPSCALER_DLSS] = "NVIDIA DLSS",
     [UI_MENU_UPSCALER_FSR3] = "AMD FSR 3.1", [UI_MENU_UPSCALER_FSR4] = "AMD FSR 4",
+    [UI_MENU_DLSS_WINDOWS_ONLY] = "DLSS requires the Windows build",
     [UI_MENU_PRESET] = "Performance preset",
     [UI_MENU_PRESET_DESC] = "Sets the render resolution, upscaler, texture compression and frame generation "
                             "for a class of PC. Recommended picks the level from your GPU memory, RAM and processor count. "
@@ -567,9 +568,10 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_SCENE_RES_AUTO] = "Авто (игра)", [UI_MENU_SCENE_RES_FULL] = "Полное",
     [UI_MENU_UPSCALER] = "Метод апскейла",
     [UI_MENU_UPSCALER_DESC] = "Чем увеличивается 3D-сцена игры. «Апскейлер игры» оставляет встроенный апскейлер игры. NVIDIA DLSS "
-                              "(видеокарта RTX, nvngx_dlss.dll рядом с dkb.exe), AMD FSR 3.1 и AMD FSR 4 заменяют его; DLSS "
+                              "(сборка для Windows, видеокарта RTX, nvngx_dlss.dll рядом с dkb.exe), AMD FSR 3.1 и AMD FSR 4 заменяют его; DLSS "
                               "применяется при следующем запуске. Как готовая картинка потом подгоняется под окно, определяет "
                               "фильтр масштабирования под окно.",
+    [UI_MENU_DLSS_WINDOWS_ONLY] = "DLSS требует сборку для Windows",
     [UI_MENU_PRESET] = "Набор настроек производительности",
     [UI_MENU_PRESET_DESC] = "Задаёт разрешение рендеринга, апскейлер, сжатие текстур и генерацию кадров для "
                             "класса ПК. «Рекомендуемый» выбирает уровень по видеопамяти, ОЗУ и числу процессоров. "
