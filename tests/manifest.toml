@@ -682,6 +682,12 @@ area = "gfx"
 cmd = ["{python}", "tests/texture_written_late_test.py", "--cc", "{cc}", "--deps", "{deps}", "--out", "{out}"]
 
 [[test]]
+name = "hold-takeback"
+tier = 1
+area = "gfx"
+cmd = ["{python}", "tests/hold_takeback_test.py", "--cc", "{cc}", "--deps", "{deps}", "--out", "{out}"]
+
+[[test]]
 name = "vk-spec-handoff"
 tier = 1
 area = "gfx"

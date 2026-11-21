@@ -560,6 +560,9 @@ static inline void vk_tex_fb_learn(VkTexImage *img) { __atomic_store_n(&img->fb_
 // is let go for the wait (vk_texture.c hold_barrier). Any other thread, or no held slice left: returns at once.
 void vk_texture_hold_barrier(void);
 const VkTexImage *vk_texture_get(const tex_t *t);   // created and made current; NULL for BUFFER or unmapped formats
+const VkTexImage *vk_texture_get_target(const tex_t *t);   // vk_texture_get for a render target (resolve_target)
+uint64_t vk_texture_takebacks(void);                // non-waiting takebacks so far (for vk_texture_view)
+void vk_texture_view(uint64_t upto);                // held slice: hide takebacks with live_seq >= upto; 0 sees all
 // An ASTC image kept as BC1 made BC3 again and uploaded whole, before texels that may carry alpha are written into it
 // (vk_exec_xfer.c's copies into a decoded ASTC image, WriteTexels). Any other image is left as it is. 1 when the image
 // is BC3 and the copy may go on; 0 when it is a BC1 image whose remake failed, or there is no image at all, since a

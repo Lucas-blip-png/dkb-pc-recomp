@@ -56,7 +56,9 @@ def main():
                     *(('batch_status',) if 'static VkResult batch_status(' in memory else ()), 'retire',
                     'collect_locked', 'defer', 'vk_defer_image', 'vk_defer_view', frontier, 'vk_mem_collect',
                     'vk_mem_shutdown')
-    texture_names = ('make_key', 'same_but_swizzle', 'rel_unlink', 'destroy_tex', 'entry_of', 'slot_resolve')
+    texture_names = ('make_key', 'same_but_swizzle', 'rel_unlink', 'destroy_tex',
+                     *(('tex_is_released', 'tex_same_desc', 'takeback_free') if 'static int tex_same_desc(' in texture else ()),
+                     'entry_of', 'slot_resolve')
     sync_names = ('claim_slot', 'take_slot', 'vk_sync_split', 'vk_sync_submit')
     extracts = {}
 

@@ -65,6 +65,7 @@ typedef struct Tex {
     uint8_t listed;               // in owned[]
     uint8_t *snap;                // a texture that fills no page: its storage bytes when the GPU write was recorded
     uint32_t wt_n;                // WriteTexels into the storage since the last upload
+    uint64_t live_seq;            // non-waiting takeback sequence (0 on creation or after hold_barrier)
     struct Tex *rel_prev, *rel_next;   // while released: the list of released entries, oldest first
 } Tex;
 
@@ -118,6 +119,13 @@ static uint64_t n_hash_kept;   // untracked checks whose storage hash matched th
 // live image that the GPU wrote gets that image's content (alias_copy). Counts since the last log line.
 static int tex_alias = -1;
 static uint64_t n_alias_copied, n_alias_upload, n_alias_uninit;
+static uint64_t n_hold_new, n_hold_back, n_hold_desc;
+static uint64_t n_takeback, n_tb_not_target, n_tb_desc, n_tb_upload;
+static int takeback_mode = -1;
+static int takeback_logged;
+static _Thread_local int target_lookup;
+static uint64_t tex_tb_seq;         // monotonic counter bumped only on non-waiting takebacks
+static _Thread_local uint64_t view_upto;   // 0: walk sees all; >0: held slice hides takebacks >= view_upto
 static uint32_t submit_epoch = 1;   // bumped per queue submit: draw bindings check a texture's storage once per submit
 // Mirrored textures the GPU wrote into, sorted by address (vk_texture_cpu_stale, vk_texture_write_back). Changed under
 // tex_lock and owned_lock; read under either.
@@ -140,9 +148,21 @@ static uint64_t n_checks;    // draw-binding storage checks (make_fresh_snap) si
 // which emptied every cache keyed on the global generations.
 #define AGEN_N 4096
 static uint32_t agen[AGEN_N];
+static uint64_t agen_tb[AGEN_N];    // newest tex_tb_seq bumped in this agen bucket (release/acquire)
 static uint32_t reg_serial;
 
 static uint32_t agen_idx(uint64_t addr) { return (uint32_t)(addr * 0x9E3779B97F4A7C15ull >> 52); }
+
+uint64_t vk_texture_takebacks(void) { return __atomic_load_n(&tex_tb_seq, __ATOMIC_ACQUIRE); }
+void vk_texture_view(uint64_t upto) { view_upto = upto; }
+
+static inline int tex_is_released(const Tex *e) {
+    return e->released || (view_upto && e->live_seq >= view_upto);
+}
+
+static inline int tb_bucket_stale(uint32_t aidx) {
+    return view_upto && __atomic_load_n(&agen_tb[aidx], __ATOMIC_ACQUIRE) >= view_upto;
+}
 
 // A generation per descriptor slot (hashed by the DescSlot's address), bumped before the slot is registered again and
 // when it is retired. While it stays, the slot's serial, kind and texture address stay, so its token
@@ -171,9 +191,9 @@ static uint32_t chk_idx(uint32_t serial) { return (uint32_t)(serial * 0x9E3779B9
 
 static void tex_gen_bump(uint64_t addr) {
     if (!++tex_gen) tex_gen = 1;
-    slots_gen++;
     uint32_t *g = &agen[agen_idx(addr)];
     __atomic_store_n(g, *g + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&slots_gen, slots_gen + 1, __ATOMIC_RELEASE);
 }
 
 static volatile int32_t tex_ready;
@@ -1113,16 +1133,60 @@ static int alias_copy(Tex *e, const Tex *src) {
     return 1;
 }
 
+// Compares every descriptor, layout, and storage field of tex_t that vk_texture.c uses, excluding magic, serial,
+// unused bitfield padding, and struct padding.
+static int tex_same_desc(const tex_t *a, const tex_t *b) {
+    return a->mem == b->mem && a->pool == b->pool && a->off == b->off &&
+           a->has_layout == b->has_layout && (!a->has_layout || !memcmp(a->layout, b->layout, sizeof a->layout)) &&
+           a->d.target == b->d.target && a->d.format == b->d.format && a->d.flags == b->d.flags &&
+           a->d.samples == b->d.samples && a->d.width == b->d.width && a->d.height == b->d.height &&
+           a->d.depth == b->d.depth && a->d.levels == b->d.levels && a->d.stride == b->d.stride &&
+           a->d.pkg_block_h == b->d.pkg_block_h && a->d.swizzle_r == b->d.swizzle_r &&
+           a->d.swizzle_g == b->d.swizzle_g && a->d.swizzle_b == b->d.swizzle_b &&
+           a->d.swizzle_a == b->d.swizzle_a &&
+           a->L.size == b->L.size && a->L.layer_size == b->L.layer_size && a->L.align == b->L.align &&
+           a->L.layers == b->L.layers && a->L.bpb == b->L.bpb && a->L.tileH == b->L.tileH &&
+           a->L.tileD == b->L.tileD;
+}
+
+// 1 when taking back a released render target without waiting for held slices cannot disturb any held slice:
+// the lookup is for a render target, the descriptor and storage are unchanged, and make_fresh will not upload over
+// the image. Held slices still see the entry as released through live_seq / vk_texture_view. Caller holds tex_lock.
+static int takeback_free(const Tex *e, const tex_t *t, const TexKey *k) {
+    (void)k;
+    if (takeback_mode < 0) takeback_mode = rt_knob("HOLD_TAKEBACK", "1");
+    if (!RT_KNOB_ON(takeback_mode)) return 0;
+    if (!target_lookup) { n_tb_not_target++; return 0; }
+    if (!tex_same_desc(&e->t, t)) { n_tb_desc++; return 0; }
+    if (e->pub.mirrored && !e->pub.gpu_owned) { n_tb_upload++; return 0; }
+    return 1;
+}
+
 static Tex *entry_of(const tex_t *t) {
     TexKey k;
     make_key(t, &k);
     Tex *e = nvn_hm_get(&by_key, &k);
-    if ((!e || e->released || memcmp(&e->t, t, sizeof *t)) && vk_exec_held_pending())
-        hold_barrier(), e = nvn_hm_get(&by_key, &k);   // a held slice may have made it meanwhile
+    int skipped_hold = 0;
+    if ((!e || e->released || !tex_same_desc(&e->t, t)) && vk_exec_held_pending()) {
+        if (e && e->released && takeback_free(e, t, &k)) {
+            if (!takeback_logged) {
+                takeback_logged = 1;
+                rt_log("vk: a render target was taken back without waiting for held slices (TOTK_HOLD_TAKEBACK)");
+            }
+            n_takeback++;
+            skipped_hold = 1;
+        } else {
+            if (!e) n_hold_new++;
+            else if (e->released) n_hold_back++;
+            else n_hold_desc++;
+            hold_barrier();
+            e = nvn_hm_get(&by_key, &k);   // a held slice may have made it meanwhile
+        }
+    }
     if (vk_spec_helper()) {
         // The helper thread only reads: an entry to create, to take back into use or to describe anew is the replay
         // thread's to change, at its own position in the submission.
-        if (!e || e->released || memcmp(&e->t, t, sizeof *t)) return vk_spec_fail(VK_SPEC_TEXTURE), NULL;
+        if (!e || e->released || !tex_same_desc(&e->t, t)) return vk_spec_fail(VK_SPEC_TEXTURE), NULL;
         return e;
     }
     if (!e) {
@@ -1174,8 +1238,17 @@ static Tex *entry_of(const tex_t *t) {
         tex_gen_bump(k.addr);
         vk_spec_world_changed();
     }
-    if (e->released) e->released = 0, nreleased--, rel_unlink(e), tex_gen_bump(k.addr), vk_spec_world_changed();
-    if (memcmp(&e->t, t, sizeof *t)) vk_spec_event(), e->t = *t;   // described anew: the helper leaves that to this thread
+    if (e->released) {
+        if (skipped_hold) {
+            uint64_t seq = __atomic_add_fetch(&tex_tb_seq, 1, __ATOMIC_RELEASE);
+            e->live_seq = seq;
+            __atomic_store_n(&agen_tb[agen_idx(k.addr)], seq, __ATOMIC_RELEASE);
+        } else {
+            e->live_seq = 0;
+        }
+        e->released = 0, nreleased--, rel_unlink(e), tex_gen_bump(k.addr), vk_spec_world_changed();
+    }
+    if (!tex_same_desc(&e->t, t)) vk_spec_event(), e->t = *t;   // described anew: the helper leaves that to this thread
     return e;
 }
 
@@ -1195,6 +1268,17 @@ const VkTexImage *vk_texture_get(const tex_t *t) {
     if (!t || !t->mem) return NULL;
     lock();
     Tex *e = entry_of(t);
+    if (e) make_fresh(e);
+    unlock();
+    return e ? &e->pub : NULL;
+}
+
+const VkTexImage *vk_texture_get_target(const tex_t *t) {
+    if (!t || !t->mem) return NULL;
+    lock();
+    target_lookup = 1;
+    Tex *e = entry_of(t);
+    target_lookup = 0;
     if (e) make_fresh(e);
     unlock();
     return e ? &e->pub : NULL;
@@ -1417,14 +1501,14 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
     TexKey k;
     make_key(&s->t, &k);
     Tex *e = nvn_hm_get(&by_key, &k);
-    if (!e || e->released) {   // MNG hle_nvn.c: a finalized slot follows the live texture at its storage
+    if (!e || tex_is_released(e)) {   // MNG hle_nvn.c: a finalized slot follows the live texture at its storage
         // Prefer the live entry that differs from the slot descriptor only in its swizzle: transient render targets
         // share storage, and the newest one at the address is usually another size. The map screen samples its
         // 2250x1080 map target through an (R,G,B,1) descriptor and followed a 960x60 target at the same address.
         Tex *own = e, *any = NULL;
         e = NULL;
         for (Tex *p = nvn_hm_get(&by_addr, &k.addr); p; p = p->next_at) {
-            if (p->released) continue;
+            if (tex_is_released(p)) continue;
             if (!any) any = p;
             if (same_but_swizzle(&p->key, &k)) { e = p; break; }
         }
@@ -1452,7 +1536,7 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
 
 void vk_texture_lock(void) { lock(); }
 void vk_texture_unlock(void) { unlock(); }
-uint32_t vk_texture_slots_gen(void) { return slots_gen; }
+uint32_t vk_texture_slots_gen(void) { return __atomic_load_n(&slots_gen, __ATOMIC_ACQUIRE); }
 
 uint64_t vk_texture_slot_token(const dpool_ref *pool, int id) { return vk_texture_slot_token_stamped(pool, id, NULL); }
 
@@ -1462,17 +1546,18 @@ uint64_t vk_texture_slot_token_stamped(const dpool_ref *pool, int id, VkSlotStam
     DescSlot *d = descriptor_slot(pool, id, 1u << 20, 0);
     int tex = d && d->kind == DESC_TEXTURE;
     uint32_t aidx = tex ? agen_idx((uintptr_t)d->u.tex.t.mem) : 0;
-    uint64_t token = tex ? (uint64_t)d->serial << 32 | __atomic_load_n(&agen[aidx], __ATOMIC_ACQUIRE) : 0;
+    int stale = tex && tb_bucket_stale(aidx);
+    uint64_t token = tex && !stale ? (uint64_t)d->serial << 32 | __atomic_load_n(&agen[aidx], __ATOMIC_ACQUIRE) : 0;
     if (st) {
         *st = (VkSlotStamp){0};
-        if (tex) st->serial = d->serial, st->ridx = rgen_idx(d), st->rgen = rgen[st->ridx], st->aidx = aidx, st->valid = 1;
+        if (tex && !stale) st->serial = d->serial, st->ridx = rgen_idx(d), st->rgen = rgen[st->ridx], st->aidx = aidx, st->valid = 1;
     }
     unlock();
     return token;
 }
 
 uint64_t vk_texture_slot_token_again(const VkSlotStamp *st) {
-    if (!st->valid || __atomic_load_n(&rgen[st->ridx], __ATOMIC_ACQUIRE) != st->rgen) return 0;
+    if (!st->valid || __atomic_load_n(&rgen[st->ridx], __ATOMIC_ACQUIRE) != st->rgen || tb_bucket_stale(st->aidx)) return 0;
     return (uint64_t)st->serial << 32 | __atomic_load_n(&agen[st->aidx], __ATOMIC_ACQUIRE);
 }
 uint32_t vk_sampler_gen(void) { return __atomic_load_n(&samp_gen, __ATOMIC_RELAXED); }
@@ -1492,7 +1577,20 @@ const VkTexImage *vk_texture_by_id_locked(const dpool_ref *pool, int id, view_t 
     DescSlot *d = descriptor_slot(pool, id, 1u << 20, 0);
     if (!d || d->kind != DESC_TEXTURE) return NULL;
     TexSlot *s = &d->u.tex;
-    uint32_t g = agen[agen_idx((uintptr_t)s->t.mem)];
+    uint32_t aidx = agen_idx((uintptr_t)s->t.mem);
+    if (tb_bucket_stale(aidx)) {
+        view_t v;
+        int hv;
+        Tex *e = slot_resolve(s, &v, &hv);
+        if (e && (!e->uploaded || e->checked != submit_epoch)) {
+            if (!make_fresh_snap(e)) return NULL;
+            e->checked = submit_epoch;
+        }
+        if (view) *view = has_view ? v : s->v;
+        if (has_view) *has_view = view ? hv : s->has_view;
+        return e ? &e->pub : NULL;
+    }
+    uint32_t g = agen[aidx];
     if (!s->ce || s->cgen != g) {   // resolved again: an entry at its address was created, dropped or released, or the
         view_t v;                   // slot registered (s->ce cleared); an empty result is not kept: image creation may
         int hv;                     // succeed later
@@ -1577,9 +1675,16 @@ void vk_texture_new_submit(void) {
                (unsigned long long)f * 60, (unsigned long long)ck, (unsigned long long)n_checks, (unsigned long long)calls,
                (unsigned long long)untr);
         n_checks = 0;
-        rt_log("perf: frame %llu: released textures kept %d, dropped under VRAM pressure %llu", (unsigned long long)f * 60,
-               nreleased, (unsigned long long)n_pressure_drops);
+        rt_log("perf: frame %llu: released textures kept %d, dropped under VRAM pressure %llu; "
+               "held waits: new %llu, back %llu, desc %llu; takeback skipped %llu "
+               "(declined: target %llu, desc %llu, upload %llu)",
+               (unsigned long long)f * 60, nreleased, (unsigned long long)n_pressure_drops,
+               (unsigned long long)n_hold_new, (unsigned long long)n_hold_back, (unsigned long long)n_hold_desc,
+               (unsigned long long)n_takeback, (unsigned long long)n_tb_not_target, (unsigned long long)n_tb_desc,
+               (unsigned long long)n_tb_upload);
         n_pressure_drops = 0;
+        n_hold_new = n_hold_back = n_hold_desc = 0;
+        n_takeback = n_tb_not_target = n_tb_desc = n_tb_upload = 0;
     }
     unlock();
 }

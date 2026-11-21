@@ -3,6 +3,8 @@
 #include <windows.h>
 
 void vk_texture_new_submit(void) {}
+int rt_knob(const char *name, const char *def) { (void)name; return def && !strcmp(def, "1"); }
+int rt_ab(void) { return 1; }
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -119,6 +121,16 @@ static nvn_hmap view_of = {.klen = sizeof(ViewKey)}, views_by_image = {.klen = 8
 static Tex *rel_head, *rel_tail;
 static int nreleased, tex_alias = -1;
 static uint64_t n_alias_copied, n_alias_upload, n_alias_uninit;
+static uint64_t n_hold_new, n_hold_back, n_hold_desc;
+static uint64_t n_takeback, n_tb_not_target, n_tb_desc, n_tb_upload;
+static int takeback_mode = -1;
+static int takeback_logged;
+static _Thread_local int target_lookup;
+static uint64_t tex_tb_seq;
+static _Thread_local uint64_t view_upto;
+#define AGEN_N 4096
+static uint64_t agen_tb[AGEN_N];
+static uint32_t agen_idx(uint64_t addr) { return (uint32_t)(addr * 0x9E3779B97F4A7C15ull >> 52); }
 static tex_t texture_b;
 static TexSlot slot_a;
 
@@ -347,6 +359,9 @@ int main(int argc, char **argv) {
         gpu = 2; driver_pending = 0; vk_mem_collect(); vk_mem_collect();
         check(image_dead == (scenario != EMPTY) && view_dead == (scenario != EMPTY) && ndead == 0 && !premature && !waits, "exactly-once retirement after the current fence");
     }
-    check(cap_inflight == 1 && (!rel_head || scenario == SHUTDOWN) && n_alias_copied == 0 && n_alias_upload == 0 && n_alias_uninit == 0, "isolated metadata adapters");
+    check(cap_inflight == 1 && (!rel_head || scenario == SHUTDOWN) && n_alias_copied == 0 && n_alias_upload == 0 &&
+          n_alias_uninit == 0 && n_hold_new == 0 && n_hold_back == 0 && n_hold_desc == 0 && n_takeback == 0 &&
+          n_tb_not_target == 0 && n_tb_desc == 0 && n_tb_upload == 0 && tex_tb_seq == 0 && agen_tb[0] == 0,
+          "isolated metadata adapters");
     printf("PASS %s: actual submit/split/retirement code; synthetic driver; no Vulkan library linked\n", names[scenario]); return 0;
 }
