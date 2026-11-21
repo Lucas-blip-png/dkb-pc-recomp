@@ -2,6 +2,7 @@
 // slices (textures, samplers, programs, windows, state objects, command buffers). Adapted from MacNativeGames games/totk/third_party/d2r_gfx/gfx/nvn/hle_nvn.c and nvn_impl.h @ b75be8cf
 // (MIT, Copyright (c) 2026 jhaizhou; origin d2r-mobile).
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 
 #include "gfx.h"
@@ -111,6 +112,19 @@ uint32_t nvn_copy_zombies(void);                           // tests: released co
 uint64_t nvn_handle_bytes(uint64_t handle);                // bytes of the copy, OP_BEGIN to OP_END; 0 if not live
 uint64_t nvn_submit_count(void);                           // QueueSubmitCommands calls so far
 const char *nvn_op_name(uint32_t op);                      // "DRAW_IDX", ...; "?" past OP_COUNT_
+// The uniform ranges a recording binds, for the back end's uniform snapshot (vk_usnap.c, TOTK_USNAP_LIST).
+// EndRecording gathers the recording's normalized OP_BIND_UBO ranges (and its OP_CALL callees' lists under
+// TOTK_CALL_REF) and, when nvn_ubo_lists_on says so, hands them to nvn_ubo_list_build, which sorts them by lo and
+// merges overlapping or touching ranges in place; the copy keeps that list until it is released. Both are weak in
+// nvn_api_cmd.c (no lists) and defined by the back end. nvn_handle_ubo_list gives a live copy's list, NULL when it has
+// none (lists off when it was recorded, a callee lacked a list, or a per-submission clone of TOTK_REPLAY_ASYNC); the
+// caller then walks its records.
+typedef struct { uint64_t lo, hi; } nvn_range;
+typedef struct { uint64_t n; nvn_range r[]; } nvn_range_list;
+int nvn_ubo_lists_on(void);
+size_t nvn_ubo_list_build(nvn_range *r, size_t n);
+const nvn_range_list *nvn_handle_ubo_list(uint64_t handle);
+uint64_t nvn_ubo_lists_live(void);                         // lists held by copies and released copies not yet freed
 // MemoryPoolInvalidateMappedRange: the CPU is about to read pool storage the GPU wrote. Weak no-op in nvn_ext.c; a back
 // end that renders into host-side copies defines it and writes them back.
 void nvn_pool_invalidate(const pool_t *p, uint64_t off, uint64_t size);

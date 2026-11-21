@@ -19,6 +19,10 @@
 // TOTK_USNAP_FAST=0 runs collect, sort, drop and copy as they were; by default each step takes a shortcut (repeated
 // ranges skipped, fewer radix passes, repeated GPU writes merged, and with a CPU copy one copy into the arena), and its
 // comment says why the result is the same.
+// TOTK_USNAP_LIST=1 (on by default; "0" turns it off, "ab" alternates per submission) takes each recording's ranges
+// from a merged list built at EndRecording (nvn_api_cmd.c take_recording, nvn_ubo_list_build below, composing callee
+// lists across OP_CALL) instead of walking every op here; TOTK_USNAP_LIST_CHECK=1 also walks the full op tree and logs
+// any list that differs.
 #include <stdlib.h>
 #include <string.h>
 
@@ -42,7 +46,7 @@ typedef struct Arena {
     uint64_t size;
 } Arena;
 
-typedef struct { uint64_t lo, hi; } Rng;
+typedef nvn_range Rng;
 typedef struct { uint64_t lo, hi, off, dropped; } Reg;   // dropped: the drop's number (U.dseq), 0 while kept
 typedef struct { uint64_t lo, hi, fence; } Wrote;
 
@@ -66,6 +70,7 @@ static struct {
     uint64_t wr_added;   // GPU write ranges added to wr (vk_usnap_drop), for the summary
     uint64_t wr_coalesced;   // GPU writes that raised the newest tail entry's fence instead (drop, USNAP_FAST)
     uint64_t repeats;    // collected ranges that repeated one collected earlier in the submission (add_range, USNAP_FAST)
+    uint64_t handles, lhandles, list_bad;   // handles of submissions with a snapshot, those taken from lists, bad lists
 } U;
 
 // The helper threads (vk_spec.h) look regions up in vk_usnap_find while the replay thread drops some of them
@@ -159,7 +164,15 @@ static void add_range(Rng r) {
     U.col[U.ncol++] = r;
 }
 
-static void collect(const op_hdr *h, int depth) {
+static void col_append(const nvn_range_list *l) {
+    if (!l->n) return;
+    while ((uint64_t)(U.ccol - U.ncol) < l->n) U.col = grow(U.col, &U.ccol, sizeof *U.col);
+    memcpy(U.col + U.ncol, l->r, (size_t)l->n * sizeof *l->r);
+    U.ncol += (int)l->n;
+    U.cols += l->n;
+}
+
+static void collect(const op_hdr *h, int depth, int allow_callee_lists) {
     for (;;) {
         if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_)
             rt_fatal("vk_usnap: corrupt command record at %p: op %u size %u", (const void *)h, h->op, h->size);
@@ -169,7 +182,12 @@ static void collect(const op_hdr *h, int depth) {
             h = (const op_hdr *)(uintptr_t)((const p_jump *)a)->target;
             continue;
         }
-        if (h->op == OP_CALL && depth < CALL_DEPTH) collect(nvn_op_first(((const p_jump *)a)->target), depth + 1);
+        if (h->op == OP_CALL && depth < CALL_DEPTH) {
+            uint64_t target = ((const p_jump *)a)->target;
+            const nvn_range_list *cl = allow_callee_lists ? nvn_handle_ubo_list(target) : NULL;
+            if (cl) col_append(cl);
+            else collect(nvn_op_first(target), depth + 1, allow_callee_lists);
+        }
         if (h->op == OP_BIND_UBO) {
             const p_bind_buf *b = a;
             if (b->addr && b->size) {
@@ -201,14 +219,107 @@ static int radix_passes(uint64_t span) {
     return p;
 }
 
+// ---- per-recording lists (TOTK_USNAP_LIST)
+// A recording's uniform ranges are known when the game ends it: EndRecording (nvn_api_cmd.c take_recording) gathers
+// its normalized uniform bindings (and composes OP_CALL callees' merged lists under TOTK_CALL_REF) and calls
+// nvn_ubo_list_build on the recording thread, which sorts them by lo and merges those that overlap or touch.
+// vk_usnap_begin then appends each handle's list to U.col instead of walking its ops. Only the bindings' addresses are
+// needed, and no uniform binding changes between EndRecording and the submit (deferred binds are textures, samplers,
+// images and push constants: resolve_deferred).
+static int list_mode;   // rt_knob + 1; 0: not read yet. Read by the recording threads and the replaying thread.
+
+static int list_knob(void) {
+    int m = __atomic_load_n(&list_mode, __ATOMIC_RELAXED);
+    if (!m) m = rt_knob("USNAP_LIST", "1") + 1, __atomic_store_n(&list_mode, m, __ATOMIC_RELAXED);
+    return m - 1;
+}
+
+// Lists are built whenever the knob is on or "ab": the A/B decides per submission whether vk_usnap_begin uses them.
+int nvn_ubo_lists_on(void) { return list_knob() != 0; }
+
+#define RNG_LESS(x, y) ((x)->lo < (y)->lo)
+MSORT_DEFINE(sort_rng, Rng, RNG_LESS)   // per recording, on its thread, with a buffer of that thread
+
+// Sorted ranges that overlap or touch merged in place, as vk_usnap_begin merges U.col; returns how many are left.
+static size_t rng_merge(Rng *r, size_t n) {
+    size_t m = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (m && r[i].lo <= r[m - 1].hi) {
+            if (r[i].hi > r[m - 1].hi) r[m - 1].hi = r[i].hi;
+        } else {
+            r[m++] = r[i];
+        }
+    }
+    return m;
+}
+
+// r: n normalized ranges (lo aligned to ALIGN, hi > lo; callee-merged ranges may exceed MAX_RANGE), sorted by lo and
+// merged in place; returns how many are left. Called on any recording thread.
+size_t nvn_ubo_list_build(nvn_range *r, size_t n) {
+    static _Thread_local Rng *tmp;
+    static _Thread_local size_t ctmp;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++)
+        if (r[i].hi > r[i].lo) r[k++] = r[i];
+    if (k <= 1) return k;
+    if (k <= 16) {
+        for (size_t i = 1; i < k; i++) {
+            Rng v = r[i];
+            size_t j = i;
+            while (j > 0 && r[j - 1].lo > v.lo) r[j] = r[j - 1], j--;
+            r[j] = v;
+        }
+        return rng_merge(r, k);
+    }
+    size_t s = 1;
+    while (s < k && r[s].lo >= r[s - 1].lo) s++;
+    if (s >= k) return rng_merge(r, k);
+    if (k >= 256 && k <= (size_t)INT32_MAX) {
+        uint64_t lo = UINT64_MAX, hi = 0;
+        for (size_t i = 0; i < k; i++) {
+            if (r[i].lo < lo) lo = r[i].lo;
+            if (r[i].lo > hi) hi = r[i].lo;
+        }
+        uint64_t span = (hi - lo) / ALIGN;
+        if (!(span >> (3 * RADIX_BITS))) {
+            if (ctmp < k) {
+                Rng *q = realloc(tmp, k * sizeof *q);
+                if (!q) rt_fatal("vk_usnap: out of memory");
+                tmp = q, ctmp = k;
+            }
+            int passes = 1;
+            while (passes < 3 && span >> (passes * RADIX_BITS)) passes++;
+            Rng *src = r, *dst = tmp;
+            for (int pass = 0; pass < passes; pass++) {
+                int shift = pass * RADIX_BITS;
+                uint32_t count[1 << RADIX_BITS] = {0};
+                for (size_t i = 0; i < k; i++) count[(src[i].lo - lo) / ALIGN >> shift & ((1 << RADIX_BITS) - 1)]++;
+                for (size_t b = 0, sum = 0; b < (1u << RADIX_BITS); b++) {
+                    uint32_t c = count[b];
+                    count[b] = (uint32_t)sum, sum += c;
+                }
+                for (size_t i = 0; i < k; i++) dst[count[(src[i].lo - lo) / ALIGN >> shift & ((1 << RADIX_BITS) - 1)]++] = src[i];
+                Rng *t = src;
+                src = dst, dst = t;
+            }
+            if (src != r) memcpy(r, src, k * sizeof *src);
+            return rng_merge(r, k);
+        }
+    }
+    sort_rng(r, k, &tmp, &ctmp);
+    return rng_merge(r, k);
+}
+
 // Sorts the collected ranges by lo. A town frame binds about 10,000 uniform ranges and qsort took half a millisecond
 // of the copy's 0.96 ms on the game thread, so they go through an LSD radix sort on (lo - lowest) / ALIGN, 11 bits a
 // pass; qsort is left for a span that does not fit in 33 bits (2 TiB).
 static void sort_col(void) {
     static Rng *tmp;
     static int ctmp;
-    int n = U.ncol;
-    if (n < 2) return;
+    int n = U.ncol, s = 1;
+    // In order already (one recording's list, TOTK_USNAP_LIST): a stable sort would leave it as it is.
+    while (s < n && U.col[s].lo >= U.col[s - 1].lo) s++;
+    if (s >= n) return;
     uint64_t lo = UINT64_MAX, hi = 0;
     for (int i = 0; i < n; i++) {
         if (U.col[i].lo < lo) lo = U.col[i].lo;
@@ -334,14 +445,43 @@ static void summary(void) {
            "%.3f ms, %.0f uniform bindings from the copy, %.1f dropped by GPU writes, %.1f left out (GPU writes in "
            "flight), %.1f refused (not an imported pool); %.0f bindings collected (%.0f repeats skipped), %.0f GPU write "
            "ranges added (%.0f coalesced); ms: collect %.3f, sort and prune %.3f, "
-           "merge %.3f, copy %.3f",
+           "merge %.3f, copy %.3f; %.1f of %.1f handles from per-recording lists, %llu lists differed (check)",
            (unsigned long long)U.subs, (unsigned long long)U.off_subs, U.regions / s, U.bytes / s / 1024.0,
            U.copy_ns / s / 1e6, U.hits / s, U.drops / s, U.inflight / s, U.refused / s, U.cols / s, U.repeats / s,
            U.wr_added / s, U.wr_coalesced / s, U.t_collect / s / 1e6,
-           U.t_sort / s / 1e6, U.t_merge / s / 1e6, U.t_copy / s / 1e6);
+           U.t_sort / s / 1e6, U.t_merge / s / 1e6, U.t_copy / s / 1e6, U.lhandles / s, U.handles / s,
+           (unsigned long long)U.list_bad);
     U.subs = U.off_subs = U.regions = U.bytes = U.copy_ns = U.hits = U.drops = U.inflight = U.refused = 0;
     U.cols = U.t_collect = U.t_sort = U.t_merge = U.t_copy = U.wr_added = 0;
     U.repeats = U.wr_coalesced = 0;
+    U.handles = U.lhandles = U.list_bad = 0;
+}
+
+// TOTK_USNAP_LIST_CHECK: each handle's list against its full op tree (walking through OP_CALL without callee lists),
+// sorted and merged the same way. Uses U.col, which usnap_begin fills afterwards.
+static void list_check(const uint64_t *handles, int n) {
+    uint64_t cols = U.cols, repeats = U.repeats;
+    for (int i = 0; i < n; i++) {
+        const nvn_range_list *l = handles[i] ? nvn_handle_ubo_list(handles[i]) : NULL;
+        if (!l) continue;
+        U.ncol = 0;
+        if (U.fast) memset(seen, 0, sizeof seen);
+        collect(nvn_op_first(handles[i]), 0, 0);
+        sort_col();
+        size_t m = rng_merge(U.col, (size_t)U.ncol);
+        if (m == l->n && !memcmp(U.col, l->r, m * sizeof *l->r)) continue;
+        size_t k = 0;
+        while (k < m && k < l->n && U.col[k].lo == l->r[k].lo && U.col[k].hi == l->r[k].hi) k++;
+        static int logged;
+        U.list_bad++;
+        if (logged++ < 16)
+            rt_log("vk_usnap: the uniform list of handle %#llx differs from its records: %llu ranges against %zu walked, "
+                   "first difference at %zu (list %#llx-%#llx, walk %#llx-%#llx)", (unsigned long long)handles[i],
+                   (unsigned long long)l->n, m, k, (unsigned long long)(k < l->n ? l->r[k].lo : 0),
+                   (unsigned long long)(k < l->n ? l->r[k].hi : 0), (unsigned long long)(k < m ? U.col[k].lo : 0),
+                   (unsigned long long)(k < m ? U.col[k].hi : 0));
+    }
+    U.ncol = 0, U.cols = cols, U.repeats = repeats;
 }
 
 static int drop_local;    // TOTK_USNAP_DROP_LOCAL, for this submission (wr_local)
@@ -364,11 +504,26 @@ static void usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
         U.off_subs++;
         return;
     }
+    int lists = RT_KNOB_ON(list_knob());
+    static int check = -1;
+    if (check < 0) check = rt_knob("USNAP_LIST_CHECK", "0");
+    if (lists && RT_KNOB_ON(check)) list_check(handles, n);
     uint64_t t0 = kern_now_ns();
     U.ncol = 0;
-    if (U.fast) memset(seen, 0, sizeof seen);   // no range is collected yet in this submission
-    for (int i = 0; i < n; i++)
-        if (handles[i]) collect(nvn_op_first(handles[i]), 0);
+    int seen_clear = 0;
+    for (int i = 0; i < n; i++) {
+        if (!handles[i]) continue;
+        const nvn_range_list *l = lists ? nvn_handle_ubo_list(handles[i]) : NULL;
+        U.handles++;
+        if (l) {
+            static int told;
+            if (!told++) rt_log("vk_usnap: uniform ranges taken from a recording's list (TOTK_USNAP_LIST)");
+            col_append(l), U.lhandles++;
+        } else {
+            if (U.fast && !seen_clear) memset(seen, 0, sizeof seen), seen_clear = 1;
+            collect(nvn_op_first(handles[i]), 0, lists);   // lists off, clone, or callee without list
+        }
+    }
     uint64_t t1 = kern_now_ns();
     sort_col();
     wr_prune();

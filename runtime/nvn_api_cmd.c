@@ -76,7 +76,16 @@ static void memory_event(Cpu *c, cmd_t *o, int event, uint64_t min) {
 #define SEG_TOK(o) ((uint32_t)(((uintptr_t)(o) >> 3) & 0x7fffffffu))
 #define SEG_OWNED(o) ((o)->seg && (o)->seg_tok == SEG_TOK(o))
 // The prefix of a copy and of a recording buffer (see "recording copies" below).
-typedef struct { uint64_t magic, bytes, made_at, used_at, deferred, block; uint32_t refs; uint16_t flags, depth; } copy_prefix;
+// ubo (TOTK_USNAP_LIST): a copy's merged uniform ranges (nvn_handle_ubo_list), NULL without; set by take_recording,
+// garbage in a recording buffer. Lists of 1 or 2 ranges live inline in ubo_inl to avoid heap churn on small leaves.
+typedef union {
+    nvn_range_list hdr;
+    struct { uint64_t n; nvn_range r[2]; } inl;
+} ubo_inline_list;
+_Static_assert(offsetof(nvn_range_list, n) == 0 && offsetof(nvn_range_list, r) == offsetof(ubo_inline_list, inl.r),
+               "inline uniform list matches nvn_range_list layout");
+typedef struct { uint64_t magic, bytes, made_at, used_at, deferred, block; uint32_t refs; uint16_t flags, depth;
+                 nvn_range_list *ubo; ubo_inline_list ubo_inl; } copy_prefix;
 _Static_assert(sizeof(copy_prefix) % 8 == 0, "records stay 8-byte aligned");
 #define COPY_CALLS 1u   // copy_prefix.flags (see "recording copies" below)
 #define COPY_WAITS 2u
@@ -303,6 +312,89 @@ static uint64_t ncopies, copy_bytes, copies_made, nsubmits;
 static copy_prefix **zombies;
 static uint32_t nzombies, cap_zombies;
 
+// ---------- uniform range lists (nvn_api.h nvn_ubo_list_build, vk_usnap.c TOTK_USNAP_LIST)
+// Without a back end that builds them (tests, the null back end) a copy has none.
+__attribute__((weak)) int nvn_ubo_lists_on(void) { return 0; }
+__attribute__((weak)) size_t nvn_ubo_list_build(nvn_range *r, size_t n) {   // only called once lists are on
+    (void)r, (void)n;
+    rt_fatal("nvn: uniform range lists are on, but no back end builds them");
+    return 0;
+}
+
+// A copy whose recording binds no uniform range shares this list (never freed).
+static nvn_range_list ubo_empty;
+static uint64_t ubo_live;   // lists held by copies, live or released and waiting (zombies); atomic
+
+#define UBO_ALIGN 256u
+#define UBO_MAX_RANGE (64u << 10)
+#define UBO_SEEN_BITS 8
+#define UBO_SEEN_MIN 16
+
+// Appends normalized range r to the recording thread's scratch buffer. Small leaf recordings stay under UBO_SEEN_MIN
+// without zeroing the 4 KiB seen cache; once UBO_SEEN_MIN ranges accumulate, seen is initialized lazily from them.
+static inline void ubo_buf_add(nvn_range r, nvn_range seen[1 << UBO_SEEN_BITS], int *seen_on,
+                               nvn_range **buf, size_t *n, size_t *cap) {
+    if (*seen_on) {
+        nvn_range *s = &seen[((r.lo / UBO_ALIGN) * 0x9E3779B97F4A7C15ull) >> (64 - UBO_SEEN_BITS)];
+        if (s->lo == r.lo && s->hi == r.hi) return;
+        *s = r;
+    } else if (*n >= UBO_SEEN_MIN) {
+        memset(seen, 0, sizeof(nvn_range) * (1u << UBO_SEEN_BITS));
+        for (size_t i = 0; i < *n; i++) {
+            nvn_range e = (*buf)[i];
+            seen[((e.lo / UBO_ALIGN) * 0x9E3779B97F4A7C15ull) >> (64 - UBO_SEEN_BITS)] = e;
+        }
+        *seen_on = 1;
+        nvn_range *s = &seen[((r.lo / UBO_ALIGN) * 0x9E3779B97F4A7C15ull) >> (64 - UBO_SEEN_BITS)];
+        if (s->lo == r.lo && s->hi == r.hi) return;
+        *s = r;
+    }
+    if (*n == *cap) {
+        size_t c = *cap ? *cap * 2 : 1024;
+        nvn_range *q = realloc(*buf, c * sizeof *q);
+        if (!q) rt_fatal("nvn: out of memory (uniform bindings of a recording)");
+        *buf = q, *cap = c;
+    }
+    (*buf)[(*n)++] = r;
+}
+
+// Stores the merged list of the n normalized ranges in r on pf: empty shares ubo_empty, 1-2 ranges live inline in
+// pf->ubo_inl, and 3+ ranges take a heap block counted in ubo_live.
+static void ubo_list_set(copy_prefix *pf, nvn_range *r, size_t n) {
+    size_t m = n ? nvn_ubo_list_build(r, n) : 0;
+    if (!m) {
+        pf->ubo = &ubo_empty;
+        return;
+    }
+    if (m <= 2) {
+        pf->ubo_inl.inl.n = m;
+        memcpy(pf->ubo_inl.inl.r, r, m * sizeof *r);
+        pf->ubo = &pf->ubo_inl.hdr;
+        return;
+    }
+    nvn_range_list *l = malloc(sizeof *l + m * sizeof *l->r);
+    if (!l) rt_fatal("nvn: out of memory (uniform range list of %zu ranges)", m);
+    l->n = m;
+    memcpy(l->r, r, m * sizeof *r);
+    __atomic_add_fetch(&ubo_live, 1, __ATOMIC_RELAXED);
+    pf->ubo = l;
+}
+
+static void ubo_list_free(copy_prefix *pf) {
+    nvn_range_list *l = pf->ubo;
+    if (!l || l == &ubo_empty || l == &pf->ubo_inl.hdr) return;
+    free(l);
+    __atomic_sub_fetch(&ubo_live, 1, __ATOMIC_RELAXED);
+}
+
+uint64_t nvn_ubo_lists_live(void) { return __atomic_load_n(&ubo_live, __ATOMIC_RELAXED); }
+
+// The handle's list while its copy lives, which is as long as a submission of it may replay: the replay reads the
+// copy's records without copy_lock in the same way.
+const nvn_range_list *nvn_handle_ubo_list(uint64_t handle) {
+    return handle ? ((const copy_prefix *)(uintptr_t)handle - 1)->ubo : NULL;
+}
+
 static void zombie_add(copy_prefix *pf) {   // copy_lock held
     if (nzombies == cap_zombies) {
         cap_zombies = cap_zombies ? cap_zombies * 2 : 64;
@@ -350,8 +442,11 @@ static void calls_adjust(const uint8_t *p, const uint8_t *end, int delta) {
     }
 }
 
-static void copy_free(copy_prefix *pf) {   // copy_lock held; no OP_CALL record names pf any more
+// A released copy or a clone, with its uniform list (copy_lock held; no OP_CALL record names pf any more). A recording
+// buffer has no list: rec_buffer_free.
+static void copy_free(copy_prefix *pf) {
     if (pf->flags & COPY_CALLS) calls_adjust((const uint8_t *)(pf + 1), (const uint8_t *)(pf + 1) + pf->bytes, -1);
+    ubo_list_free(pf);
     copy_block_free(pf);
 }
 
@@ -429,8 +524,22 @@ static uint64_t copy_touch(uint64_t handle, uint64_t now, const char *what) {
 // allocated for as long as the game keeps the handle. Growing the copy record by record cost the game's main thread
 // about 1 ms a frame in reallocations and small copies (1.4.3, field); copying every recording at its end took about
 // two fifths of the main thread's running time in the Hilltop Layer of Surf Hills (3.2.0, 185 KiB a copy on average).
+// With uniform range lists on (nvn_ubo_lists_on), the check also gathers the copy's normalized uniform bindings (and
+// composes OP_CALL callees' merged lists under TOTK_CALL_REF, deduplicated through a stack-local L1 cache and
+// consecutive-callee skip) into the calling thread's buffer, and the copy keeps their merged list (ubo_list_make). The
+// records are final here and the submit changes no uniform binding (resolve_deferred). If any callee lacks a list, the
+// caller gets NULL and the snapshot walks it (still taking lists for callees that have them).
 #define RECORDING_HANDOVER (32u << 10)
 static uint8_t *take_recording(cmd_t *o) {
+    static _Thread_local nvn_range *ubo_buf;   // the gathered bindings, kept for the thread's next recording
+    static _Thread_local size_t ubo_cap;
+    static int lists = -1;   // nvn_ubo_lists_on, read once; any recording thread may store it first (same value)
+    int on = __atomic_load_n(&lists, __ATOMIC_RELAXED);
+    if (on < 0) on = nvn_ubo_lists_on() != 0, __atomic_store_n(&lists, on, __ATOMIC_RELAXED);
+    int ubo_ok = on, seen_on = 0;
+    size_t nubo = 0;
+    const copy_prefix *last_cp = NULL;
+    nvn_range seen[1 << UBO_SEEN_BITS];
     const uint8_t *p = o->seg;
     size_t n = (size_t)(o->cur - o->seg);
     int calls = 0, deferred = 0, depth = 0, waits = 0;
@@ -446,6 +555,13 @@ static uint8_t *take_recording(cmd_t *o) {
             const copy_prefix *cp = (const copy_prefix *)(uintptr_t)t - 1;
             int d = cp->depth + 1;
             calls = 1, depth = d > depth ? d : depth, waits |= (cp->flags & COPY_WAITS) != 0;
+            if (ubo_ok && cp != last_cp) {
+                last_cp = cp;
+                const nvn_range_list *cl = cp->ubo;
+                if (!cl) ubo_ok = 0;
+                else for (uint64_t j = 0; j < cl->n; j++)
+                    ubo_buf_add(cl->r[j], seen, &seen_on, &ubo_buf, &nubo, &ubo_cap);
+            }
         } else if (h.op == OP_WAIT_SYNC) {
             waits = 1;
         } else if (h.op == OP_PUSH_CONST && h.size >= 8 + offsetof(p_push_const, w))
@@ -453,6 +569,17 @@ static uint8_t *take_recording(cmd_t *o) {
         else if ((h.op == OP_BIND_TEX || h.op == OP_BIND_IMG || h.op == OP_BIND_SAMP) &&
                  h.size >= 8 + sizeof(p_bind_handles) - sizeof(uint64_t) * 32)
             deferred |= ((const p_bind_handles *)(const void *)(p + at + 8))->src != 0;
+        else if (ubo_ok && h.op == OP_BIND_UBO) {
+            if (h.size < sizeof h + sizeof(p_bind_buf))
+                rt_fatal("nvn: short uniform binding at %p (size %u)", (const void *)(p + at), h.size);
+            p_bind_buf b;
+            memcpy(&b, p + at + sizeof h, sizeof b);
+            if (b.addr && b.size) {
+                uint64_t sz = b.size < UBO_MAX_RANGE ? b.size : UBO_MAX_RANGE;
+                ubo_buf_add((nvn_range){b.addr & ~(uint64_t)(UBO_ALIGN - 1), b.addr + sz},
+                            seen, &seen_on, &ubo_buf, &nubo, &ubo_cap);
+            }
+        }
         at += h.size;
         if (h.op == OP_END) {
             if (at != n) rt_fatal("nvn: recording at %p ends at %zu of %zu bytes", (const void *)p, at, n);
@@ -475,7 +602,8 @@ static uint8_t *take_recording(cmd_t *o) {
     uint64_t block = pf->block;
     // With TOTK_CALL_REF the deferred records are known from here on (inline_recording needs it before any submit).
     *pf = (copy_prefix){COPY_MAGIC, n, 0, 0, call_ref() ? (uint64_t)(deferred ? 2 : 1) : 0, block, 0,
-                        (uint16_t)((calls ? COPY_CALLS : 0) | (waits ? COPY_WAITS : 0)), (uint16_t)depth};
+                        (uint16_t)((calls ? COPY_CALLS : 0) | (waits ? COPY_WAITS : 0)), (uint16_t)depth, NULL, {{0}}};
+    if (ubo_ok) ubo_list_set(pf, ubo_buf, nubo);
     return (uint8_t *)(pf + 1);
 }
 
@@ -1358,6 +1486,7 @@ void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
             cl->magic = 0;   // not a live handle: the game never sees it
             cl->refs = 0;
             if (cl->flags & COPY_CALLS) calls_adjust((const uint8_t *)(cl + 1), (const uint8_t *)(cl + 1) + cl->bytes, +1);
+            cl->ubo = NULL;   // the list stays the original's: the replay walks the clone's records
             cl->used_at = now;
             zombie_add(cl);
             out[i] = (uintptr_t)(cl + 1);
