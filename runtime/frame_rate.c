@@ -157,6 +157,56 @@ static void damped_sum(Cpu *c) {
     set_f32(c, 12, INFINITY);
 }
 
+// Bananza 3.2.0 stick-spin ring update (recomp/patches-dkb458752.txt, site at main+240b2c).
+// f_70002409d0 pushes the stick's angular velocity (s8, deg per 60 Hz tick) into a 64-entry ring ceil(dt) times each
+// frame, loading dt into s0 from [x0]. Above 60 fps (0 < dt < 1), polling faster than the controller's HID report rate
+// creates repeated zero-delta frames that dilute the 15-entry spin average or break the streak after more than two
+// consecutive zero-delta pushes (#477). This hook stands in for ldr s0, [x0]: at dt >= 1 (60 fps or slower) it leaves
+// s0 and s8 as the game sees them; at 0 < dt < 1 it accumulates dt and angle (s8 * dt) per detector instance (x19) and
+// emits one normalized 60 Hz sample (s0 = 1.0, s8 = angle / acc_dt) each time acc_dt reaches 1.0, returning s0 = 0.0
+// on sub-60 Hz frames so the ring loop does not push duplicate samples.
+#define SPIN_ENTRIES 16
+static struct { uint64_t key, last_ns; float dt, angle; } spin_acc[SPIN_ENTRIES];
+static unsigned spin_next;
+static PlatMutex spin_lock = PLAT_MUTEX_INIT;
+
+static void spin_step(Cpu *c) {
+    float dt = ld_f32(c->x[0]);
+    set_f32(c, 0, dt);
+    if (!(dt > 0.0f && dt < 1.0f)) return;
+    float rate = reg_f32(c, 8);
+    if (!isfinite(rate)) rate = 0.0f;
+    uint64_t key = c->x[19];
+    uint64_t now = plat_now_ns();
+    plat_mutex_lock(&spin_lock);
+    unsigned i = 0;
+    while (i < SPIN_ENTRIES && spin_acc[i].key != key) i++;
+    if (i == SPIN_ENTRIES) {
+        i = spin_next++ % SPIN_ENTRIES;
+        spin_acc[i].key = key;
+        spin_acc[i].dt = 0.0f;
+        spin_acc[i].angle = 0.0f;
+    } else if (now - spin_acc[i].last_ns > 250000000ull) {
+        spin_acc[i].dt = 0.0f;
+        spin_acc[i].angle = 0.0f;
+    }
+    spin_acc[i].last_ns = now;
+    spin_acc[i].dt += dt;
+    spin_acc[i].angle += rate * dt;
+    if (spin_acc[i].dt < 1.0f) {
+        plat_mutex_unlock(&spin_lock);
+        set_f32(c, 0, 0.0f);
+        return;
+    }
+    float out_rate = spin_acc[i].angle / spin_acc[i].dt;
+    float rem = spin_acc[i].dt - 1.0f;
+    spin_acc[i].dt = rem;
+    spin_acc[i].angle = out_rate * rem;
+    plat_mutex_unlock(&spin_lock);
+    set_f32(c, 8, out_rate);
+    set_f32(c, 0, 1.0f);
+}
+
 void frame_step_init(void) {
     int fps60 = rt_patch_set("fps60"), realtime = rt_patch_set("realtime"), cloth = rt_patch_set("cloth");
     if (realtime < 0) {
@@ -175,6 +225,7 @@ void frame_step_init(void) {
             dkb_rate = (_Atomic uint32_t *)((uint8_t *)rt_patch_page() + 12);
             rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + 0x250, blur_frames);   // radial blur lifetimes, both versions
             rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + 0x260, damped_sum);    // damped velocity, both versions
+            rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + 0x280, spin_step);     // stick spin ring cadence, 3.2.0
         }
         step_store((float)STEP_FIRST_S);
     }

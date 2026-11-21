@@ -30,11 +30,11 @@ def main():
         words = fields[5:]
         if len(words) == 1 and not words[0].startswith('@') and int(words[0], 16) >> 26 == 0x25:
             # A host call: one BL to a patch page slot, +0x250 runtime/frame_rate.c blur_frames (3.2.0), +0x260
-            # damped_sum. recomp/layout.py puts the page at main+0x2450000 in 1.0.0 and main+0x2810000 in 3.2.0. The
-            # host functions are not exercised here.
+            # damped_sum, +0x280 spin_step (3.2.0). recomp/layout.py puts the page at main+0x2450000 in 1.0.0 and
+            # main+0x2810000 in 3.2.0. The host functions are not exercised here.
             imm = int(words[0], 16) & 0x3FFFFFF
             page = 0x2810000 if '458752' in args.table.name else 0x2450000
-            assert pc + ((imm ^ 0x2000000) - 0x2000000) * 4 - page in (0x250, 0x260), line
+            assert pc + ((imm ^ 0x2000000) - 0x2000000) * 4 - page in (0x250, 0x260, 0x280), line
             continue
         if words == ['d503201f']:
             continue   # a nop in place of a clear the host call does instead (damped_sum): no clock to check

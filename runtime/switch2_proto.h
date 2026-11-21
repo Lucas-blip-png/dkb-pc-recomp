@@ -150,17 +150,19 @@ static inline int s2_cal_parse(const uint8_t *d, size_t n, s2_cal *c) {
     c->valid = c->maxx > 100 && c->maxy > 100 && c->minx > 100 && c->miny > 100;
     return c->valid;
 }
-static inline float s2_cal_axis(float v, float centre, float up, float down, float dead) {
-    float s = v - centre;
-    if (s > dead) return up > 0 ? fminf(s / up, 1.f) : 0.f;
-    if (s < -dead) return down > 0 ? -fminf(-s / down, 1.f) : 0.f;
-    return 0.f;
-}
-// A stick in -1..1 (x right, y up), a deadzone of dead raw counts around the centre
+// A stick in -1..1 (x right, y up), with a radial deadzone of dead raw counts around the centre and circular clamping.
 static inline void s2_cal_apply(const s2_cal *c, uint16_t rawx, uint16_t rawy, float dead, float *x, float *y) {
     s2_cal d; if (!c || !c->valid) { s2_cal_default(&d); c = &d; }
-    *x = s2_cal_axis((float)rawx, c->cx, c->maxx, c->minx, dead);
-    *y = s2_cal_axis((float)rawy, c->cy, c->maxy, c->miny, dead);
+    float dx = (float)rawx - c->cx, dy = (float)rawy - c->cy;
+    float nx = dx >= 0.f ? (c->maxx > 0.f ? dx / c->maxx : 0.f) : (c->minx > 0.f ? dx / c->minx : 0.f);
+    float ny = dy >= 0.f ? (c->maxy > 0.f ? dy / c->maxy : 0.f) : (c->miny > 0.f ? dy / c->miny : 0.f);
+    float min_span = fminf(fminf(c->maxx, c->minx), fminf(c->maxy, c->miny));
+    float d0 = (dead > 0.f && min_span > 0.f) ? fminf(dead / min_span, 0.99f) : 0.f;
+    float m = hypotf(nx, ny);
+    if (m <= d0) { *x = *y = 0.f; return; }
+    float k = (fminf(m, 1.f) - d0) / (1.f - d0) / m;
+    *x = fmaxf(-1.f, fminf(1.f, nx * k));
+    *y = fmaxf(-1.f, fminf(1.f, ny * k));
 }
 
 // Player LED patterns of the console for players 1..8

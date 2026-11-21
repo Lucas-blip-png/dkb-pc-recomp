@@ -940,6 +940,12 @@ area = "tools"
 cmd = ["{python}", "tests/nx_extract_test.py"]
 
 [[test]]
+name = "stick-spin"
+tier = 1
+area = "input"
+cmd = ["{python}", "tests/stick_spin_test.py", "--cc", "{cc}"]
+
+[[test]]
 name = "window-filter"
 tier = 1
 area = "gfx"

@@ -44,6 +44,13 @@ site realtime main 13fad9c 2f00e40b d503201f  # movi d11, #0 on the path that sk
 site realtime main 13fada0 2f00e40a d503201f  # movi d10, #0
 site realtime main 13fada4 2f00e409 d503201f  # movi d9, #0
 
+# The stick-spin detector (main+2409d0) pushes angular velocity (s8) into a 64-entry ring ceil(dt) times per frame,
+# loading dt from [x0] into s0 at main+240b2c. Above 60 fps (0 < dt < 1), polling faster than a gamepad's HID report
+# rate inserts repeated zero-delta pushes that break the 15-entry streak or dilute the average (#477).
+# runtime/frame_rate.c spin_step (patch page +0x280) accumulates sub-60 Hz steps per detector instance (x19) and emits
+# one normalized 60 Hz sample each time accumulated dt reaches 1.0, returning s0 = 0.0 on intermediate frames.
+site realtime main 240b2c bd400000 94973dd5  # ldr s0, [x0] in stick spin ring update  [3.2.0 only]
+
 # Optional Bananza virtual display and camera aspect. Values are supplied by
 # runtime/dkb_wide.c at page +0x100 (width), +0x104 (height), +0x108 (aspect),
 # +0x10c (aspect / 16:9), +0x110 (render-target pool bytes), +0x114 and +0x11c
