@@ -1960,6 +1960,11 @@ static int wb_owe(WbPage *e, uint32_t lo, uint32_t hi) {
 // through vk_gpu_written_into one by one. Without the shadow storage the ranges are stamped in batches.
 typedef struct { uint64_t lo, hi; const uint8_t *src; } WbCopy;   // src: the shadow's byte for guest address lo
 
+static int u64_cmp(const void *x, const void *y) {
+    uint64_t a = *(const uint64_t *)x, b = *(const uint64_t *)y;
+    return a < b ? -1 : a > b;
+}
+
 static int wb_cmp(const void *x, const void *y) {
     const uint64_t *a = x, *b = y;
     return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1];
@@ -1978,8 +1983,8 @@ void vk_gpu_written_many(const VkGpuWrite *in, int n) {
     uint64_t (*w)[3] = malloc((size_t)n * sizeof *w);   // {lo, hi, lazy}
     uint8_t *gone = calloc((size_t)n, 1);
     WbCopy *cp = NULL;
-    uint64_t *seal = NULL;
-    int ncp = 0, ccp = 0, nseal = 0, cseal = 0;
+    uint64_t *seal = NULL, *owed = NULL;   // pages this batch sealed; pages left sealed with bytes of this batch owed
+    int ncp = 0, ccp = 0, nseal = 0, cseal = 0, nowed = 0, cowed = 0;
     if (!w || !gone) rt_fatal("vk: out of memory for a write-back batch");
     int m = 0;
     for (int i = 0; i < n; i++) {
@@ -2027,7 +2032,14 @@ void vk_gpu_written_many(const VkGpuWrite *in, int n) {
                 }
                 sealed = 1;
             }
-            if (sealed) { wb_skipped += hi - lo; continue; }
+            if (sealed) {
+                wb_skipped += hi - lo;
+                if (!nowed || owed[nowed - 1] != pg) {
+                    if (nowed == cowed) grow((void **)&owed, &cowed, sizeof *owed);
+                    owed[nowed++] = pg;
+                }
+                continue;
+            }
             if (ncp == ccp) grow((void **)&cp, &ccp, sizeof *cp);
             cp[ncp++] = (WbCopy){lo, hi, src + (lo - a)};
         }
@@ -2040,6 +2052,13 @@ void vk_gpu_written_many(const VkGpuWrite *in, int n) {
             if (e && e->state == WB_SEALED) seal[live++] = seal[i];
         }
         nseal = live;
+        live = 0;   // the same for the pages left owed: one opened since is stamped by the copy that opened it
+        for (int i = 0; i < nowed; i++) {
+            WbPage *e = wb_find(owed[i], 0);
+            if (e && e->state == WB_SEALED) owed[live++] = owed[i];
+        }
+        nowed = live;
+        qsort(owed, (size_t)nowed, sizeof *owed, u64_cmp);   // ranges overlap, so the pages came out of order
         for (int i = 0; i < nseal;) {   // one protection change per run of new pages
             int j = i + 1;
             while (j < nseal && seal[j] == seal[j - 1] + 0x1000) j++;
@@ -2088,19 +2107,22 @@ void vk_gpu_written_many(const VkGpuWrite *in, int n) {
     plat_mutex_unlock_shared(&pool_lock);
     plat_mutex_lock(&gen_lock);
     uint32_t g = ++gen_now;
-    // Every range of the batch is stamped as written, less the pages this batch sealed: a sealed page keeps its old
-    // guest bytes, so it is stamped by the copy that opens them instead. w and seal are both ascending.
-    for (int i = 0, s = 0; i < m; i++) {
+    // Every range of the batch is stamped as written, less the pages left sealed: those this batch sealed, and those
+    // sealed before it that were only owed more bytes. A sealed page keeps its old guest bytes, so it is stamped by the
+    // copy that opens them instead. Stamping a page that stays sealed made the next shadow sync (shadow_sync_pool) read
+    // it, and that read copied everything owed to it back at once: where the same buffers are rewritten every frame,
+    // the lazy write-back then copied as much as the copy at the fence, by faults.
+    for (int i = 0; i < m; i++) {
         if (nvn_gpu_only(w[i][0])) continue;
         for (uint64_t a = w[i][0] & ~0xfffull, hi = (w[i][1] + 0xfff) & ~0xfffull; a < hi;
              a += 1ull << GEN_PAGE_SHIFT) {
-            while (s < nseal && seal[s] < a) s++;
-            if (s < nseal && seal[s] == a) continue;   // sealed: its stamp waits for the copy that opens it
+            if (nowed && bsearch(&a, owed, (size_t)nowed, sizeof *owed, u64_cmp)) continue;
             stamp_page(a, g);
         }
     }
     plat_mutex_unlock(&gen_lock);
     free(seal);
+    free(owed);
     free(cp);
     free(gone);
     free(w);
