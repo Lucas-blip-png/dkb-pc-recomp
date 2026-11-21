@@ -124,6 +124,11 @@ static struct {
 
 static PlatMutex load_lock = PLAT_MUTEX_INIT;
 static int has_descriptor_buffer = -1;   // VK_EXT_descriptor_buffer on the device (vk_device.c), -1 not asked for
+#ifdef __linux__
+static int has_linear_derivatives;
+
+void vk_fsr4_linear_derivatives(int enabled) { has_linear_derivatives = enabled; }
+#endif
 
 static uint64_t frames_now(void) { return __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED); }
 
@@ -239,6 +244,9 @@ static int load(void) {
         } else {
             char listed[256] = "";
             unsigned best[3] = {0, 0, 0};
+#ifdef __linux__
+            const char *selected_name = "";
+#endif
             for (uint64_t i = 0; i < count; i++) {
                 const char *name = names[i] ? names[i] : "";
                 size_t used = strlen(listed);
@@ -248,10 +256,21 @@ static int load(void) {
                 if (u[0] == 4 && (!G.version_id || u[1] > best[1] || (u[1] == best[1] && u[2] > best[2]))) {
                     memcpy(best, u, sizeof best);
                     G.version_id = ids[i];
+#ifdef __linux__
+                    selected_name = name;
+#endif
                 }
             }
             if (!G.version_id)
                 rt_log("fsr4: no FSR 4 for this GPU (AMD's library has: %s); FSR 3.1 runs instead", listed);
+#ifdef __linux__
+            // fsr4-vk's Auto provider can select INT8 internally. Reject it before it creates a shader when the
+            // device lacks linear derivatives. An explicit FP8 provider or another library keeps its own checks.
+            else if (!has_linear_derivatives &&
+                     (!strcmp(selected_name, "4.1.1 Vulkan Auto") || !strcmp(selected_name, "4.1.1 Vulkan INT8")))
+                rt_log("fsr4: %s needs VK_KHR_compute_shader_derivatives with computeDerivativeGroupLinear enabled; "
+                       "FSR 3.1 runs instead", selected_name);
+#endif
             else
                 ok = 1, rt_log("fsr4: AMD's upscalers: %s; using %u.%u.%u%s", listed, best[0], best[1], best[2],
                                G.ldr ? " (FSR4_LDR: perceptual colour up to 1)" : "");
@@ -829,4 +848,7 @@ void vk_fsr4_release(void) {   // device idle
     G.prep = VK_NULL_HANDLE, G.prep_layout = VK_NULL_HANDLE, G.prep_set = VK_NULL_HANDLE;
     G.passes = 0, G.exposure_set = 0;
     has_descriptor_buffer = -1;
+#ifdef __linux__
+    has_linear_derivatives = 0;
+#endif
 }

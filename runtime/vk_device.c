@@ -373,7 +373,7 @@ static int create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[48];
+    const char *ext[49];   // one extra slot for FSR 4's optional compute derivatives
     uint32_t n_ext = 0;
     for (size_t i = 0; i < sizeof k_required_ext / sizeof *k_required_ext; i++) ext[n_ext++] = k_required_ext[i];
     // A portability implementation (MoltenVK) requires this one on every device it exposes; no feature of it is needed
@@ -421,7 +421,19 @@ static int create_device(void) {
     // buffers, so the extension and its feature are enabled, and only where the device has them. Nothing of ours uses
     // them. Without them the library refuses its context and vk_fsr4.c falls back with a log line that says so.
     int has_dbuf = 0;
+#if defined(__linux__) && defined(VK_KHR_compute_shader_derivatives)
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR derivatives = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR};
+#endif
     if (vk_fsr4_wants_descriptor_buffer()) {
+#if defined(__linux__) && defined(VK_KHR_compute_shader_derivatives)
+        // Query separately so the feature struct stays out of device creation when linear derivatives are absent.
+        if (has_ext(ep, ne, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME)) {
+            VkPhysicalDeviceFeatures2 avail = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &derivatives};
+            vkGetPhysicalDeviceFeatures2(g_vk.phys, &avail);
+        }
+#endif
         if (has_ext(ep, ne, VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME)) {
             has_dbuf = 1;
             ext[n_ext++] = VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME;
@@ -555,9 +567,22 @@ static int create_device(void) {
     }
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &c->f2, .queueCreateInfoCount = nqi,
                              .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
+#if defined(__linux__) && defined(VK_KHR_compute_shader_derivatives)
+    int enable_linear_derivatives = derivatives.computeDerivativeGroupLinear &&
+                                    c->dbuf.descriptorBuffer && c->f12.bufferDeviceAddress;
+    if (enable_linear_derivatives) {
+        ext[di.enabledExtensionCount++] = VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME;
+        derivatives.computeDerivativeGroupQuads = VK_FALSE;
+        derivatives.pNext = &c->f2;
+        di.pNext = &derivatives;
+    }
+#endif
     VkResult r = vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.device);
     free(c);
     if (r != VK_SUCCESS) { rt_log("vk: vkCreateDevice failed (%d)", (int)r); return 0; }
+#if defined(__linux__) && defined(VK_KHR_compute_shader_derivatives)
+    vk_fsr4_linear_derivatives(enable_linear_derivatives);
+#endif
     vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 0, &g_vk.gfx_queue);
     if (g_vk.xfer_family != g_vk.gfx_family) vkGetDeviceQueue(g_vk.device, g_vk.xfer_family, 0, &g_vk.xfer_queue);
     else { g_vk.xfer_queue = g_vk.gfx_queue; g_vk.xfer_shared = 1; }

@@ -702,11 +702,14 @@ void vk_fsr3_io_out(VkCommandBuffer cb, VkImageView src, VkImageView ov, uint32_
 // has failed; when not, upscaler = fsr4 runs vk_fsr3.c instead (vk_fsr3_wanted). vk_fsr4_record and vk_fsr4_release as
 // the FSR 3.1 ones. vk_fsr4_wants_descriptor_buffer: before the device is made, whether VK_EXT_descriptor_buffer should
 // be enabled for the library (Linux, upscaler = fsr4 at the start, the library found); vk_fsr4_descriptor_buffer:
-// whether it was.
+// whether it was. vk_fsr4_linear_derivatives reports whether the Linux device enabled linear compute derivatives.
 int vk_fsr4_wanted(void);
 int vk_fsr4_record(VkCommandBuffer cb, uint64_t fence, const VkTexImage *in, const VkTexImage *out);
 int vk_fsr4_wants_descriptor_buffer(void);
 void vk_fsr4_descriptor_buffer(int enabled);
+#ifdef __linux__
+void vk_fsr4_linear_derivatives(int enabled);
+#endif
 void vk_fsr4_release(void);
 // An upscaler the setting no longer chooses gives back what it holds (temporal_idle.h for the rule).
 // vk_temporal_idle_tick (vk_dlss.c) asks once per presented frame, on the replay thread, from op_dispatch; fence is

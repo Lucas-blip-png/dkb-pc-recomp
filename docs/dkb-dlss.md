@@ -135,6 +135,8 @@ needs AMD's library, which this project does not ship:
   one folder. Set `upscaler = fsr4` in `totk.ini` before the start: such a library records with descriptor buffers, so the
   device enables `VK_EXT_descriptor_buffer` (only when the GPU has it, and only for this setting with the library found).
   Without the extension the library refuses its context and `dkb.log` says so.
+  The device also enables `VK_KHR_compute_shader_derivatives` with `computeDerivativeGroupLinear` when both are
+  supported. The fsr4-vk 4.1.1 INT8 and Auto providers fall back to FSR 3.1 if this feature was left disabled.
 
 The folder is the one `fsr_dir` names (in `totk.ini`), and when the library is not there the folder of the program (`dkb.exe`
 or `dkb`). `dkb.log` has `fsr4: loaded <path>` for the file that was taken.
