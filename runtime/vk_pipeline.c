@@ -689,25 +689,27 @@ static void vertex_input(const VkPipeState *s, VtxInput *v) {
     GfxShaderIo io[32];
     uint32_t used = gfx_shader_inputs(s->vs, io), streams = 0;
     int zero = 0;
-    memset(v, 0, sizeof *v);
-    for (int l = 0; l < 32; l++) {
-        if (!(used >> l & 1)) continue;
-        VkVertexInputAttributeDescription2EXT *a = &v->a[v->n_attr++];
-        *a = (VkVertexInputAttributeDescription2EXT){.sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
-                                                     .location = (uint32_t)l};
+    v->n_attr = 0;
+    v->n_bind = 0;
+    for (uint32_t m = used; m; m &= m - 1) {
+        int l = __builtin_ctz(m);
         va_st va = {0};
         if (l < 16) memcpy(&va, &s->vattr[l], sizeof va);
         VkFormat f = va.fmt ? vk_vertex_format((int)va.fmt, NULL) : VK_FORMAT_UNDEFINED;
+        uint32_t binding, offset;
         if (f != VK_FORMAT_UNDEFINED && va.stream < 16) {
-            a->binding = va.stream, a->format = f, a->offset = va.offset;
+            binding = va.stream, offset = va.offset;
             streams |= 1u << va.stream;
         } else {
-            a->binding = VK_PIPE_ZERO_BINDING, a->format = zero_format(io[l].type);
+            binding = VK_PIPE_ZERO_BINDING, f = zero_format(io[l].type), offset = 0;
             zero = 1;
         }
+        v->a[v->n_attr++] = (VkVertexInputAttributeDescription2EXT){
+            .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            .location = (uint32_t)l, .binding = binding, .format = f, .offset = offset};
     }
-    for (uint32_t b = 0; b < 16; b++) {
-        if (!(streams >> b & 1)) continue;
+    for (uint32_t m = streams; m; m &= m - 1) {
+        uint32_t b = (uint32_t)__builtin_ctz(m);
         uint32_t div = s->vstream[b].divisor;
         if (div > 1) LOG_ONCE("vk_pipeline: instance divisor %u treated as 1 (no VK_EXT_vertex_attribute_divisor)", div);
         v->b[v->n_bind++] = (VkVertexInputBindingDescription2EXT){
@@ -2754,6 +2756,19 @@ static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int as
     GKey k;
     gkey_fill(s, &k);
     uint64_t h = key_hash(&k, sizeof k);
+    if (!guess) {
+        plat_mutex_lock_shared(&P.lock);
+        Pipe *p = pipe_find(&k, sizeof k, h);
+        if (p && !p->building && !p->guess && p->info.pipeline) {
+            __atomic_fetch_add(&P.stats.hits, 1, __ATOMIC_RELAXED);
+            VkPipeline pipe = p->info.pipeline;
+            const VkPipeInfo *pi = &p->info;
+            plat_mutex_unlock_shared(&P.lock);
+            if (info) *info = pi;
+            return pipe;
+        }
+        plat_mutex_unlock_shared(&P.lock);
+    }
     plat_mutex_lock(&P.lock);
     Pipe *p = pipe_find(&k, sizeof k, h);
     int queued;
@@ -2762,7 +2777,7 @@ static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int as
         return VK_NULL_HANDLE;
     }
     if (p) {
-        if (!p->building) P.stats.hits++;
+        if (!p->building) __atomic_fetch_add(&P.stats.hits, 1, __ATOMIC_RELAXED);
         if (p->guess) {   // the first draw that asks for a lookahead's pipeline: its key goes to the file now
             p->guess = 0, P.g.la_used++;
             if (!p->building && p->info.pipeline) keys_note(s);
@@ -3099,7 +3114,7 @@ VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
     plat_mutex_lock(&P.lock);
     Pipe *p = pipe_find(&k, sizeof k, h);
     if (p) {
-        P.stats.hits++;
+        __atomic_fetch_add(&P.stats.hits, 1, __ATOMIC_RELAXED);
     } else {
         const char *why = NULL;
         Bindings B = {0};
@@ -3523,6 +3538,25 @@ int vk_pipeline_warm_shaders(void) {
 
 // ---- dynamic state
 
+// 1 when vertex_input(s) produces the exact same binding and attribute descriptions as vertex_input(p).
+static int vertex_input_same(const VkPipeState *s, const VkPipeState *p) {
+    if (!p || !p->vs) return 0;
+    if (memcmp(s->vattr, p->vattr, sizeof s->vattr) || memcmp(s->vstream, p->vstream, sizeof s->vstream)) return 0;
+    if (p->vs == s->vs) return 1;
+    GfxShaderIo io_s[32], io_p[32];
+    uint32_t used = gfx_shader_inputs(s->vs, io_s);
+    if (used != gfx_shader_inputs(p->vs, io_p)) return 0;
+    for (uint32_t m = used; m; m &= m - 1) {
+        int l = __builtin_ctz(m);
+        va_st va = {0};
+        if (l < 16) memcpy(&va, &s->vattr[l], sizeof va);
+        VkFormat f = va.fmt ? vk_vertex_format((int)va.fmt, NULL) : VK_FORMAT_UNDEFINED;
+        if ((f == VK_FORMAT_UNDEFINED || va.stream >= 16) && zero_format(io_s[l].type) != zero_format(io_p[l].type))
+            return 0;
+    }
+    return 1;
+}
+
 // The dynamic state of a draw. With prev (the state this function last recorded into cb, and nothing else since set
 // those states), only the states whose inputs differ are recorded again: the slices record about 26,000 draws a frame
 // on 6 logical processors, and a draw that only changes program or one depth flag recorded every state, the vertex
@@ -3535,60 +3569,100 @@ void vk_pipeline_set_dynamic_from(VkCommandBuffer cb, const VkPipeState *s, cons
     // The front face maps unchanged: TOTK sets the upper-left window origin, and the y-flipped viewport (y_flip) puts
     // NDC +y at row 0 as NVN does, so the framebuffer winding Vulkan tests is the one NVN tests (MacNativeGames passes
     // it to Metal unchanged; LAS Recomp exec.c mirrors it only for the lower-left origin).
-    int front_cw = pl->front == NVN_FRONT_FACE_CW;
-    if (!p || (pl->cull & 3) != (ppl->cull & 3))
-        vkCmdSetCullMode(cb, (VkCullModeFlags)(pl->cull & 3));   // NVN_FACE_* has VkCullModeFlagBits' values
-    if (!p || front_cw != (ppl->front == NVN_FRONT_FACE_CW))
-        vkCmdSetFrontFace(cb, front_cw ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE);
+    if (!p || memcmp(pl, ppl, sizeof *pl)) {
+        int front_cw = pl->front == NVN_FRONT_FACE_CW;
+        if (!p || (pl->cull & 3) != (ppl->cull & 3))
+            vkCmdSetCullMode(cb, (VkCullModeFlags)(pl->cull & 3));   // NVN_FACE_* has VkCullModeFlagBits' values
+        if (!p || front_cw != (ppl->front == NVN_FRONT_FACE_CW))
+            vkCmdSetFrontFace(cb, front_cw ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE);
+        // NVN_POLYGON_OFFSET_ENABLE_* bit of the polygon mode in use: point 1, line 2, fill 4
+        unsigned mode = pl->mode <= NVN_POLYGON_MODE_FILL ? pl->mode : NVN_POLYGON_MODE_FILL;
+        unsigned pmode = p ? (ppl->mode <= NVN_POLYGON_MODE_FILL ? ppl->mode : NVN_POLYGON_MODE_FILL) : 0;
+        int bias = (pl->offset_en >> mode & 1) != 0;
+        if (!p || bias != ((ppl->offset_en >> pmode & 1) != 0)) vkCmdSetDepthBiasEnable(cb, bias);
+        if (P.dyn_poly && (!p || polygon_mode(pl->mode) != polygon_mode(ppl->mode)))
+            rec_polygon_mode(P.set_poly, cb, polygon_mode(pl->mode));
+    }
     if (!p || vk_pipeline_topology(s->prim) != vk_pipeline_topology(p->prim)) vkCmdSetPrimitiveTopology(cb, vk_pipeline_topology(s->prim));
-    if (!p || d->dt != pd->dt) vkCmdSetDepthTestEnable(cb, d->dt);
-    if (!p || d->dw != pd->dw) vkCmdSetDepthWriteEnable(cb, d->dw);
-    if (!p || compare_op(d->df) != compare_op(pd->df)) vkCmdSetDepthCompareOp(cb, compare_op(d->df));
-    if (!p || d->st != pd->st) vkCmdSetStencilTestEnable(cb, d->st);
-    if (!p || d->fail_f != pd->fail_f || d->zpass_f != pd->zpass_f || d->zfail_f != pd->zfail_f || d->sf_f != pd->sf_f)
-        vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_BIT, stencil_op(d->fail_f), stencil_op(d->zpass_f), stencil_op(d->zfail_f),
-                          compare_op(d->sf_f));
-    if (!p || d->fail_b != pd->fail_b || d->zpass_b != pd->zpass_b || d->zfail_b != pd->zfail_b || d->sf_b != pd->sf_b)
-        vkCmdSetStencilOp(cb, VK_STENCIL_FACE_BACK_BIT, stencil_op(d->fail_b), stencil_op(d->zpass_b), stencil_op(d->zfail_b),
-                          compare_op(d->sf_b));
-    // NVN_POLYGON_OFFSET_ENABLE_* bit of the polygon mode in use: point 1, line 2, fill 4
-    unsigned mode = pl->mode <= NVN_POLYGON_MODE_FILL ? pl->mode : NVN_POLYGON_MODE_FILL;
-    unsigned pmode = p ? (ppl->mode <= NVN_POLYGON_MODE_FILL ? ppl->mode : NVN_POLYGON_MODE_FILL) : 0;
-    int bias = (pl->offset_en >> mode & 1) != 0;
-    if (!p || bias != ((ppl->offset_en >> pmode & 1) != 0)) vkCmdSetDepthBiasEnable(cb, bias);
+    if (!p || memcmp(d, pd, sizeof *d)) {
+        if (!p || d->dt != pd->dt) vkCmdSetDepthTestEnable(cb, d->dt);
+        if (!p || d->dw != pd->dw) vkCmdSetDepthWriteEnable(cb, d->dw);
+        if (!p || compare_op(d->df) != compare_op(pd->df)) vkCmdSetDepthCompareOp(cb, compare_op(d->df));
+        if (!p || d->st != pd->st) vkCmdSetStencilTestEnable(cb, d->st);
+        if (!p || d->fail_f != pd->fail_f || d->zpass_f != pd->zpass_f || d->zfail_f != pd->zfail_f || d->sf_f != pd->sf_f)
+            vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_BIT, stencil_op(d->fail_f), stencil_op(d->zpass_f), stencil_op(d->zfail_f),
+                              compare_op(d->sf_f));
+        if (!p || d->fail_b != pd->fail_b || d->zpass_b != pd->zpass_b || d->zfail_b != pd->zfail_b || d->sf_b != pd->sf_b)
+            vkCmdSetStencilOp(cb, VK_STENCIL_FACE_BACK_BIT, stencil_op(d->fail_b), stencil_op(d->zpass_b), stencil_op(d->zfail_b),
+                              compare_op(d->sf_b));
+    }
     if (!p || (s->raster_discard != 0) != (p->raster_discard != 0)) vkCmdSetRasterizerDiscardEnable(cb, s->raster_discard != 0);
     if (!p || (s->prim_restart != 0) != (p->prim_restart != 0)) vkCmdSetPrimitiveRestartEnable(cb, s->prim_restart != 0);
-    // vertex_input reads the vertex stage, the attribute words and the streams' strides and divisors.
-    if (P.dyn_vi && s->vs &&
-        (!p || p->vs != s->vs || memcmp(s->vattr, p->vattr, sizeof s->vattr) || memcmp(s->vstream, p->vstream, sizeof s->vstream))) {
+    // vertex_input reads the vertex stage's inputs, the attribute words and the streams' strides and divisors.
+    if (P.dyn_vi && s->vs && !vertex_input_same(s, p)) {
         VtxInput v;
         vertex_input(s, &v);
         rec_vertex_input(P.set_vi, cb, v.n_bind, v.b, v.n_attr, v.a);
     }
     if (P.dyn_clamp && (!p || (s->depth_clamp != 0) != (p->depth_clamp != 0))) rec_bool(P.set_clamp, cb, s->depth_clamp != 0);
-    if (P.dyn_poly && (!p || polygon_mode(pl->mode) != polygon_mode(ppl->mode))) rec_polygon_mode(P.set_poly, cb, polygon_mode(pl->mode));
     if (P.dyn_a2c && (!p || (s->ms.a2c != 0) != (p->ms.a2c != 0)))
         rec_bool((PFN_vkCmdSetDepthClampEnableEXT)P.set_a2c, cb, s->ms.a2c != 0);   // the same signature
     // The blend states read the target formats, the blend words, the channel masks and the fragment stage's outputs.
-    if (p && p->fs == s->fs && !memcmp(s->color_fmt, p->color_fmt, sizeof s->color_fmt) &&
-        !memcmp(s->blend, p->blend, sizeof s->blend) && !memcmp(&s->color, &p->color, sizeof s->color) &&
-        !memcmp(&s->chmask, &p->chmask, sizeof s->chmask))
-        return;
+    int same_fmt = p && !memcmp(s->color_fmt, p->color_fmt, sizeof s->color_fmt);
+    int same_blend = p && !memcmp(s->blend, p->blend, sizeof s->blend);
+    int same_color = p && !memcmp(&s->color, &p->color, sizeof s->color);
+    int same_chmask = p && !memcmp(&s->chmask, &p->chmask, sizeof s->chmask);
+    if (same_fmt && same_blend && same_color && same_chmask) {
+        if (p->fs == s->fs) return;
+        uint32_t om_s = (s->fs ? gfx_shader_outputs(s->fs, NULL) : 0xffu) & 0xffu;
+        uint32_t om_p = (p->fs ? gfx_shader_outputs(p->fs, NULL) : 0xffu) & 0xffu;
+        int src1_s = s->fs && P.f_dual_src && uses_src1(s);
+        int src1_p = p->fs && P.f_dual_src && uses_src1(p);
+        if (om_s == om_p && ((s->fs != NULL) == (p->fs != NULL)) && src1_s == src1_p) return;
+    }
     int n = target_count(s);
     if (!n) return;
-    VkBool32 en[8];
-    VkColorBlendEquationEXT eq[8];
-    VkColorComponentFlags wm[8];
-    for (int i = 0; i < n; i++) {
-        const blend_st *b = &s->blend[i];
-        en[i] = (s->color.blend_en >> i & 1) && blendable(target_format(s->color_fmt[i], NULL, NULL));
-        eq[i] = (VkColorBlendEquationEXT){blend_factor(b->src_rgb), blend_factor(b->dst_rgb), blend_op(b->eq_rgb),
-                                          blend_factor(b->src_a), blend_factor(b->dst_a), blend_op(b->eq_a)};
-        wm[i] = target_wmask(s, i);
+    int same_n = p && target_count(p) == n;
+    int need_en = P.dyn_blend_en && (!same_n || !same_fmt || s->color.blend_en != p->color.blend_en);
+    int need_eq = P.dyn_blend_eq && (!same_n || !same_blend);
+    uint32_t om_s = (s->fs ? gfx_shader_outputs(s->fs, NULL) : 0xffu) & 0xffu;
+    int src1_s = s->fs && P.f_dual_src && uses_src1(s);
+    int need_wm = 0;
+    if (P.dyn_wmask) {
+        if (!same_n || !same_chmask) need_wm = 1;
+        else if (p->fs != s->fs) {
+            uint32_t om_p = (p->fs ? gfx_shader_outputs(p->fs, NULL) : 0xffu) & 0xffu;
+            int src1_p = p->fs && P.f_dual_src && uses_src1(p);
+            need_wm = om_s != om_p || ((s->fs != NULL) != (p->fs != NULL)) || src1_s != src1_p;
+        } else if (P.f_dual_src && s->fs && src1_s != uses_src1(p)) {
+            need_wm = 1;
+        }
     }
-    if (P.dyn_blend_en) rec_blend_enable(P.set_blend_en, cb, 0, (uint32_t)n, en);
-    if (P.dyn_blend_eq) rec_blend_equation(P.set_blend_eq, cb, 0, (uint32_t)n, eq);
-    if (P.dyn_wmask) rec_write_mask(P.set_wmask, cb, 0, (uint32_t)n, wm);
+    if (need_en) {
+        VkBool32 en[8];
+        for (int i = 0; i < n; i++)
+            en[i] = (s->color.blend_en >> i & 1) && blendable(target_format(s->color_fmt[i], NULL, NULL));
+        rec_blend_enable(P.set_blend_en, cb, 0, (uint32_t)n, en);
+    }
+    if (need_eq) {
+        VkColorBlendEquationEXT eq[8];
+        for (int i = 0; i < n; i++) {
+            const blend_st *b = &s->blend[i];
+            eq[i] = (VkColorBlendEquationEXT){blend_factor(b->src_rgb), blend_factor(b->dst_rgb), blend_op(b->eq_rgb),
+                                              blend_factor(b->src_a), blend_factor(b->dst_a), blend_op(b->eq_a)};
+        }
+        rec_blend_equation(P.set_blend_eq, cb, 0, (uint32_t)n, eq);
+    }
+    if (need_wm) {
+        VkColorComponentFlags wm[8];
+        for (int i = 0; i < n; i++) {
+            uint32_t m = s->chmask.mask >> (4 * i) & 0xf;
+            if (s->fs && !(om_s >> i & 1)) m = 0;
+            if (i == 1 && src1_s) m = 0;
+            wm[i] = m;
+        }
+        rec_write_mask(P.set_wmask, cb, 0, (uint32_t)n, wm);
+    }
 }
 
 void vk_pipeline_set_dynamic(VkCommandBuffer cb, const VkPipeState *s) { vk_pipeline_set_dynamic_from(cb, s, NULL); }
@@ -3598,6 +3672,7 @@ void vk_pipeline_set_dynamic(VkCommandBuffer cb, const VkPipeState *s) { vk_pipe
 void vk_pipeline_stats(VkPipeStats *s) {
     plat_mutex_lock_shared(&P.lock);
     *s = P.stats;
+    s->hits = __atomic_load_n(&P.stats.hits, __ATOMIC_RELAXED);
     plat_mutex_unlock_shared(&P.lock);
 }
 

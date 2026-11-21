@@ -352,7 +352,7 @@ typedef struct DrawCtx {
     struct {
         VkPipeline pipe[2];                  // bound per bind point: 0 graphics, 1 compute
         VkPipeState st;                      // the state vk_pipeline_set_dynamic last recorded
-        int st_valid;
+        int st_valid, st_is_pm;              // st_is_pm: B.st equals current PM.s (cleared when either changes)
         VkBuffer vb[17];                     // vertex buffers last bound
         VkDeviceSize vo[17], vsz[17], vstr[17];
         int vcls[17];                        // their pool class and pool record, for the census
@@ -360,6 +360,7 @@ typedef struct DrawCtx {
         NVNbufferRange vin[16];              // the ranges they were resolved from, under vk_mem_gen vgen
         uint64_t vgen;
         int vb_valid;
+        uint16_t vb_dirty, vstr_dirty, vcls_mask, vpool_mask;
         VkBuffer ib;                         // index buffer last bound (bind_ib), valid while ib_valid
         VkDeviceSize ib_off;
         VkIndexType ib_type;
@@ -3745,7 +3746,7 @@ static void bind_pipeline(VkExec *ex, VkPipelineBindPoint bp, VkPipeline p) {
     }
     ex->recorded++;
     dc->B.pipe[k] = p;   // B.st stays: every replay pipeline has the same dynamic states, which a bind leaves as set
-    if (!k && !dyn_keep_on()) dc->B.st_valid = 0;   // TOTK_DYN_KEEP=0: record every state after a bind
+    if (!k && !dyn_keep_on()) dc->B.st_valid = 0, dc->B.st_is_pm = 0;   // TOTK_DYN_KEEP=0: record every state after a bind
 }
 
 static void record_fixed(VkExec *ex) {
@@ -3800,58 +3801,102 @@ static void record_fixed(VkExec *ex) {
 
 static void bind_vertex_buffers(VkExec *ex) {
     DrawCtx *const dc = DC_OF(ex);
-    VkBuffer vb[17];
-    VkDeviceSize vo[17], vsz[17], vstr[17];
-    int vcls[17] = {0};
-    void *vpool[17] = {0};
     int dyn = vk_pipeline_vertex_input_dynamic();
     // A stream whose range is the one its bound buffer was resolved from, with no pool or mirror change since
     // (vk_mem_gen, read before any resolve), resolves to that buffer again: most draws change one stream or none.
     uint64_t gen = vk_mem_gen();
-    int same_gen = dc->B.vb_valid && dc->B.vgen == gen;
-    if (same_gen && !memcmp(dc->B.vin, ex->vbuf, sizeof dc->B.vin)) {   // no range changed: the loop below would rebuild B.vb..B.vstr
-        int same_str = 1;
-        for (int b = 0; b < 16 && !dyn; b++) same_str &= dc->B.vstr[b] == ex->pipe.vstream[b].stride;
-        if (same_str) return;
-    }
-    for (int b = 0; b < 17; b++) {
-        vb[b] = standins.zbuf, vo[b] = 0, vsz[b] = ZERO_BYTES, vstr[b] = b < 16 ? ex->pipe.vstream[b].stride : 0;
-        if (b == VK_PIPE_ZERO_BINDING) continue;
-        const NVNbufferRange *r = &ex->vbuf[b];
-        if (same_gen && dc->B.vin[b].address == r->address && dc->B.vin[b].size == r->size) {
-            vb[b] = dc->B.vb[b], vo[b] = dc->B.vo[b], vsz[b] = dc->B.vsz[b], vcls[b] = dc->B.vcls[b], vpool[b] = dc->B.vpool[b];
-            continue;
+    if (!dc->B.vb_valid) {
+        uint16_t cmask = 0, pmask = 0;
+        for (int b = 0; b < 16; b++) {
+            const NVNbufferRange *r = &ex->vbuf[b];
+            dc->B.vin[b] = *r;
+            if (!dyn) dc->B.vstr[b] = ex->pipe.vstream[b].stride;
+            VkMemSpan sp;
+            if (r->address && vk_mem_resolve(r->address, 1, &sp)) {
+                VK_MEM_USE(sp);
+                if (sp.buffer) {
+                    uint64_t n = r->size && r->size < sp.avail ? r->size : sp.avail;
+                    dc->B.vb[b] = sp.buffer, dc->B.vo[b] = sp.offset, dc->B.vsz[b] = n;
+                    dc->B.vcls[b] = sp.cls, dc->B.vpool[b] = sp.pool;
+                    if (sp.cls) cmask |= (uint16_t)(1u << b);
+                    if (sp.pool) pmask |= (uint16_t)(1u << b);
+                    continue;
+                }
+            }
+            dc->B.vb[b] = standins.zbuf, dc->B.vo[b] = 0, dc->B.vsz[b] = ZERO_BYTES;
+            dc->B.vcls[b] = 0, dc->B.vpool[b] = NULL;
         }
-        VkMemSpan sp;
-        if (!r->address || !vk_mem_resolve(r->address, 1, &sp)) continue;
-        VK_MEM_USE(sp);
-        if (!sp.buffer) continue;   // a staged pool left unbacked (vk.h VK_MEM_USE): the zero stand-in, as unbacked
-        uint64_t n = r->size && r->size < sp.avail ? r->size : sp.avail;
-        vb[b] = sp.buffer, vo[b] = sp.offset, vsz[b] = n, vcls[b] = sp.cls, vpool[b] = sp.pool;
+        dc->B.vb[VK_PIPE_ZERO_BINDING] = standins.zbuf, dc->B.vo[VK_PIPE_ZERO_BINDING] = 0;
+        dc->B.vsz[VK_PIPE_ZERO_BINDING] = ZERO_BYTES, dc->B.vstr[VK_PIPE_ZERO_BINDING] = 0;
+        dc->B.vcls[VK_PIPE_ZERO_BINDING] = 0, dc->B.vpool[VK_PIPE_ZERO_BINDING] = NULL;
+        dc->B.vcls_mask = cmask, dc->B.vpool_mask = pmask;
+        dc->B.vb_dirty = 0, dc->B.vstr_dirty = 0;
+        dc->B.vgen = gen;
+        dc->B.vb_valid = 1;
+        vkCmdBindVertexBuffers2(ex->cb, 0, 17, dc->B.vb, dc->B.vo, dc->B.vsz, dyn ? NULL : dc->B.vstr);
+        ex->recorded++;
+        for (uint32_t m = cmask; m; m &= m - 1) {
+            int b = __builtin_ctz(m);
+            vk_mem_count(dc->B.vcls[b], VK_MUSE_VB, dc->B.vsz[b]);
+        }
+        if (rt_trace & RT_TRACE_PERF)
+            for (uint32_t m = pmask; m; m &= m - 1)
+                vk_mem_bound_note(dc->B.vpool[__builtin_ctz(m)]);
+        return;
     }
-    memcpy(dc->B.vcls, vcls, sizeof vcls), memcpy(dc->B.vpool, vpool, sizeof vpool);
-    memcpy(dc->B.vin, ex->vbuf, sizeof dc->B.vin);
+    int same_gen = dc->B.vgen == gen;
+    uint32_t mask = same_gen ? (uint32_t)(dc->B.vb_dirty | (dyn ? 0u : dc->B.vstr_dirty)) : 0xFFFFu;
+    if (!mask) return;
+    int lo = 17, hi = -1;
+    uint16_t cmask = dc->B.vcls_mask, pmask = dc->B.vpool_mask;
+    for (uint32_t m = mask; m; m &= m - 1) {
+        int b = __builtin_ctz(m);
+        const NVNbufferRange *r = &ex->vbuf[b];
+        VkDeviceSize nstr = dyn ? 0 : ex->pipe.vstream[b].stride;
+        int diff = !dyn && dc->B.vstr[b] != nstr;
+        if (!dyn) dc->B.vstr[b] = nstr;
+        if (!(same_gen && dc->B.vin[b].address == r->address && dc->B.vin[b].size == r->size)) {
+            dc->B.vin[b] = *r;
+            VkBuffer nb = standins.zbuf;
+            VkDeviceSize no = 0, nsz = ZERO_BYTES;
+            int ncls = 0;
+            void *npool = NULL;
+            VkMemSpan sp;
+            if (r->address && vk_mem_resolve(r->address, 1, &sp)) {
+                VK_MEM_USE(sp);
+                if (sp.buffer) {
+                    uint64_t n = r->size && r->size < sp.avail ? r->size : sp.avail;
+                    nb = sp.buffer, no = sp.offset, nsz = n, ncls = sp.cls, npool = sp.pool;
+                }
+            }
+            if (dc->B.vb[b] != nb || dc->B.vo[b] != no || dc->B.vsz[b] != nsz) diff = 1;
+            dc->B.vb[b] = nb, dc->B.vo[b] = no, dc->B.vsz[b] = nsz;
+            dc->B.vcls[b] = ncls, dc->B.vpool[b] = npool;
+            uint16_t bit = (uint16_t)(1u << b);
+            if (ncls) cmask |= bit; else cmask &= (uint16_t)~bit;
+            if (npool) pmask |= bit; else pmask &= (uint16_t)~bit;
+        }
+        if (diff) {
+            if (b < lo) lo = b;
+            hi = b;
+        }
+    }
+    dc->B.vcls_mask = cmask, dc->B.vpool_mask = pmask;
+    dc->B.vb_dirty = 0, dc->B.vstr_dirty = 0;
     dc->B.vgen = gen;
     // Only the bindings from the first that differs from the bound one to the last are bound again: most draws change
-    // one or two streams, and the driver's cost on a slice grows with the count. The others keep what the command
-    // buffer has bound (B), strides included.
-    int lo = 0, hi = 16;
-    if (dc->B.vb_valid) {
-#define VB_DIFF(b) (dc->B.vb[b] != vb[b] || dc->B.vo[b] != vo[b] || dc->B.vsz[b] != vsz[b] || (!dyn && dc->B.vstr[b] != vstr[b]))
-        while (lo < 17 && !VB_DIFF(lo)) lo++;
-        if (lo == 17) return;
-        while (!VB_DIFF(hi)) hi--;
-#undef VB_DIFF
-    }
-    vkCmdBindVertexBuffers2(ex->cb, (uint32_t)lo, (uint32_t)(hi - lo + 1), vb + lo, vo + lo, vsz + lo, dyn ? NULL : vstr + lo);
+    // one or two streams, and the driver's cost on a slice grows with the count.
+    if (lo > hi) return;
+    vkCmdBindVertexBuffers2(ex->cb, (uint32_t)lo, (uint32_t)(hi - lo + 1), dc->B.vb + lo, dc->B.vo + lo, dc->B.vsz + lo,
+                            dyn ? NULL : dc->B.vstr + lo);
     ex->recorded++;
-    for (int b = 0; b < 17; b++)
-        if (vcls[b]) vk_mem_count(vcls[b], VK_MUSE_VB, vsz[b]);
+    for (uint32_t m = cmask; m; m &= m - 1) {
+        int b = __builtin_ctz(m);
+        vk_mem_count(dc->B.vcls[b], VK_MUSE_VB, dc->B.vsz[b]);
+    }
     if (rt_trace & RT_TRACE_PERF)
-        for (int b = 0; b < 17; b++)
-            if (vpool[b]) vk_mem_bound_note(vpool[b]);
-    memcpy(dc->B.vb, vb, sizeof vb), memcpy(dc->B.vo, vo, sizeof vo), memcpy(dc->B.vsz, vsz, sizeof vsz), memcpy(dc->B.vstr, vstr, sizeof vstr);
-    dc->B.vb_valid = 1;
+        for (uint32_t m = pmask; m; m &= m - 1)
+            vk_mem_bound_note(dc->B.vpool[__builtin_ctz(m)]);
 }
 
 // TOTK_PIPE_SKIP: which draws are skipped, rather than waited for, while their shaders or pipeline build.
@@ -4353,10 +4398,11 @@ static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
     uint64_t w0 = 0;
     int pmemo = pipe_memo_on(dc);
     uint32_t pm_set = (uint32_t)((((uintptr_t)s.vs >> 4) * 0x9e3779b1u ^ ((uintptr_t)s.fs >> 4)) * 0x85ebca6bu >> 27) & (PM_SETS - 1);
-    int pm_hit = pmemo && dc->PM.valid && !memcmp(&dc->PM.s, &s, sizeof s);
+    int pm_same_as_prev = pmemo && dc->PM.valid && !memcmp(&dc->PM.s, &s, sizeof s);
+    int pm_hit = pm_same_as_prev;
     for (int w = 0; pmemo && !pm_hit && w < PM_WAYS; w++)
         if (dc->PM.way[pm_set][w].info && !memcmp(&dc->PM.way[pm_set][w].s, &s, sizeof s))
-            pm_hit = 1, dc->PM.valid = 1, dc->PM.s = s, dc->PM.info = dc->PM.way[pm_set][w].info;
+            pm_hit = 1, dc->PM.valid = 1, dc->PM.s = s, dc->PM.info = dc->PM.way[pm_set][w].info, dc->B.st_is_pm = 0;
     if (pm_hit) {
         info = dc->PM.info, pending = 0;
         p = __atomic_load_n(&info->pipeline, __ATOMIC_ACQUIRE);
@@ -4377,6 +4423,7 @@ static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
             p = vk_pipeline_graphics_async(&s, &info, &pending, ONESHOT_WAIT_MS);
         }
         dc->PM.valid = !pending && p && info;
+        dc->B.st_is_pm = 0;
         if (dc->PM.valid) {
             dc->PM.s = s, dc->PM.info = info;
             int w = dc->PM.next[pm_set]++ % PM_WAYS;
@@ -4398,10 +4445,13 @@ static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
     if (!p || !info) return warn_once(W_PIPELINE, "a graphics pipeline could not be created: draws with it are skipped"), 0;
     if (dc->MR.want) merge_pick(ex, &s, &p, &info);   // a run of draws that may go as instances (vk_exec_draw_merge)
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    if (!dc->B.st_valid || memcmp(&dc->B.st, &s, sizeof s)) {
-        vk_pipeline_set_dynamic_from(ex->cb, &s, dc->B.st_valid ? &dc->B.st : NULL);   // only what differs from B.st
-        ex->recorded++;
-        dc->B.st = s, dc->B.st_valid = 1;
+    if (!(pm_same_as_prev && dc->B.st_valid && dc->B.st_is_pm && !dc->MR.want)) {
+        if (!dc->B.st_valid || memcmp(&dc->B.st, &s, sizeof s)) {
+            vk_pipeline_set_dynamic_from(ex->cb, &s, dc->B.st_valid ? &dc->B.st : NULL);   // only what differs from B.st
+            ex->recorded++;
+            dc->B.st = s, dc->B.st_valid = 1;
+        }
+        dc->B.st_is_pm = dc->PM.valid && !dc->MR.want;
     }
     // Before the jitter in record_fixed. A slice's draws were noted when the pass was collected (vk_exec.c par_take).
     if (ex->depth.image && !IN_SLICE(dc) && vk_temporal_wanted()) vk_dlss_scene_draw(ex);
@@ -5174,12 +5224,14 @@ static void op_draw_impl(VkExec *ex, uint32_t op, const void *payload) {
         if (b->first < 0 || b->n < 0 || b->first + b->n > 16) break;
         memset(ex->pipe.vstream, 0, sizeof ex->pipe.vstream);
         memcpy(&ex->pipe.vstream[b->first], b->st, sizeof(vs_st) * (size_t)b->n);
+        dc->B.vstr_dirty = 0xFFFFu;
         break;
     }
     case OP_BIND_VBUF: {
         const p_bind_vbuf *b = payload;
         if (b->first < 0 || b->n < 0 || b->first + b->n > 16) break;
         memcpy(&ex->vbuf[b->first], b->r, sizeof(NVNbufferRange) * (size_t)b->n);
+        if (b->n) dc->B.vb_dirty |= (uint16_t)(((1u << b->n) - 1u) << b->first);
         break;
     }
     case OP_BIND_UBO: {
