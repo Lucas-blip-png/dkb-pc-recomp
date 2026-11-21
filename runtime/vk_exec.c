@@ -116,6 +116,44 @@ static int pass_tried, pass_sliced;             // the open pass: par_start look
 static int pass_why;                            // why par_start left the open pass alone (PAR_WHY_*), for the log
 static uint32_t pass_draws;                     // draws of the open pass, for par_hist
 static uint64_t pass_t0;                        // TOTK_TRACE=perf: when the open pass began (perf_ph_unsliced)
+// Pass-invariant state of a sliced pass, captured once in par_start and indexed by PC.supd[i] (VK_EXEC_UPD_SNAPS).
+typedef struct {
+    uint64_t fence, submitted_ticks;
+    int in_pass, rt_resolved, render_disabled, has_render_cond;
+    VkExecTarget color[8], depth;
+    uint32_t pass_w, pass_h, pass_layers;
+    int pass_noatt;
+    VkFormat pass_color[8], pass_depth, pass_stencil;
+    uint32_t pass_ncolor, pass_samples;
+    VkImage fbl_img[9];
+    VkImageAspectFlags fbl_aspect[9];
+    int nfbl;
+    uint32_t fbl_mask, pass_serial;
+} ParPassSnap;
+
+// Per-slice draw state (PC.snap[i]), holding only what graphics draws read and copied up to each high-water mark.
+typedef struct {
+    dpool_ref tex_pool, samp_pool;
+    int has_vp, has_scissor;
+    p_scissor scissor;
+    float depth_range[2], point_size, blend_color[4];
+    uint32_t st_vmask[2], st_wmask[2], st_ref[2];
+    p_poly_offset poly_offset;
+    p_prim_restart prim_restart;
+    VkPipeState pipe;
+    const prog_t *prog;
+    int32_t prog_stages;
+    uint64_t push_set0;
+    uint8_t vp_hi, vbuf_hi, ubo_hi[3], ssbo_hi[3], tex_hi[3], samp_hi[3], img_hi[3];
+    uint32_t push0[NVN2_ROOT_WORDS];
+    float vp[16][6];
+    NVNbufferRange vbuf[16];
+    p_bind_buf ubo[3][18], ssbo[3][16];
+    uint64_t tex[3][128], samp[3][128], img[3][32];
+} ParSnap;
+
+static ParPassSnap par_pass[VK_EXEC_UPD_SNAPS];
+
 // The slices and ops of the passes collected since nothing was held back (a batch, par_room): indices run on from pass
 // to pass while earlier passes' slices may still be recorded (par_defer).
 #define PAR_MAX_SLICES 1024      // a pass with more draws than these hold keeps adding to its last slice
@@ -126,7 +164,7 @@ static struct {
     uint64_t sig;
     const op_hdr **ops;                          // the collected ops in order (PAR_MAX_OPS, never moved: workers read it)
     int nops;
-    VkExec *snap;                                // X before each slice's first op (PAR_MAX_SLICES)
+    ParSnap *snap;                               // X's graphics draw state before each slice's first op (PAR_MAX_SLICES)
     int start[PAR_MAX_SLICES], end[PAR_MAX_SLICES];   // each slice's ops; end is set when the slice is published
     int nslices;
     int s0;                                      // the open pass's first slice
@@ -141,6 +179,8 @@ static struct {
     ParTwins twin;                               // the twins its set had learned when it began (par_outputs)
     int oq;                                      // an occlusion query spans the pass: the slices inherit it
     VkQueryControlFlags oq_flags;
+    uint8_t dlss_done;                           // vk_dlss_scene_draw settled for this pass (captured or ineligible)
+    uint8_t inline_binds;                        // 1: par_bind_op handles binds inline (0 when TOTK_DRAW_PROFILE is on)
 } PC;
 
 // A recording thread's secondary command buffers: its own pool (pools are used by one thread at a time) and the ones whose
@@ -280,6 +320,8 @@ WEAK void vk_exec_draw_slices_begin(int threads, int snap) { (void)threads, (voi
 WEAK void vk_exec_draw_slice_view(struct DrawCtx *c, int snap) { (void)c, (void)snap; }
 WEAK struct DrawCtx *vk_exec_draw_slice_ctx(int k) { return (void)k, NULL; }
 WEAK void vk_exec_draw_slices_end(int threads) { (void)threads; }
+WEAK int vk_exec_draw_inline_ok(const VkExec *ex) { return (void)ex, 1; }
+WEAK void vk_exec_draw_binds_dirty(VkExec *ex) { (void)ex; }
 WEAK int vk_exec_oq_counting(void) { return 0; }
 WEAK int vk_exec_oq_sliceable(void) { return 1; }
 WEAK int vk_exec_oq_begin_outside(VkExec *ex, VkQueryControlFlags *flags, int *open) { return (void)ex, (void)flags, *open = 0, 0; }
@@ -1244,7 +1286,11 @@ static int state_op(VkExec *ex, uint32_t op, const void *a) {
     case OP_VIEWPORTS: {
         const p_viewports *v = a;
         for (int i = 0; i < v->n && v->first + i < 16; i++)
-            if (v->first + i >= 0) memcpy(ex->vp[v->first + i], v->v[i], sizeof ex->vp[0]);
+            if (v->first + i >= 0) {
+                int idx = v->first + i;
+                memcpy(ex->vp[idx], v->v[i], sizeof ex->vp[0]);
+                if (idx + 1 > ex->vp_hi) ex->vp_hi = (uint8_t)(idx + 1);
+            }
         ex->has_vp = 1;
         ex->dirty |= VK_EXEC_DIRTY_VIEWPORT;
         break;
@@ -1979,8 +2025,108 @@ static VkCommandBuffer par_secondary(ParPool *pp) {   // on the thread that owns
     return cb;
 }
 
+static void par_pass_take(ParPassSnap *p, const VkExec *ex) {
+    p->fence = ex->fence, p->submitted_ticks = ex->submitted_ticks;
+    p->in_pass = ex->in_pass, p->rt_resolved = ex->rt_resolved;
+    p->render_disabled = ex->render_disabled, p->has_render_cond = ex->has_render_cond;
+    memcpy(p->color, ex->color, sizeof p->color);
+    p->depth = ex->depth;
+    p->pass_w = ex->pass_w, p->pass_h = ex->pass_h, p->pass_layers = ex->pass_layers;
+    p->pass_noatt = ex->pass_noatt;
+    memcpy(p->pass_color, ex->pass_color, sizeof p->pass_color);
+    p->pass_depth = ex->pass_depth, p->pass_stencil = ex->pass_stencil;
+    p->pass_ncolor = ex->pass_ncolor, p->pass_samples = ex->pass_samples;
+    memcpy(p->fbl_img, ex->fbl_img, sizeof p->fbl_img);
+    memcpy(p->fbl_aspect, ex->fbl_aspect, sizeof p->fbl_aspect);
+    p->nfbl = ex->nfbl, p->fbl_mask = ex->fbl_mask, p->pass_serial = ex->pass_serial;
+}
+
+static void par_pass_load(VkExec *w, const ParPassSnap *p) {
+    w->fence = p->fence, w->submitted_ticks = p->submitted_ticks;
+    w->in_pass = p->in_pass, w->rt_resolved = p->rt_resolved;
+    w->render_disabled = p->render_disabled, w->has_render_cond = p->has_render_cond;
+    memcpy(w->color, p->color, sizeof w->color);
+    w->depth = p->depth;
+    w->pass_w = p->pass_w, w->pass_h = p->pass_h, w->pass_layers = p->pass_layers;
+    w->pass_noatt = p->pass_noatt;
+    memcpy(w->pass_color, p->pass_color, sizeof w->pass_color);
+    w->pass_depth = p->pass_depth, w->pass_stencil = p->pass_stencil;
+    w->pass_ncolor = p->pass_ncolor, w->pass_samples = p->pass_samples;
+    memcpy(w->fbl_img, p->fbl_img, sizeof w->fbl_img);
+    memcpy(w->fbl_aspect, p->fbl_aspect, sizeof w->fbl_aspect);
+    w->nfbl = p->nfbl, w->fbl_mask = p->fbl_mask, w->pass_serial = p->pass_serial;
+}
+
+#define PAR_SLICE_LOAD(dst, src, dhi, shi) do { \
+    uint8_t n_ = (shi), old_ = (dhi); \
+    if (n_) memcpy((dst), (src), (size_t)n_ * sizeof (dst)[0]); \
+    if (old_ > n_) memset((dst) + n_, 0, (size_t)(old_ - n_) * sizeof (dst)[0]); \
+    (dhi) = n_; \
+} while (0)
+
+static void par_snap_take(ParSnap *s, const VkExec *ex) {
+    s->tex_pool = ex->tex_pool, s->samp_pool = ex->samp_pool;
+    s->has_vp = ex->has_vp, s->has_scissor = ex->has_scissor;
+    s->scissor = ex->scissor;
+    memcpy(s->depth_range, ex->depth_range, sizeof s->depth_range);
+    s->point_size = ex->point_size;
+    memcpy(s->blend_color, ex->blend_color, sizeof s->blend_color);
+    memcpy(s->st_vmask, ex->st_vmask, sizeof s->st_vmask);
+    memcpy(s->st_wmask, ex->st_wmask, sizeof s->st_wmask);
+    memcpy(s->st_ref, ex->st_ref, sizeof s->st_ref);
+    s->poly_offset = ex->poly_offset;
+    s->prim_restart = ex->prim_restart;
+    s->pipe = ex->pipe;
+    s->prog = ex->prog, s->prog_stages = ex->prog_stages;
+    s->push_set0 = ex->push_set[0][0];
+    if (s->push_set0) memcpy(s->push0, ex->push[0][0], sizeof s->push0);
+    s->vp_hi = ex->vp_hi;
+    if (s->vp_hi) memcpy(s->vp, ex->vp, (size_t)s->vp_hi * sizeof s->vp[0]);
+    s->vbuf_hi = ex->vbuf_hi;
+    if (s->vbuf_hi) memcpy(s->vbuf, ex->vbuf, (size_t)s->vbuf_hi * sizeof s->vbuf[0]);
+    for (int st = 0; st < 3; st++) {
+        s->ubo_hi[st] = ex->ubo_hi[st];
+        if (s->ubo_hi[st]) memcpy(s->ubo[st], ex->ubo[st], (size_t)s->ubo_hi[st] * sizeof s->ubo[0][0]);
+        s->ssbo_hi[st] = ex->ssbo_hi[st];
+        if (s->ssbo_hi[st]) memcpy(s->ssbo[st], ex->ssbo[st], (size_t)s->ssbo_hi[st] * sizeof s->ssbo[0][0]);
+        s->tex_hi[st] = ex->tex_hi[st];
+        if (s->tex_hi[st]) memcpy(s->tex[st], ex->tex[st], (size_t)s->tex_hi[st] * sizeof s->tex[0][0]);
+        s->samp_hi[st] = ex->samp_hi[st];
+        if (s->samp_hi[st]) memcpy(s->samp[st], ex->samp[st], (size_t)s->samp_hi[st] * sizeof s->samp[0][0]);
+        s->img_hi[st] = ex->img_hi[st];
+        if (s->img_hi[st]) memcpy(s->img[st], ex->img[st], (size_t)s->img_hi[st] * sizeof s->img[0][0]);
+    }
+}
+
+static void par_snap_load(VkExec *w, const ParSnap *s) {
+    w->tex_pool = s->tex_pool, w->samp_pool = s->samp_pool;
+    w->has_vp = s->has_vp, w->has_scissor = s->has_scissor;
+    w->scissor = s->scissor;
+    memcpy(w->depth_range, s->depth_range, sizeof w->depth_range);
+    w->point_size = s->point_size;
+    memcpy(w->blend_color, s->blend_color, sizeof w->blend_color);
+    memcpy(w->st_vmask, s->st_vmask, sizeof w->st_vmask);
+    memcpy(w->st_wmask, s->st_wmask, sizeof w->st_wmask);
+    memcpy(w->st_ref, s->st_ref, sizeof w->st_ref);
+    w->poly_offset = s->poly_offset;
+    w->prim_restart = s->prim_restart;
+    w->pipe = s->pipe;
+    w->prog = s->prog, w->prog_stages = s->prog_stages;
+    w->push_set[0][0] = s->push_set0;
+    if (s->push_set0) memcpy(w->push[0][0], s->push0, sizeof s->push0);
+    PAR_SLICE_LOAD(w->vp, s->vp, w->vp_hi, s->vp_hi);
+    PAR_SLICE_LOAD(w->vbuf, s->vbuf, w->vbuf_hi, s->vbuf_hi);
+    for (int st = 0; st < 3; st++) {
+        PAR_SLICE_LOAD(w->ubo[st], s->ubo[st], w->ubo_hi[st], s->ubo_hi[st]);
+        PAR_SLICE_LOAD(w->ssbo[st], s->ssbo[st], w->ssbo_hi[st], s->ssbo_hi[st]);
+        PAR_SLICE_LOAD(w->tex[st], s->tex[st], w->tex_hi[st], s->tex_hi[st]);
+        PAR_SLICE_LOAD(w->samp[st], s->samp[st], w->samp_hi[st], s->samp_hi[st]);
+        PAR_SLICE_LOAD(w->img[st], s->img[st], w->img_hi[st], s->img_hi[st]);
+    }
+}
+
 // Inherits the open pass: its attachment formats as vkCmdBeginRendering saw them (a slot without a view: UNDEFINED).
-static void par_begin_secondary(const VkExec *ex, VkCommandBuffer cb, int oq, VkQueryControlFlags oq_flags) {
+static void par_begin_secondary(const ParPassSnap *ex, VkCommandBuffer cb, int oq, VkQueryControlFlags oq_flags) {
     VkFormat color[8];
     for (uint32_t i = 0; i < ex->pass_ncolor && i < 8; i++) color[i] = ex->color[i].image ? ex->pass_color[i] : VK_FORMAT_UNDEFINED;
     const VkExecTarget *d = &ex->depth;
@@ -2107,12 +2253,14 @@ static int par_start(VkExec *ex) {
     par_room(ex);
     PC.s0 = PC.nslices;
     PC.upd = (int)(par_pass_seq++ % VK_EXEC_UPD_SNAPS);
+    par_pass_take(&par_pass[PC.upd], ex);
     par_usd[PC.upd] = vk_usnap_drops();   // the uniform copies as of the pass's start (vk_usnap_view)
     vk_exec_draw_slices_begin(par_nworkers + 1, PC.upd);   // the pass's slices read the inline uniform updates noted so far
     vk_exec_draw_twins_snap(ex, PC.upd, twins);            // and the depth twins copied above
     uint32_t *x = par_expect(par_piece_key(sig, 0), 0);
     PC.expect = (int)(x && *x ? *x : e->draws);
     PC.on = 1, PC.sig = sig, PC.draws = 0, PC.twin = known;
+    PC.dlss_done = 0, PC.inline_binds = (uint8_t)vk_exec_draw_inline_ok(ex);
     PC.slice_size = PC.slice_draws = par_size();   // the first draw starts a slice
     par_t0 = kern_now_ns();
     par_wake_workers();   // they spin while the pass is collected
@@ -2151,6 +2299,113 @@ static int par_indirect(void) {
     return RT_KNOB_ON(mode);
 }
 
+// Inline bind handler during slice collection (par_take): avoids cross-TU vk_exec_op_draw calls on the collecting walk.
+// Out-of-range binds fall back to vk_exec_op_draw so its one-shot warnings run unchanged; ex->tex_serial, bind_gen and
+// ssbo_serial are bumped once when collection ends (par_flush).
+static inline void par_bind_op(VkExec *ex, uint32_t op, const void *a) {
+    switch (op) {
+    case OP_BIND_PROGRAM: {
+        const p_bind_program *b = a;
+        ex->prog = b->prog, ex->prog_stages = b->stages;
+        return;
+    }
+    case OP_BIND_STATE: {
+        const p_bind_state *b = a;
+        blend_st bs;
+        switch (b->kind) {
+        case 0:
+            memcpy(&bs, b->bytes, sizeof bs);
+            if (bs.target < 8) ex->pipe.blend[bs.target] = bs;
+            return;
+        case 1: memcpy(&ex->pipe.color, b->bytes, sizeof ex->pipe.color); return;
+        case 2: memcpy(&ex->pipe.chmask, b->bytes, sizeof ex->pipe.chmask); return;
+        case 3: memcpy(&ex->pipe.ms, b->bytes, sizeof ex->pipe.ms); return;
+        case 4: memcpy(&ex->pipe.poly, b->bytes, sizeof ex->pipe.poly); return;
+        case 5: memcpy(&ex->pipe.ds, b->bytes, sizeof ex->pipe.ds); return;
+        case 6: memcpy(&ex->point_size, b->bytes, sizeof ex->point_size); return;
+        case 7: memcpy(&ex->pipe.alpha_ref, b->bytes, sizeof ex->pipe.alpha_ref); return;
+        }
+        return;
+    }
+    case OP_BIND_VATTR: {
+        const p_bind_vattr *b = a;
+        if (b->first < 0 || b->n < 0 || b->first + b->n > 16) return;
+        memset(ex->pipe.vattr, 0, sizeof ex->pipe.vattr);
+        memcpy(&ex->pipe.vattr[b->first], b->st, sizeof(uint32_t) * (size_t)b->n);
+        return;
+    }
+    case OP_BIND_VSTREAM: {
+        const p_bind_vstream *b = a;
+        if (b->first < 0 || b->n < 0 || b->first + b->n > 16) return;
+        memset(ex->pipe.vstream, 0, sizeof ex->pipe.vstream);
+        memcpy(&ex->pipe.vstream[b->first], b->st, sizeof(vs_st) * (size_t)b->n);
+        return;
+    }
+    case OP_BIND_VBUF: {
+        const p_bind_vbuf *b = a;
+        if (b->first < 0 || b->n < 0 || b->first + b->n > 16) return;
+        memcpy(&ex->vbuf[b->first], b->r, sizeof(NVNbufferRange) * (size_t)b->n);
+        if (b->first + b->n > ex->vbuf_hi) ex->vbuf_hi = (uint8_t)(b->first + b->n);
+        return;
+    }
+    case OP_BIND_UBO: {
+        const p_bind_buf *b = a;
+        if (b->stage >= 0 && b->stage < 6 && b->index >= 0 && b->index < 18) {
+            ex->ubo[b->stage][b->index] = *b;
+            if (b->stage < 3 && b->index + 1 > ex->ubo_hi[b->stage]) ex->ubo_hi[b->stage] = (uint8_t)(b->index + 1);
+        }
+        return;
+    }
+    case OP_BIND_SSBO: {
+        const p_bind_buf *b = a;
+        if (b->stage >= 0 && b->stage < 6 && b->index >= 0 && b->index < 16) {
+            ex->ssbo[b->stage][b->index] = *b;
+            if (b->stage < 3 && b->index + 1 > ex->ssbo_hi[b->stage]) ex->ssbo_hi[b->stage] = (uint8_t)(b->index + 1);
+            return;
+        }
+        break;
+    }
+    case OP_BIND_TEX: {
+        const p_bind_handles *b = a;
+        if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->n >= 0 && b->n <= 32 && b->first + b->n <= 128) {
+            memcpy(&ex->tex[b->stage][b->first], b->h, sizeof(uint64_t) * (size_t)b->n);
+            if (b->stage < 3 && b->first + b->n > ex->tex_hi[b->stage]) ex->tex_hi[b->stage] = (uint8_t)(b->first + b->n);
+            return;
+        }
+        break;
+    }
+    case OP_BIND_SAMP: {
+        const p_bind_handles *b = a;
+        if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->n >= 0 && b->n <= 32 && b->first + b->n <= 128) {
+            memcpy(&ex->samp[b->stage][b->first], b->h, sizeof(uint64_t) * (size_t)b->n);
+            if (b->stage < 3 && b->first + b->n > ex->samp_hi[b->stage]) ex->samp_hi[b->stage] = (uint8_t)(b->first + b->n);
+            return;
+        }
+        break;
+    }
+    case OP_BIND_IMG: {
+        const p_bind_handles *b = a;
+        if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->n >= 0 && b->n <= 32 && b->first + b->n <= 32) {
+            memcpy(&ex->img[b->stage][b->first], b->h, sizeof(uint64_t) * (size_t)b->n);
+            if (b->stage < 3 && b->first + b->n > ex->img_hi[b->stage]) ex->img_hi[b->stage] = (uint8_t)(b->first + b->n);
+            return;
+        }
+        break;
+    }
+    case OP_PUSH_CONST: {
+        const p_push_const *p = a;
+        if (p->table >= 0 && p->table < NVN2_ROOT_TABLES && (p->compute || p->table == 0)) {
+            int k = p->compute != 0, w0 = p->offset / 4, n = p->bytes / 4;
+            memcpy(&ex->push[k][p->table][w0], p->w, 4 * (size_t)n);
+            ex->push_set[k][p->table] |= (n >= 64 ? ~0ull : ((1ull << n) - 1)) << w0;
+            return;
+        }
+        break;
+    }
+    }
+    vk_exec_op_draw(ex, op, a);
+}
+
 static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
     // A dump armed during the collection ends it: the dump follows draws one by one, on this thread.
     if (PC.nops == PAR_MAX_OPS || vk_dump_armed) return 0;
@@ -2166,7 +2421,8 @@ static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
         break;
     case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
     case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST:
-        vk_exec_op_draw(ex, h->op, a);   // binds only change ex
+        if (PC.inline_binds) par_bind_op(ex, h->op, a);
+        else vk_exec_op_draw(ex, h->op, a);   // binds only change ex
         break;
     // Indirect draws too: the GPU reads their arguments when the secondaries run, in the pass's order, as it would from
     // the primary. A dispatch or copy that wrote them came before the pass, whose opening on the primary records a full
@@ -2180,7 +2436,7 @@ static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
             // A new slice starts at this draw, from ex as it is now; the one before is complete and goes to the workers.
             if (PC.nslices > PC.s0) par_publish();
             int i = PC.nslices++;
-            PC.snap[i] = *ex;
+            par_snap_take(&PC.snap[i], ex);
             PC.start[i] = PC.nops;
             PC.soq[i] = (uint8_t)PC.oq, PC.soqf[i] = PC.oq_flags, PC.supd[i] = (uint8_t)PC.upd;
             PC.snote[i] = (uint8_t)vk_sync_noting();
@@ -2195,7 +2451,8 @@ static int par_take(VkExec *ex, const op_hdr *h, const void *a) {
         // DLSS takes the scene's depth and camera from the first scene draw of a pass, in draw order. The slices are
         // recorded at once, so the collection notes it here from ex, which has the draw's targets and binds: a draw
         // the slice later skips (a pipeline still building) may note it, with the same targets and camera.
-        if (ex->depth.image && vk_temporal_wanted()) vk_dlss_scene_draw(ex);
+        if (!PC.dlss_done && ex->depth.image && vk_temporal_wanted())
+            PC.dlss_done = (uint8_t)vk_dlss_scene_draw(ex);
         break;
     default:
         return 0;
@@ -2235,14 +2492,18 @@ static void par_rec_note(int worker, int i, uint64_t ns) {   // TOTK_TRACE=perf:
 
 static void par_record(int i, ParPool *pp, VkExec *w, struct DrawCtx *dc) {
     VkCommandBuffer cb = par_secondary(pp);
-    par_begin_secondary(&PC.snap[i], cb, PC.soq[i], PC.soqf[i]);
-    *w = PC.snap[i];
+    const ParPassSnap *ps = &par_pass[PC.supd[i]];
+    par_begin_secondary(ps, cb, PC.soq[i], PC.soqf[i]);
+    par_pass_load(w, ps);
+    par_snap_load(w, &PC.snap[i]);
     w->draw = dc;   // this thread's slice context: vk_exec_op_draw takes the helpers' copy of the translator
     w->cb = cb, w->recorded = 0, w->dirty = VK_EXEC_DIRTY_ALL;
     // Feedback targets: what earlier slices wrote is not known here, so every attachment counts as written and the
     // slice's first draw that samples one records its by-region barrier (vk_exec_draw.c feedback_barrier).
     w->fb_dirty = 0x1ff;
     w->views = NULL, w->nviews = 0, w->cap_views = 0;   // the slice's own; merged into the primary's after
+    w->barrier_at = w->cs_tail = w->cs_barrier_at = -1, w->game_barrier = 0;
+    w->fb_fs = NULL, w->fb_serial = w->fb_pass = w->fb_sampled = 0, w->tex_serial = 0;
     vk_exec_draw_rebase(w);   // the context's memos and bindings were made from another slice's copy of the state
     vk_exec_draw_slice_view(dc, PC.supd[i]);
     vk_usnap_view(par_usd[PC.supd[i]] + 1);   // the drops made before the pass began
@@ -2291,8 +2552,8 @@ static VkExec par_main_w;
 static void par_publish(void) {   // the last slice made is complete
     plat_mutex_lock(&pw_lock);
     PC.end[PC.nslices - 1] = PC.nops;
-    pw_pub = PC.nslices;
-    if (par_nworkers) plat_cond_broadcast(&pw_go);
+    __atomic_store_n(&pw_pub, PC.nslices, __ATOMIC_RELEASE);
+    if (par_nworkers && !__atomic_load_n(&pw_active, __ATOMIC_RELAXED)) plat_cond_broadcast(&pw_go);
     plat_mutex_unlock(&pw_lock);
 }
 
@@ -2431,6 +2692,8 @@ static void par_flush(VkExec *ex) {
     }
     if (!PC.on) return;
     PC.on = 0;
+    ex->tex_serial++;
+    vk_exec_draw_binds_dirty(ex);
     par_passes++, par_slices += (uint64_t)PC.nslices, par_sliced_draws += (uint64_t)PC.draws;
     uint64_t t1 = kern_now_ns();
     par_t_collect += t1 - par_t0;
@@ -2871,6 +3134,122 @@ void vk_exec_lookahead(VkExec *ex) {
     }
 }
 
+static void walk(VkExec *ex, const op_hdr *h, int depth);
+static int par_skip_start;   // stop op after a mid-OP_CALL flush in par_collect_walk: replay it unsliced, as walk() does
+
+// Iterative single-switch collection loop while PC.on && !P.next: handles OP_BEGIN, OP_JUMP and OP_CALL in-loop using a
+// local return stack instead of recursing walk() on every call, fusing par_take and par_bind_op into one switch.
+// Returns the op at which collection stopped (at d0: *resumed = 0, PC.on == 1 if OP_END else flushed; when stopped
+// mid-OP_CALL with depth > d0: flushes, unwinds remaining callee ops via walk(), and returns the next op at d0 with
+// *resumed = 1).
+static const op_hdr *par_collect_walk(VkExec *ex, const op_hdr *h, int d0, int *resumed) {
+    int depth = d0, nops = PC.nops;
+    const op_hdr *ret[CALL_DEPTH];
+    for (;;) {
+        if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_)
+            rt_fatal("vk: corrupt command record at %p: op %u size %u", (const void *)h, h->op, h->size);
+        const void *a = nvn_op_payload(h);
+        switch (h->op) {
+        case OP_BEGIN:
+            h = nvn_op_next(h);
+            continue;
+        case OP_JUMP:
+            h = (const op_hdr *)(uintptr_t)((const p_jump *)a)->target;
+            continue;
+        case OP_CALL:
+            if (depth >= CALL_DEPTH) rt_fatal("vk: command buffer calls nested deeper than %d", CALL_DEPTH);
+            ret[depth++] = nvn_op_next(h);
+            h = nvn_op_first(((const p_jump *)a)->target);
+            continue;
+        case OP_END:
+            if (depth > d0) {
+                h = ret[--depth];
+                continue;
+            }
+            PC.nops = nops;
+            if (ex == &X) walk_at = h, walk_depth = d0;
+            *resumed = 0;
+            return h;
+        case OP_SET_RT:
+            if (nops < PAR_MAX_OPS && !vk_dump_armed && !memcmp(&ex->rt, a, sizeof ex->rt)) {
+                h = nvn_op_next(h);
+                continue;
+            }
+            goto stop;
+        case OP_WAIT_SYNC:
+            if (nops < PAR_MAX_OPS && !vk_dump_armed) {
+                h = nvn_op_next(h);
+                continue;
+            }
+            goto stop;
+        case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_STENCIL: case OP_POLY_OFFSET:
+        case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD: case OP_PRIM_RESTART:
+        case OP_COPY_STRIDE: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL:
+            if (nops == PAR_MAX_OPS || vk_dump_armed) goto stop;
+            state_op(ex, h->op, a);
+            PC.ops[nops++] = h;
+            h = nvn_op_next(h);
+            continue;
+        case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
+        case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST:
+            if (nops == PAR_MAX_OPS || vk_dump_armed) goto stop;
+            if (PC.inline_binds) par_bind_op(ex, h->op, a);
+            else vk_exec_op_draw(ex, h->op, a);
+            PC.ops[nops++] = h;
+            h = nvn_op_next(h);
+            continue;
+        case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IDX_IND:
+            if (nops == PAR_MAX_OPS || vk_dump_armed || (h->op == OP_DRAW_IDX_IND && !par_indirect())) goto stop;
+            if (PC.slice_draws >= PC.slice_size && PC.nslices < PAR_MAX_SLICES) {
+                PC.nops = nops;
+                if (PC.nslices > PC.s0) par_publish();
+                int i = PC.nslices++;
+                par_snap_take(&PC.snap[i], ex);
+                PC.start[i] = nops;
+                PC.soq[i] = (uint8_t)PC.oq, PC.soqf[i] = PC.oq_flags, PC.supd[i] = (uint8_t)PC.upd;
+                PC.snote[i] = (uint8_t)vk_sync_noting();
+                PC.stag[i] = wb_tag_walk;
+                pss0[i] = (uint16_t)PC.s0;
+                __atomic_store_n(&pdone[i], 0, __ATOMIC_RELAXED);
+                PC.slice_draws = 0;
+                PC.slice_size = par_size();
+            }
+            PC.slice_draws++, PC.draws++;
+            vk_exec_frame.draws_seen++;
+            draws_total++, pass_draws++;
+            if (!PC.dlss_done && ex->depth.image && vk_temporal_wanted())
+                PC.dlss_done = (uint8_t)vk_dlss_scene_draw(ex);
+            PC.ops[nops++] = h;
+            h = nvn_op_next(h);
+            continue;
+        default:
+            goto stop;
+        }
+    }
+stop:
+    PC.nops = nops;
+    par_end_op[h->op]++;
+    par_flush(ex);
+    if (depth == d0) {
+        if (ex == &X) walk_at = h, walk_depth = d0;
+        *resumed = 0;
+        return h;
+    }
+    if (ex == &X) {
+        for (int k = d0; k < depth; k++) walk_ret[k] = ret[k];
+        walk_at = h, walk_depth = depth;
+    }
+    par_skip_start = 1;
+    while (depth > d0) {
+        walk(ex, h, depth);
+        if (pd_n) par_settle_ready(ex);
+        if (split_draws >= split_n) maybe_split(ex);
+        h = ret[--depth];
+    }
+    *resumed = 1;
+    return h;
+}
+
 static void walk(VkExec *ex, const op_hdr *h, int depth) {
     for (;;) {
         while (h == P.next && !depth) h = par_step(ex, h);
@@ -2878,7 +3257,14 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_)
             rt_fatal("vk: corrupt command record at %p: op %u size %u", (const void *)h, h->op, h->size);
         const void *a = nvn_op_payload(h);
-        if (h->op != OP_END && h->op != OP_BEGIN && h->op != OP_JUMP && h->op != OP_CALL) {
+        int skip_par = par_skip_start;
+        par_skip_start = 0;
+        if (PC.on && !P.next && h->op != OP_END) {
+            int res = 0;
+            h = par_collect_walk(ex, h, depth, &res);
+            if (res) continue;
+            a = nvn_op_payload(h);
+        } else if (h->op != OP_END && h->op != OP_BEGIN && h->op != OP_JUMP && h->op != OP_CALL) {
             if (PC.on) {
                 if (par_take(ex, h, a)) {
                     if (par_run_op(h->op) == 2) draws_total++, pass_draws++;
@@ -2887,10 +3273,20 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
                 }
                 par_end_op[h->op]++;
                 par_flush(ex);
-            } else if (par_run_op(h->op) == 2 && par_start(ex) && par_take(ex, h, a)) {
-                draws_total++, pass_draws++;
-                h = nvn_op_next(h);
-                continue;
+            } else if (!skip_par && par_run_op(h->op) == 2 && par_start(ex)) {
+                if (!P.next) {
+                    int res = 0;
+                    h = par_collect_walk(ex, h, depth, &res);
+                    if (res) continue;
+                    a = nvn_op_payload(h);
+                } else if (par_take(ex, h, a)) {
+                    draws_total++, pass_draws++;
+                    h = nvn_op_next(h);
+                    continue;
+                } else {
+                    par_end_op[h->op]++;
+                    par_flush(ex);
+                }
             }
         }
         if (ex == &X && !ex->in_pass)   // TOTK_PASS_GPU: the GPU work of ops outside passes, by op

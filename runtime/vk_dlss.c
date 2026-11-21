@@ -509,8 +509,8 @@ void vk_dlss_jitter(VkImage depth, float j[2]) {
     else __atomic_store_n(&J.used, 1, __ATOMIC_RELAXED);   // the replay thread or a thread recording slices
 }
 
-void vk_dlss_scene_draw(const VkExec *ex) {
-    if (state < 0 && !vk_fsr_wanted()) return;
+int vk_dlss_scene_draw(const VkExec *ex) {
+    if (state < 0 && !vk_fsr_wanted()) return 1;
     // DLSS on and the scene drawn, but no upscale of the game's for half a minute: the game draws its 3D scene at the
     // output size (its dynamic resolution at full on a fast GPU), so DLSS has nothing to replace. One line per run,
     // where the log would otherwise show only that NGX started.
@@ -522,15 +522,16 @@ void vk_dlss_scene_draw(const VkExec *ex) {
     const VkExecTarget *z = &ex->depth;
     const p_bind_buf *b = &ex->ubo[0][0];   // vertex bank c3: the replay keeps the user banks from c3 on
     Scene *s = vk_spec_helper() ? &SH[vk_spec_here - 1] : &S;
-    if ((s->have && s->serial == ex->pass_serial) || b->size != CAM_BLOCK || !b->addr || !z->img || z->img->image != z->image ||
+    if ((s->have && s->serial == ex->pass_serial) || !z->img || z->img->image != z->image ||
         z->is3d || z->samples > 1 || !ex->color[0].image || !(z->aspect & VK_IMAGE_ASPECT_DEPTH_BIT))
-        return;
-    if (J.w && (z->width != J.w || z->height != J.h)) return;   // a shadow map, a probe, a half-size pass
+        return 1;
+    if (J.w && (z->width != J.w || z->height != J.h)) return 1;   // a shadow map, a probe, a half-size pass
+    if (b->size != CAM_BLOCK || !b->addr) return 0;   // a later draw in this pass may bind the camera block
     // The block as of the submit call (vk_usnap.c): the game rewrites its uniform blocks soon after submitting, and a
     // GPU-side update never shows in guest memory. Not snapshotted (or dropped by such an update): no scene noted, so
     // this frame runs spatially.
     const void *cam = vk_usnap_bytes(b->addr, sizeof s->cam);
-    if (!cam) return;
+    if (!cam) return 0;
     vk_texture_lock();   // against vk_dlss_image_gone (textures are destroyed on other threads)
     memcpy(s->cam, cam, sizeof s->cam);
     s->z = *z->img;
@@ -538,6 +539,7 @@ void vk_dlss_scene_draw(const VkExec *ex) {
     s->z.width = z->width, s->z.height = z->height;   // of the level drawn
     s->have = 1, s->serial = ex->pass_serial;
     vk_texture_unlock();
+    return 1;
 }
 
 void vk_dlss_part_begin(int k) {

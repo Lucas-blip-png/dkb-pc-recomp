@@ -652,6 +652,12 @@ area = "gfx"
 cmd = ["{python}", "tests/par_plan_test.py", "--cc", "{cc}"]
 
 [[test]]
+name = "par-collect"
+tier = 1
+area = "gfx"
+cmd = ["{python}", "tests/par_collect_test.py", "--cc", "{cc}", "--deps", "{deps}"]
+
+[[test]]
 name = "sync-note-merge"
 tier = 1
 area = "gfx"

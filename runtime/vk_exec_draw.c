@@ -5126,12 +5126,13 @@ static void geometry_context_log(const VkExec *ex, uint32_t op, const void *payl
     geometry_context_buffer_log(g->records, "gs_ubo0", u0);
 }
 
-static void bind_handles(uint64_t *dst, int cap, const p_bind_handles *b) {
+static int bind_handles(uint64_t *dst, int cap, const p_bind_handles *b) {
     if (b->stage < 0 || b->stage >= 6 || b->first < 0 || b->n < 0 || b->n > 32 || b->first + b->n > cap) {
         warn_once(W_BIND, "a bind of %d handles at %d of stage %d is out of range: ignored", b->n, b->first, b->stage);
-        return;
+        return 0;
     }
     memcpy(&dst[b->first], b->h, sizeof(uint64_t) * (size_t)b->n);
+    return 1;
 }
 
 static void op_draw_impl(VkExec *ex, uint32_t op, const void *payload) {
@@ -5180,11 +5181,15 @@ static void op_draw_impl(VkExec *ex, uint32_t op, const void *payload) {
         const p_bind_vbuf *b = payload;
         if (b->first < 0 || b->n < 0 || b->first + b->n > 16) break;
         memcpy(&ex->vbuf[b->first], b->r, sizeof(NVNbufferRange) * (size_t)b->n);
+        if (b->first + b->n > ex->vbuf_hi) ex->vbuf_hi = (uint8_t)(b->first + b->n);
         break;
     }
     case OP_BIND_UBO: {
         const p_bind_buf *b = payload;
-        if (b->stage >= 0 && b->stage < 6 && b->index >= 0 && b->index < 18) ex->ubo[b->stage][b->index] = *b;
+        if (b->stage >= 0 && b->stage < 6 && b->index >= 0 && b->index < 18) {
+            ex->ubo[b->stage][b->index] = *b;
+            if (b->stage < 3 && b->index + 1 > ex->ubo_hi[b->stage]) ex->ubo_hi[b->stage] = (uint8_t)(b->index + 1);
+        }
         dc->bind_gen++;
         break;
     }
@@ -5205,6 +5210,7 @@ static void op_draw_impl(VkExec *ex, uint32_t op, const void *payload) {
         const p_bind_buf *b = payload;
         if (b->stage >= 0 && b->stage < 6 && b->index >= 0 && b->index < 16) {
             ex->ssbo[b->stage][b->index] = *b;
+            if (b->stage < 3 && b->index + 1 > ex->ssbo_hi[b->stage]) ex->ssbo_hi[b->stage] = (uint8_t)(b->index + 1);
             dc->ssbo_serial[b->stage]++;
         } else {   // past the table: dropped (NVN 2 binds more storage buffers per stage than NVN 1's 16)
             static uint64_t seen[6];
@@ -5216,19 +5222,25 @@ static void op_draw_impl(VkExec *ex, uint32_t op, const void *payload) {
     }
     case OP_BIND_TEX: {
         const p_bind_handles *b = payload;
-        bind_handles(b->stage >= 0 && b->stage < 6 ? ex->tex[b->stage] : NULL, 128, b);
+        if (bind_handles(b->stage >= 0 && b->stage < 6 ? ex->tex[b->stage] : NULL, 128, b) &&
+            b->stage < 3 && b->first + b->n > ex->tex_hi[b->stage])
+            ex->tex_hi[b->stage] = (uint8_t)(b->first + b->n);
         ex->tex_serial++;
         dc->bind_gen++;
         break;
     }
     case OP_BIND_SAMP: {
         const p_bind_handles *b = payload;
-        bind_handles(b->stage >= 0 && b->stage < 6 ? ex->samp[b->stage] : NULL, 128, b);
+        if (bind_handles(b->stage >= 0 && b->stage < 6 ? ex->samp[b->stage] : NULL, 128, b) &&
+            b->stage < 3 && b->first + b->n > ex->samp_hi[b->stage])
+            ex->samp_hi[b->stage] = (uint8_t)(b->first + b->n);
         break;
     }
     case OP_BIND_IMG: {
         const p_bind_handles *b = payload;
-        bind_handles(b->stage >= 0 && b->stage < 6 ? ex->img[b->stage] : NULL, 32, b);
+        if (bind_handles(b->stage >= 0 && b->stage < 6 ? ex->img[b->stage] : NULL, 32, b) &&
+            b->stage < 3 && b->first + b->n > ex->img_hi[b->stage])
+            ex->img_hi[b->stage] = (uint8_t)(b->first + b->n);
         ex->tex_serial++;   // the shader memo's handle check (feedback_scan reads only textures: a rescan at most)
         dc->bind_gen++;
         break;
@@ -5523,6 +5535,14 @@ void vk_exec_draw_slices_end(int threads) {
             ((uint64_t *)&vk_exec_frame)[j] += ((const uint64_t *)f)[j];
         memset(f, 0, sizeof *f);
     }
+}
+
+int vk_exec_draw_inline_ok(const VkExec *ex) { return !dp_on(DC_OF(ex)); }
+
+void vk_exec_draw_binds_dirty(VkExec *ex) {
+    DrawCtx *dc = DC_OF(ex);
+    dc->bind_gen++;
+    for (int i = 0; i < 6; i++) dc->ssbo_serial[i]++;
 }
 
 // vk_exec_draw_shutdown: what each helper's and slice thread's context kept goes, as the replay thread's does. Those

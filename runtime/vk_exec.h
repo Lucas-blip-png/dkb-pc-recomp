@@ -94,6 +94,9 @@ typedef struct VkExec {
     int render_disabled;                 // OP_RENDER_ENABLE false or a failed OP_RENDER_COND: clears and draws skip
     p_render_cond render_cond;           // last OP_RENDER_COND
     int has_render_cond;
+    // High-water marks (one past the highest slot bound since state_reset) for graphics stages 0..2, viewports and
+    // vertex buffers, so parallel slice snapshots copy only the populated prefix (vk_exec.c par_snap_take).
+    uint8_t ubo_hi[3], ssbo_hi[3], tex_hi[3], samp_hi[3], img_hi[3], vp_hi, vbuf_hi;
 
     // ---- internal to vk_exec.c
     void *views;                         // image views created for this command buffer (freed at its fence)
@@ -193,12 +196,14 @@ int vk_exec_targets_recent(VkExec *ex, int any);
 void vk_exec_targets_describe(VkExec *ex, char *buf, size_t cap);
 
 // upscaler = dlss (vk_dlss.c), from vk_exec_draw.c. vk_dlss_scene_draw: a draw about to be recorded with a depth
-// target; it notes the scene's depth and camera for the frame's evaluation. vk_dlss_jitter: sets j (pixels) to the
-// viewport offset of draws into depth when it is the scene depth DLSS last ran on; j stays as it is otherwise.
-// vk_dlss_image_gone: image is being destroyed (vk_exec_image_gone). On a helper thread (vk_spec.h) the first two
-// note into a slot of that helper's part: vk_dlss_part_begin empties helper k's when the replay thread launches its
-// part, and vk_dlss_part_taken makes its notes the frame's when the part is taken (vk_exec.c par_launch, par_join).
-void vk_dlss_scene_draw(const VkExec *ex);
+// target; it notes the scene's depth and camera for the frame's evaluation and returns 1 once the pass is settled
+// (captured or ineligible for any draw of the pass), or 0 when a later draw in the pass may still bind the camera.
+// vk_dlss_jitter: sets j (pixels) to the viewport offset of draws into depth when it is the scene depth DLSS last ran
+// on; j stays as it is otherwise. vk_dlss_image_gone: image is being destroyed (vk_exec_image_gone). On a helper thread
+// (vk_spec.h) the first two note into a slot of that helper's part: vk_dlss_part_begin empties helper k's when the
+// replay thread launches its part, and vk_dlss_part_taken makes its notes the frame's when the part is taken
+// (vk_exec.c par_launch, par_join).
+int vk_dlss_scene_draw(const VkExec *ex);
 void vk_dlss_jitter(VkImage depth, float j[2]);
 void vk_dlss_part_begin(int k);
 void vk_dlss_part_taken(int k);
@@ -307,6 +312,10 @@ void vk_exec_draw_slices_begin(int threads, int snap);
 struct DrawCtx *vk_exec_draw_slice_ctx(int k);
 void vk_exec_draw_slice_view(struct DrawCtx *c, int snap);
 void vk_exec_draw_slices_end(int threads);
+// Inline bind collection (vk_exec.c par_bind_op): inline_ok is 0 when draw profiling counts bind ops in
+// vk_exec_op_draw; binds_dirty bumps ex's draw context bind_gen and ssbo_serial once when a sliced collection ends.
+int vk_exec_draw_inline_ok(const VkExec *ex);
+void vk_exec_draw_binds_dirty(VkExec *ex);
 // Depth twins of a sliced pass (vk_exec_draw.c twin_prepare): a slice cannot end its pass to copy one. _copy, in
 // vk_exec.c par_start before the pass begins, copies the twins of the n texture ids ids of ex's texture pool that the
 // target set's slices needed before (the attachments of ex's targets excepted) and returns how many it copied; bit i of
