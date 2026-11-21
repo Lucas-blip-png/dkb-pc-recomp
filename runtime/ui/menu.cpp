@@ -1518,6 +1518,9 @@ static void layout_menu(const MenuTarget &target, float scale, bool had_popup) {
     if (!cfg_last_save_ok()) {   // stays until a save succeeds; the settings hold for the session
         ImGui::SetCursorPosY(y + st.FramePadding.y);
         ImGui::TextColored(g_theme == 1 ? opt_warn() : ImVec4(0.95f, 0.45f, 0.35f, 1), "%s", menu_text(UI_MENU_SAVE_FAILED));
+    } else {   // a plain line, no link and no pop-up
+        ImGui::SetCursorPosY(y + st.FramePadding.y);
+        ImGui::TextDisabled("%s", menu_text(UI_MENU_SUPPORT));
     }
     const char *cont = menu_text(UI_MENU_CONTINUE), *quit = menu_text(UI_MENU_QUIT);
     float bw = fmaxf(ImGui::CalcTextSize(cont).x, ImGui::CalcTextSize(quit).x) + st.FramePadding.x * 4;

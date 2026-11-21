@@ -22,6 +22,7 @@ typedef enum {
     UI_MENU_SET_BY_ENV,       // note on a setting an environment variable fixes
     UI_MENU_SAVE_FAILED,
     UI_MENU_VERSION,          // "DKB Recomp %s, game %s": the port version and the game update, beside the title
+    UI_MENU_SUPPORT,          // "Support the project: ko-fi.com/...": a plain line at the left of the bottom row
 
     // Screen
     UI_MENU_FULLSCREEN, UI_MENU_FULLSCREEN_DESC,

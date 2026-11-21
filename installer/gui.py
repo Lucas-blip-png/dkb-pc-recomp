@@ -106,6 +106,7 @@ def apply_theme(root, ui_font):
                     bordercolor=BANANA)
     style.configure('Err.TLabel', foreground=RED_TEXT)
     style.configure('Warn.TLabel', foreground=BANANA)
+    style.configure('Link.TLabel', foreground=MUTED, font=(ui_font, 9, 'underline'))
     style.configure('Version.TLabel', background=FRAME, foreground=MUTED)
     return style
 
@@ -150,6 +151,9 @@ def fix_dpi_awareness():
         set_context.argtypes = [ctypes.c_void_p]
         set_context.restype = ctypes.c_int
         set_context(ctypes.c_void_p(-4))   # PER_MONITOR_AWARE_V2; an already configured process keeps its context
+
+
+SUPPORT_URL = 'https://ko-fi.com/lucasblippng'   # fixed: never user or remote data, so webbrowser may open it directly
 
 
 def open_page(url):
@@ -237,6 +241,10 @@ class App:
         tk.Frame(root, height=4, bg=RED).pack(fill='x')   # the DK tie's red under the strip
         self.body = ttk.Frame(root, padding=PAD)
         self.body.pack(fill='both', expand=True)
+        support = self.label(self.body, 'ui.support', style='Link.TLabel')
+        support.configure(cursor='hand2')
+        support.bind('<Button-1>', lambda _e: webbrowser.open(SUPPORT_URL))
+        support.pack(side='bottom', anchor='e')
         self.amiibo_rows = []                      # (label, folder getter) of each amiibo row, for refresh_amiibo
         self.frames = {'form': self.build_form(), 'run': self.build_run(), 'finish': self.build_finish(),
                        'precompile': self.build_precompile()}

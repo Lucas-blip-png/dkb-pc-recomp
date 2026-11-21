@@ -91,6 +91,7 @@
 
  "ui.title": "Установка TotK",
  "ui.version": "версия {version}",
+ "ui.support": "Поддержать проект (Ko-fi)",
  "ui.update_available": "Доступен более новый выпуск {tag}. Нажмите, чтобы открыть его страницу.",
  "warn.update_available": "Доступен более новый выпуск {tag}: {url}",
  "ui.home_ready": "Всё готово к игре",

@@ -80,6 +80,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_AFTER_RESTART] = "Restart required", [UI_MENU_SET_BY_ENV] = "Locked by environment variable",
     [UI_MENU_SAVE_FAILED] = "could not save settings",
     [UI_MENU_VERSION] = "DKB Recomp %s, game %s",
+    [UI_MENU_SUPPORT] = "Support the project: ko-fi.com/lucasblippng",
 
     [UI_MENU_FULLSCREEN] = "Fullscreen", [UI_MENU_FULLSCREEN_DESC] = "Fills the screen with the game; F11 toggles it.",
     [UI_MENU_WINDOW_MODE] = "Window mode",
@@ -555,6 +556,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_AFTER_RESTART] = "Требуется перезапуск", [UI_MENU_SET_BY_ENV] = "Задано переменной окружения",
     [UI_MENU_SAVE_FAILED] = "не удалось сохранить настройки",
     [UI_MENU_VERSION] = "DKB Recomp %s, игра %s",
+    [UI_MENU_SUPPORT] = "Поддержать проект: ko-fi.com/lucasblippng",
 
     [UI_MENU_FULLSCREEN] = "Полный экран", [UI_MENU_FULLSCREEN_DESC] = "Игра на весь экран; F11 переключает режим.",
     [UI_MENU_WINDOW_MODE] = "Режим окна",

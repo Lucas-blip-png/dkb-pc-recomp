@@ -91,6 +91,7 @@
 
  "ui.title": "TotK Setup",
  "ui.version": "version {version}",
+ "ui.support": "Support the project (Ko-fi)",
  "ui.update_available": "A newer release, {tag}, is available. Click to open its page.",
  "warn.update_available": "A newer release, {tag}, is available: {url}",
  "ui.home_ready": "Ready to play",
