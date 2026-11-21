@@ -100,7 +100,6 @@ static inline void ms_set(PoolRec *r, int state) { __atomic_store_n(&r->mstate, 
 
 static void mirror_forget(PoolRec *r);   // pool_lock exclusive: off the mirrored list
 static int shadow_on;                    // shadow mode: imported pools get shadow storage instead (vk_mem_class_log)
-static int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size);
 static void shadow_touch(PoolRec *r);
 static void shadow_forget(PoolRec *r);
 static void mirror_retiring(PoolRec *r);  // vk_pool_fini: kept until mirror_retire (or vk_mem_shutdown)
@@ -173,7 +172,12 @@ static int memory_type(const VkCtx *c, uint32_t bits, VkMemoryPropertyFlags want
 // The phases of one import, in ns (import_pool fills it for its log line): mem_thaw, mem_touch, the host pointer query,
 // vkCreateBuffer, vkAllocateMemory (the driver pins the pages there) and vkBindBufferMemory; total is all of
 // import_pool, wait the time lazy_import waited for lazy_lock before it (filled by lazy_import).
-typedef struct { uint64_t thaw, touch, props, create, alloc, bind, total, wait; } ImportTimes;
+// With the shadow storage (shadow_pool) the phases are the buffer's allocation and the first copy of the guest's bytes.
+typedef struct {
+    uint64_t thaw, touch, props, create, alloc, bind, total, wait;
+    uint64_t shadow_alloc, shadow_copy;
+} ImportTimes;
+static int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size, ImportTimes *t);
 static int import_pool_timed(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size, ImportTimes *t);
 // where: when it runs, for the log line ("on first GPU use", "at initialize"). out, when not
 // NULL, gets the times of the phases.
@@ -193,16 +197,23 @@ static int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size, const
     // A slow vkAllocateMemory, or any import of 64 MiB or more (the terrain arena of a layer is 450 MiB, #397), gets a
     // line with every phase (the first 32): the stall of a first GPU use was more than the allocation alone.
     static int32_t n_slow_alloc;
-    if ((t.alloc > 10000000ull || size >= (64ull << 20)) && plat_inc32(&n_slow_alloc) <= 32)
-        rt_log("vk: importing %llu MiB of guest memory took %.1f ms in vkAllocateMemory (%.1f ms in all, %s: thaw %.1f, "
-               "touch %.1f, host pointer query %.1f, vkCreateBuffer %.1f, vkBindBufferMemory %.1f)%s",
-               (unsigned long long)(size >> 20), qpc_ms(t.alloc), qpc_ms(total), where, qpc_ms(t.thaw), qpc_ms(t.touch),
-               qpc_ms(t.props), qpc_ms(t.create), qpc_ms(t.bind), ok ? "" : "; failed");
+    uint64_t slow = shadow_on ? t.shadow_alloc + t.shadow_copy : t.alloc;
+    if ((slow > 10000000ull || size >= (64ull << 20)) && plat_inc32(&n_slow_alloc) <= 32) {
+        if (shadow_on)
+            rt_log("vk: shadowing %llu MiB of guest memory took %.1f ms (%s: thaw %.1f, touch %.1f, buffer allocation "
+                   "%.1f, guest copy %.1f)%s", (unsigned long long)(size >> 20), qpc_ms(total), where, qpc_ms(t.thaw),
+                   qpc_ms(t.touch), qpc_ms(t.shadow_alloc), qpc_ms(t.shadow_copy), ok ? "" : "; failed");
+        else
+            rt_log("vk: importing %llu MiB of guest memory took %.1f ms in vkAllocateMemory (%.1f ms in all, %s: thaw "
+                   "%.1f, touch %.1f, host pointer query %.1f, vkCreateBuffer %.1f, vkBindBufferMemory %.1f)%s",
+                   (unsigned long long)(size >> 20), qpc_ms(t.alloc), qpc_ms(total), where, qpc_ms(t.thaw),
+                   qpc_ms(t.touch), qpc_ms(t.props), qpc_ms(t.create), qpc_ms(t.bind), ok ? "" : "; failed");
+    }
     return ok;
 }
 
 static int import_pool_timed(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size, ImportTimes *t) {
-    if (shadow_on) return shadow_pool(c, r, addr, size);
+    if (shadow_on) return shadow_pool(c, r, addr, size, t);
     if (!p_host_props)
         p_host_props = (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(c->device, "vkGetMemoryHostPointerPropertiesEXT");
     uint64_t al = c->min_imported_host_alignment ? c->min_imported_host_alignment : 0x1000;
@@ -1548,7 +1559,43 @@ static int nsblocked, csblocked, spend_dirty;
 static int64_t s_live_n, s_live_bytes;            // shadow_lock
 static uint64_t s_syncs, s_copied, s_queries, s_untracked, s_wb_bytes, s_ticks;   // shadow_lock: since the last log
 
-static int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
+// The first copy of a pool into its shadow. Its time is page faults on the new buffer's mapping more than memory speed
+// (16 MiB took 27 ms and 693 MiB 245 ms on an RX 7900 XTX with Mesa 26.2), and the game's threads wait for it at a
+// layer's entry. A copy of SHADOW_COPY_MIN bytes or more is cut into up to SHADOW_COPY_THREADS chunks, no more than
+// half the usable processors and none under 4 MiB, which short-lived threads copy side by side: the caller takes the
+// first chunk and joins the others, so the whole copy is done before the pool is published. A thread that cannot be
+// started leaves its chunk to the caller. Four threads took the 693 MiB copy to 72 ms and the 450 MiB one from 164 to
+// 54 ms; eight were no faster.
+enum { SHADOW_COPY_THREADS = 4, SHADOW_COPY_MIN = 8 << 20, SHADOW_COPY_CHUNK = 4 << 20 };
+typedef struct { uint8_t *dst; const uint8_t *src; size_t size; } ShadowChunk;
+
+static void shadow_chunk_copy(void *arg) {
+    const ShadowChunk *k = arg;
+    memcpy(k->dst, k->src, k->size);
+}
+
+static void shadow_copy_initial(uint8_t *dst, const uint8_t *src, size_t size) {
+    size_t n = SHADOW_COPY_THREADS, cpus = plat_cpu_usable();
+    if (n > cpus / 2) n = cpus / 2;
+    while (n > 1 && size / n < SHADOW_COPY_CHUNK) n--;
+    if (n < 2 || size < SHADOW_COPY_MIN) {
+        memcpy(dst, src, size);
+        return;
+    }
+    ShadowChunk ck[SHADOW_COPY_THREADS];
+    PlatThread *th[SHADOW_COPY_THREADS] = {0};
+    size_t each = (size / n) & ~(size_t)0xfff;
+    for (size_t i = 0; i < n; i++)
+        ck[i] = (ShadowChunk){dst + i * each, src + i * each, i + 1 < n ? each : size - i * each};
+    for (size_t i = 1; i < n; i++) th[i] = plat_thread_new(shadow_chunk_copy, &ck[i], "shadow copy");
+    shadow_chunk_copy(&ck[0]);
+    for (size_t i = 1; i < n; i++) {
+        if (th[i]) plat_thread_join(th[i]);
+        else shadow_chunk_copy(&ck[i]);
+    }
+}
+
+static int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size, ImportTimes *t) {
     r->import_lo = addr & ~0xfffull;
     r->import_hi = (addr + size + 0xfff) & ~0xfffull;
     uint64_t n = r->import_hi - r->import_lo;
@@ -1559,7 +1606,9 @@ static int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
                                   .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                   .preferredFlags = VK_MEMORY_PROPERTY_HOST_CACHED_BIT};
     VmaAllocationInfo info;
+    uint64_t start = qpc();
     VkResult res = vmaCreateBuffer(c->vma, &bi, &ai, &r->buf, &r->salloc, &info);
+    t->shadow_alloc = qpc() - start;
     if (res != VK_SUCCESS) {
         rt_log("vk: pool %#llx+%#llx: shadow allocation failed (%d)", (unsigned long long)addr, (unsigned long long)size,
                (int)res);
@@ -1570,7 +1619,9 @@ static int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     plat_mutex_lock(&gen_lock);
     r->sgen = gen_now;   // the copy below holds every write stamped so far; later stamps are copied again
     plat_mutex_unlock(&gen_lock);
-    memcpy(r->smap, (const void *)(uintptr_t)r->import_lo, n);
+    start = qpc();
+    shadow_copy_initial(r->smap, (const uint8_t *)(uintptr_t)r->import_lo, n);
+    t->shadow_copy = qpc() - start;
     plat_mutex_lock(&shadow_lock);
     s_live_n++, s_live_bytes += (int64_t)n;
     plat_mutex_unlock(&shadow_lock);
