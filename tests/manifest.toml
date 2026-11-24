@@ -257,6 +257,12 @@ area = "gfx"
 cmd = ["{python}", "tests/staged_mirror_opt_test.py", "--cc", "{cc}", "--deps", "{deps}", "--out", "{out}"]
 
 [[test]]
+name = "mirror-wb-diff"
+tier = 1
+area = "gfx"
+cmd = ["{python}", "tests/mirror_wb_diff_test.py", "--cc", "{cc}", "--deps", "{deps}", "--spirv-val", "{spirv_val}", "--out", "{out}"]
+
+[[test]]
 name = "commit-later-lock"
 tier = 1
 area = "os"

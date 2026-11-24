@@ -1220,6 +1220,7 @@ static void maybe_split(VkExec *ex) {
     split_draws = 0;
     if (ex->recorded == part_start) return;
     ex->cb = vk_sync_split();
+    vk_mem_wb_tag(++wb_tag_walk);   // the walk's writes from here on are in later parts
     part_start = ex->recorded;
     part_t0 = kern_now_ns();
     ex->dirty = VK_EXEC_DIRTY_ALL;
@@ -1264,6 +1265,7 @@ int vk_exec_read_buffer(VkExec *ex, uint64_t addr, uint64_t size, void *out) {
     VK_MEM_BOUND(source);
     par_settle_all(ex);   // the held parts belong to the prefix
     ex->cb = vk_sync_split_wait();   // this prefix, not ex->fence (only the final part signals that value)
+    vk_mem_wb_tag(++wb_tag_walk);   // the walk's writes from here on are in later parts
     split_draws = 0;
     part_start = ex->recorded;
     part_t0 = kern_now_ns();
@@ -1818,8 +1820,9 @@ static const op_hdr *par_join(VkExec *ex, const op_hdr *h) {
         return h;
     }
     // This thread's part if it recorded one, then the helper's, then a new command buffer for what follows.
-    if (!behind) ex->cb = vk_sync_split(), n_parts++;
+    if (!behind) ex->cb = vk_sync_split(), vk_mem_wb_tag(++wb_tag_walk), n_parts++;
     vk_sync_split_insert(p->H.cb);
+    vk_mem_wb_tag(++wb_tag_walk);
     n_parts++;
     for (int j = 0; j < PW[i].n; j++) {
         vk_texture_gpu_written_late(PW[i].w[j].t.tex);
@@ -2825,7 +2828,7 @@ static void par_defer(VkExec *ex) {
     }
     d->cap_hi = rec_capture_end();
     vk_mem_wb_tag(++wb_tag_walk);   // the walk's writes from here on are in later parts
-    ex->cb = vk_sync_split_defer();
+    ex->cb = vk_sync_split_defer(d->tag);
     part_start = ex->recorded;
     part_t0 = kern_now_ns();
     split_draws = 0;
@@ -3383,6 +3386,8 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
     x_here = 1;
     int memory = n || work;
     if (memory) {
+        wb_tag_walk = 0;
+        vk_mem_wb_tag(0);
         vk_usnap_cpu_reads(n && vk_exec_draw_merge_on());
         vk_mem_mirror_begin();
         vk_usnap_begin(handles, n, fence);
