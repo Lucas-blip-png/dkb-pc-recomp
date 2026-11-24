@@ -1131,6 +1131,61 @@ static void test_par_collect_walk_op_end_across_cmdbufs_and_modes(void) {
     vk_dump_armed = 0;
 }
 
+/* Deferred OP_BIND_VATTR/OP_BIND_VSTREAM (both full 16-slot and partial binds) across slice boundaries and OP_END,
+ * plus multiple runs of consecutive OP_CALLs separated by a non-call op (prefetch re-arming and OP_END safety). */
+static void test_par_collect_walk_deferred_vstate_and_call_runs(void) {
+    VkExec init_ex;
+    memset(&init_ex, 0, sizeof init_ex);
+    init_ex.color[0].image = (VkImage)(uintptr_t)0x8000;
+    init_ex.pipe.vattr[0] = 0xdeadbeefu;
+    init_ex.pipe.vstream[0] = (vs_st){99, 1};
+
+    static OpBuf leaf[8], main_b;
+    uint64_t draw_stub[4] = {1, 2, 3, 4};
+    for (int i = 0; i < 8; i++) {
+        memset(&leaf[i], 0, sizeof leaf[i]);
+        emit_op(&leaf[i], OP_BEGIN, NULL, 0);
+        if (i % 2 == 0) {
+            p_bind_vattr va = {.first = 0, .n = 16};
+            p_bind_vstream vs = {.first = 0, .n = 16};
+            for (int k = 0; k < 16; k++)
+                va.st[k] = (uint32_t)(0x1000 + i * 32 + k),
+                vs.st[k] = (vs_st){(uint16_t)(i + k + 1), (uint8_t)(k & 3)};
+            emit_op(&leaf[i], OP_BIND_VATTR, &va, sizeof va);
+            emit_op(&leaf[i], OP_BIND_VSTREAM, &vs, sizeof vs);
+        } else {
+            p_bind_vattr va = {.first = 3, .n = 2, .st = {0x5000u + (uint32_t)i, 0x6000u + (uint32_t)i}};
+            p_bind_vstream vs = {.first = 2, .n = 2, .st = {{(uint16_t)(20 + i), 1}, {(uint16_t)(30 + i), 2}}};
+            emit_op(&leaf[i], OP_BIND_VATTR, &va, sizeof va);
+            emit_op(&leaf[i], OP_BIND_VSTREAM, &vs, sizeof vs);
+        }
+        p_bind_vbuf vb = {.first = 0, .n = 4};
+        for (int k = 0; k < 4; k++) vb.r[k] = (NVNbufferRange){0x80000000ull + (uint64_t)(i * 16 + k) * 64u, 256u};
+        emit_op(&leaf[i], OP_BIND_VBUF, &vb, sizeof vb);
+        emit_op(&leaf[i], OP_DRAW, draw_stub, sizeof draw_stub);
+        emit_op(&leaf[i], OP_END, NULL, 0);
+    }
+
+    memset(&main_b, 0, sizeof main_b);
+    emit_op(&main_b, OP_BEGIN, NULL, 0);
+    for (int i = 0; i < 4; i++) emit_call(&main_b, opbuf_first(&leaf[i]));
+    p_bind_buf ub = {.stage = 0, .index = 2, .addr = 0x90001000ull, .size = 256};
+    emit_op(&main_b, OP_BIND_UBO, &ub, sizeof ub);
+    for (int i = 4; i < 8; i++) emit_call(&main_b, opbuf_first(&leaf[i]));
+    emit_op(&main_b, OP_END, NULL, 0);
+
+    const op_hdr *streams[1] = {opbuf_first(&main_b)};
+    g_par_max_ops = 256;
+    g_par_slice_size = 3;
+    g_par_inline_binds = 1;
+    g_par_indirect_on = 1;
+    g_dlss_wanted = 0;
+    vk_dump_armed = 0;
+    static RunTrace fast;
+    compare_scenario(streams, 1, &init_ex, 1, 1, &fast);
+    assert(fast.nflush == 1 && fast.flushes[0].draws == 8 && fast.flushes[0].nslices == 3);
+}
+
 int main(void) {
     test_pass_snap();
     test_slice_snap_roundtrip_and_shrink();
@@ -1140,6 +1195,7 @@ int main(void) {
     test_par_collect_walk_mid_call_exits_and_unwind();
     test_par_collect_walk_max_ops_and_indirect_stop();
     test_par_collect_walk_op_end_across_cmdbufs_and_modes();
+    test_par_collect_walk_deferred_vstate_and_call_runs();
     puts("par_collect_test: ok");
     return 0;
 }
@@ -1170,7 +1226,9 @@ def main():
         extract_function(vk_exec_src, 'static int state_op('),
         extract_function(vk_exec_src, 'static int par_run_op('),
         extract_function(vk_exec_src, 'static int par_take('),
-        extract_function(vk_exec_src, 'static const op_hdr *par_collect_walk('),
+        extract_function(vk_exec_src, 'static inline void apply_vattr_inline('),
+        extract_function(vk_exec_src, 'static inline void apply_vstream_inline('),
+        extract_function(vk_exec_src, 'static const op_hdr *par_collect_walk_fast(').replace('par_collect_walk_fast', 'par_collect_walk'),
     ]
     vk_dlss_part = extract_function(vk_dlss_src, 'int vk_dlss_scene_draw(')
 
