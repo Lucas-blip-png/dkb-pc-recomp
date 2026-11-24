@@ -30,6 +30,8 @@ static struct __attribute__((aligned(64))) {
     uintptr_t anchor;
     uint64_t lo;
     uint64_t slots;
+    uint64_t hostfn_slots;   // active hostfn window count (0: use g_host hash table)
+    GuestFn hostfn_entry;    // direct entry for [RT_HOSTFN_BASE, RT_HOSTFN_BASE + 16 * hostfn_slots)
 } D;
 
 static const RtModule *g_mods[MAX_MODULES];   // sorted by base
@@ -218,8 +220,16 @@ __attribute__((noinline, noreturn, cold)) static void dispatch_fail(Cpu *c) {
                    rt_guest_name(c->x[30], lr, sizeof lr));
 }
 
+void rt_dispatch_set_hostfn(GuestFn entry, uint64_t slots) {
+    D.hostfn_entry = entry;
+    __atomic_store_n(&D.hostfn_slots, slots, __ATOMIC_RELEASE);
+}
+
 // Host functions, and the fatal error. A separate tail call keeps the fast path below free of a stack frame.
 __attribute__((noinline)) static void dispatch_slow(Cpu *c) {
+    uint64_t hi = __builtin_rotateright64(c->pc - RT_HOSTFN_BASE, 4);
+    if (__builtin_expect(hi < __atomic_load_n(&D.hostfn_slots, __ATOMIC_ACQUIRE), 1))
+        __attribute__((musttail)) return D.hostfn_entry(c);
     GuestFn f = g_ready ? host_lookup(c->pc) : NULL;
     if (!f) dispatch_fail(c);
     __attribute__((musttail)) return f(c);
