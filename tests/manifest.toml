@@ -668,6 +668,12 @@ area = "gfx"
 cmd = ["{python}", "tests/usnap_list_test.py", "--cc", "{cc}", "--out", "{out}"]
 
 [[test]]
+name = "cmd-rec-fast"
+tier = 1
+area = "nvn"
+cmd = ["{python}", "tests/cmd_rec_fast_test.py", "--cc", "{cc}", "--out", "{out}"]
+
+[[test]]
 name = "nan-guard-spirv"
 tier = 1
 area = "shaders"
