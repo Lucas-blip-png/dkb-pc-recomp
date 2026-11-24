@@ -261,6 +261,122 @@ done:
     return failures != before;
 }
 
+// Exercises the compute-dispatch path (n >= 64 disjoint targets) end-to-end: 128 records spaced 64 bytes apart in
+// reverse input order, checking all 128 reset records, untouched inter-record canaries, post-reset overwrite ordering,
+// and guest-memory write-back.
+enum { DISPATCH_N = 128, DISPATCH_STRIDE = 64, DISPATCH_WIN = DISPATCH_N * DISPATCH_STRIDE };
+typedef struct {
+    uint64_t list, target;
+    VkBuffer readback;
+    WriteRange writes[2];
+    int applied, failed;
+} DispatchCase;
+
+static void dispatch_work(VkExec *ex, void *context) {
+    DispatchCase *test = context;
+    test->applied = vk_exec_reset_indirect(ex, test->list, (DISPATCH_N + 4) * sizeof(uint64_t), 1, DISPATCH_N + 2);
+    VkMemSpan sp;
+    if (!vk_mem_resolve(test->target, DISPATCH_WIN, &sp)) { test->failed = 1; return; }
+    VK_MEM_USE(sp);
+    if (!sp.buffer) { test->failed = 1; return; }
+    vk_exec_barrier(ex);
+    VkBufferCopy copy0 = {sp.offset, 0, DISPATCH_WIN};
+    vkCmdCopyBuffer(ex->cb, sp.buffer, test->readback, 1, &copy0);
+    ex->recorded++;
+    // Overwrite word 0 of the first and last records after the reset to check post-dispatch barrier ordering.
+    for (unsigned k = 0; k < 2; k++) {
+        uint64_t addr = test->target + (k ? (DISPATCH_N - 1) * DISPATCH_STRIDE : 0);
+        VkMemSpan w;
+        if (!vk_mem_resolve(addr, 4, &w)) { test->failed = 1; return; }
+        VK_MEM_USE(w);
+        if (!w.buffer) { test->failed = 1; return; }
+        vk_exec_barrier(ex);
+        vkCmdFillBuffer(ex->cb, w.buffer, w.offset, 4, 7);
+        ex->recorded++;
+        vk_mem_gpu_wrote(&w, 4);
+        vk_usnap_drop(addr, 4);
+        test->writes[k] = (WriteRange){addr, 4};
+        vk_mem_gpu_pending(addr, 4);
+        vk_completion_add(ex->fence, written, &test->writes[k]);
+    }
+    vk_exec_barrier(ex);
+    VkBufferCopy copy1 = {sp.offset, DISPATCH_WIN, DISPATCH_WIN};
+    vkCmdCopyBuffer(ex->cb, sp.buffer, test->readback, 1, &copy1);
+    ex->recorded++;
+    VkMemoryBarrier2 host = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    VkDependencyInfo dep = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &host};
+    vkCmdPipelineBarrier2(ex->cb, &dep);
+    ex->recorded++;
+}
+
+static int dispatch_record(VkCommandBuffer cb, uint64_t fence, uint64_t ticks, void *context) {
+    return vk_exec_record_work(cb, fence, ticks, dispatch_work, context);
+}
+
+static int run_dispatch_case(uint8_t *heap) {
+    unsigned before = failures;
+    pool_t list_pool = {.magic = NVN_POOL_MAGIC, .flags = 0x24, .mem = heap + 0x100000,
+        .size = POOL_BYTES, .game_mem = heap + 0x100000};
+    pool_t target_pool = {.magic = NVN_POOL_MAGIC, .flags = 0x24, .mem = heap + 0x200000,
+        .size = POOL_BYTES, .game_mem = heap + 0x200000};
+    DispatchCase test = {.list = U(list_pool.mem + WINDOW_OFF), .target = U(target_pool.mem + WINDOW_OFF)};
+    VmaAllocation readback_alloc = NULL;
+    void *readback_map = NULL;
+    int list_live = 0, target_live = 0;
+    for (unsigned i = 0; i < POOL_BYTES / 4; i++) {
+        ((uint32_t *)list_pool.mem)[i] = CANARY;
+        ((uint32_t *)target_pool.mem)[i] = CANARY;
+    }
+    if (!vk_pool_init(&list_pool)) { CHECK(0, "dispatch list pool init"); goto done; }
+    list_live = 1;
+    if (!vk_pool_init(&target_pool)) { CHECK(0, "dispatch target pool init"); goto done; }
+    target_live = 1;
+    uint64_t ptrs[DISPATCH_N + 4];
+    ptrs[0] = test.target + DISPATCH_WIN;   // unselected prefix
+    for (unsigned i = 0; i < DISPATCH_N; i++)
+        ptrs[1 + i] = test.target + (uint64_t)(DISPATCH_N - 1 - i) * DISPATCH_STRIDE;   // reverse order
+    ptrs[1 + DISPATCH_N] = 0;               // null entry inside selection
+    ptrs[2 + DISPATCH_N] = 0;
+    ptrs[3 + DISPATCH_N] = test.target + DISPATCH_WIN + DISPATCH_STRIDE;   // unselected suffix
+    memcpy((void *)(uintptr_t)test.list, ptrs, sizeof ptrs);
+    if (!buffer(VK_BUFFER_USAGE_TRANSFER_DST_BIT, 2 * DISPATCH_WIN, 0, &test.readback, &readback_alloc, &readback_map)) {
+        CHECK(0, "dispatch readback allocation"); goto done;
+    }
+    uint64_t fence = vk_sync_submit_record(dispatch_record, &test, rt_ticks());
+    CHECK(fence != 0 && vk_sync_fence_wait(fence, UINT64_C(10000000000)), "dispatch reset submission completed");
+    vk_sync_finish();
+    CHECK(!test.failed && test.applied, "dispatch reset applied cleanly");
+    if (vmaInvalidateAllocation(vk_ctx()->vma, readback_alloc, 0, 2 * DISPATCH_WIN) != VK_SUCCESS) {
+        CHECK(0, "dispatch readback invalidation"); goto done;
+    }
+    const uint32_t *w0 = readback_map;
+    const uint32_t *w1 = (const uint32_t *)((const uint8_t *)readback_map + DISPATCH_WIN);
+    const uint32_t *guest = (const uint32_t *)(target_pool.mem + WINDOW_OFF);
+    for (unsigned r = 0; r < DISPATCH_N; r++) {
+        for (unsigned k = 0; k < DISPATCH_STRIDE / 4; k++) {
+            unsigned idx = r * (DISPATCH_STRIDE / 4) + k;
+            uint32_t exp0 = k < 5 ? (k == 1 ? 1u : 0u) : CANARY;
+            uint32_t exp1 = (k == 0 && (r == 0 || r == DISPATCH_N - 1)) ? 7u : exp0;
+            checks += 3;
+            if (w0[idx] != exp0 && failures < 12) printf("probe-vkreset: FAIL dispatch phase 0 rec %u word %u: %08x expected %08x\n", r, k, w0[idx], exp0);
+            if (w0[idx] != exp0) failures++;
+            if (w1[idx] != exp1 && failures < 12) printf("probe-vkreset: FAIL dispatch phase 1 rec %u word %u: %08x expected %08x\n", r, k, w1[idx], exp1);
+            if (w1[idx] != exp1) failures++;
+            if (guest[idx] != exp1 && failures < 12) printf("probe-vkreset: FAIL dispatch guest rec %u word %u: %08x expected %08x\n", r, k, guest[idx], exp1);
+            if (guest[idx] != exp1) failures++;
+        }
+    }
+done:
+    if (list_live || target_live) vk_sync_finish();
+    if (test.readback) vmaDestroyBuffer(vk_ctx()->vma, test.readback, readback_alloc);
+    if (target_live) vk_pool_fini(&target_pool);
+    if (list_live) vk_pool_fini(&list_pool);
+    printf("probe-vkreset: compute dispatch (128 targets): %s\n", failures == before ? "passed" : "FAILED");
+    return failures != before;
+}
+
 void vk_exec_draw_shutdown(void);
 void vk_exec_xfer_shutdown(void);
 
@@ -279,6 +395,7 @@ int probe_vkreset(void) {
     if (!bad) bad = run_case((uint8_t *)(uintptr_t)heap, "late-invalid target is atomic rejection", 0, 1, 0, 0);
     if (!bad) bad = run_case((uint8_t *)(uintptr_t)heap, "virtual reset targets / physical readback", 0, 0, 1, 0);
     if (!bad) bad = run_case((uint8_t *)(uintptr_t)heap, "disjoint reset targets", 0, 0, 0, 1);
+    if (!bad) bad = run_dispatch_case((uint8_t *)(uintptr_t)heap);
     vk_sync_finish();
     vk_pipeline_shutdown();
     vk_exec_draw_shutdown();

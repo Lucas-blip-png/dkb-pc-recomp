@@ -426,19 +426,48 @@ static void wr_prune(void) {
         if (!f || !o) rt_fatal("vk_usnap: out of memory");
         fresh = f, out = o, cfresh = cout = c;
     }
-    for (int i = old; i < U.nwr; i++)
-        if (U.wr[i].fence > done) fresh[nnew++] = U.wr[i];
+    int sorted_end = 0;
+    for (int i = old; i < U.nwr; i++) {
+        if (U.wr[i].fence > done) {
+            if (!nnew) sorted_end = 1;
+            else if (sorted_end == nnew && U.wr[i].lo >= fresh[nnew - 1].lo) sorted_end++;
+            fresh[nnew++] = U.wr[i];
+        }
+    }
     for (int i = 0; i < old; i++)
         if (U.wr[i].fence > done) U.wr[nold++] = U.wr[i];   // stays sorted
-    sort_new_writes(fresh, nnew, &tmp, &ctmp);
     int m = 0;
-    for (int a = 0, b = 0; a < nold || b < nnew;) {
-        const Wrote *w = b >= nnew || (a < nold && U.wr[a].lo <= fresh[b].lo) ? &U.wr[a++] : &fresh[b++];
-        if (m && w->lo <= out[m - 1].hi) {
-            if (w->hi > out[m - 1].hi) out[m - 1].hi = w->hi;
-            if (w->fence > out[m - 1].fence) out[m - 1].fence = w->fence;
-        } else {
-            out[m++] = *w;
+    if (sorted_end >= 256 && sorted_end < nnew) {
+        // Indirect resets append thousands of already-sorted ranges ahead of the threads' lists: sort only the unsorted
+        // tail and merge all three sorted streams in one pass.
+        sort_new_writes(fresh + sorted_end, nnew - sorted_end, &tmp, &ctmp);
+        int a = 0, b = 0, c = sorted_end;
+        while (a < nold || b < sorted_end || c < nnew) {
+            const Wrote *w = NULL;
+            int pick = -1;
+            if (a < nold) w = &U.wr[a], pick = 0;
+            if (b < sorted_end && (!w || fresh[b].lo < w->lo)) w = &fresh[b], pick = 1;
+            if (c < nnew && (!w || fresh[c].lo < w->lo)) w = &fresh[c], pick = 2;
+            if (pick == 0) a++;
+            else if (pick == 1) b++;
+            else c++;
+            if (m && w->lo <= out[m - 1].hi) {
+                if (w->hi > out[m - 1].hi) out[m - 1].hi = w->hi;
+                if (w->fence > out[m - 1].fence) out[m - 1].fence = w->fence;
+            } else {
+                out[m++] = *w;
+            }
+        }
+    } else {
+        if (sorted_end < nnew) sort_new_writes(fresh, nnew, &tmp, &ctmp);
+        for (int a = 0, b = 0; a < nold || b < nnew;) {
+            const Wrote *w = b >= nnew || (a < nold && U.wr[a].lo <= fresh[b].lo) ? &U.wr[a++] : &fresh[b++];
+            if (m && w->lo <= out[m - 1].hi) {
+                if (w->hi > out[m - 1].hi) out[m - 1].hi = w->hi;
+                if (w->fence > out[m - 1].fence) out[m - 1].fence = w->fence;
+            } else {
+                out[m++] = *w;
+            }
         }
     }
     memcpy(U.wr, out, (size_t)m * sizeof *out);
@@ -799,6 +828,7 @@ void vk_usnap_drop(uint64_t addr, uint64_t n) { drop(addr, n, U.fence); }
 void vk_usnap_drop_many(const uint64_t (*r)[2], uint32_t n) {
     if (!U.mode || !n) return;
     plat_mutex_lock(&drop_lock);
+    while (U.cwr < U.nwr + (int)n) U.wr = grow(U.wr, &U.cwr, sizeof *U.wr);
     for (uint32_t i = 0; i < n; i++)
         if (r[i][1] > r[i][0]) drop_locked(r[i][0], r[i][1] - r[i][0], U.fence);
     plat_mutex_unlock(&drop_lock);

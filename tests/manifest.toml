@@ -233,6 +233,12 @@ area = "nvn"
 cmd = ["{python}", "tests/indirect_reset_test.py", "--cc", "{cc}"]
 
 [[test]]
+name = "reset-fast"
+tier = 1
+area = "gfx"
+cmd = ["{python}", "tests/reset_fast_test.py", "--cc", "{cc}", "--out", "{out}"]
+
+[[test]]
 name = "stencil-clear"
 tier = 1
 area = "gfx"

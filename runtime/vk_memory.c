@@ -949,6 +949,20 @@ int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out) {
     return resolve_locked(addr, size, out);
 }
 
+int vk_mem_resolve_range(uint64_t addr, uint64_t size, VkMemSpan *out,
+                         uint64_t *lo_out, uint64_t *hi_out, uint64_t *base_out) {
+    *lo_out = *hi_out = *base_out = 0;
+    if (!vk_mem_resolve(addr, size, out)) return 0;
+    if (resolve_check_on()) return 1;
+    uint64_t g = __atomic_load_n(&pool_gen, __ATOMIC_ACQUIRE), end = addr + size;
+    const ResolveHit *h = end >= addr ? rhit_find(g, addr, end) : NULL;
+    if (h && (h->buf || (h->pool && staged_pending(h->pool))) && h->pool == out->pool && h->alloc == out->alloc &&
+        h->cls == out->cls && addr >= h->lo && end <= h->hi) {
+        *lo_out = h->lo, *hi_out = h->hi, *base_out = h->base;
+    }
+    return 1;
+}
+
 // The pool index lookup under the lock; a non-overlapped import or physical pool goes into the address's cache slot.
 static int resolve_locked(uint64_t addr, uint64_t size, VkMemSpan *out) {
     memset(out, 0, sizeof *out);
@@ -5436,6 +5450,68 @@ void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
         mirror_unlock(locked);
     }
     *k = (__typeof__(*k)){r, sp->offset, size, sub, wb_tag};
+}
+
+// Batched vk_mem_gpu_wrote for n disjoint ranges [runs[i][0], runs[i][1]) in one pool and buffer: takes mirror_lock
+// once and grows the target list once instead of once per range (vk_exec_draw.c vk_exec_reset_indirect).
+void vk_mem_gpu_wrote_many(void *pool, VkBuffer buffer, const uint64_t (*runs)[2], uint32_t n) {
+    vk_spec_event();
+    PoolRec *r = pool;
+    if (!r || ms_get(r) != MS_ON || buffer != r->mbuf || !n) return;
+    const uint64_t base = r->import_lo;
+    if (fetch_test)
+        for (uint32_t i = 0; i < n; i++)
+            if (runs[i][1] > runs[i][0]) ft_stamp(r, runs[i][0] - base, runs[i][1] - runs[i][0]);
+    if (count_quiet) {
+        WbLocal *w = wb_local();
+        if (r->sfeed) {
+            while (w->cs < w->ns + (int)n) grow((void **)&w->s, &w->cs, sizeof *w->s);
+            for (uint32_t i = 0; i < n; i++) {
+                uint64_t off = runs[i][0] - base, sz = runs[i][1] - runs[i][0];
+                if (!sz) continue;
+                if (w->ns && w->s[w->ns - 1].r == r && w->s[w->ns - 1].off + w->s[w->ns - 1].size == off)
+                    w->s[w->ns - 1].size += sz;
+                else w->s[w->ns++] = (MRange){r, off, sz};
+            }
+            return;
+        }
+        plat_mutex_lock(&w->lock);
+        while (w->cap < w->n + (int)n) grow((void **)&w->a, &w->cap, sizeof *w->a);
+        for (uint32_t i = 0; i < n; i++) {
+            uint64_t off = runs[i][0] - base, sz = runs[i][1] - runs[i][0];
+            if (!sz) continue;
+            if (w->n && w->a[w->n - 1].r == r && w->a[w->n - 1].off + w->a[w->n - 1].size == off &&
+                w->a[w->n - 1].tag == wb_tag)
+                w->a[w->n - 1].size += sz;
+            else w->a[w->n++] = (MRange){r, off, sz, wb_tag};
+        }
+        plat_mutex_unlock(&w->lock);
+        return;
+    }
+    int locked = mirror_lock_if_shared();
+    if (r->sfeed) {
+        while (cstw < nstw + (int)n) grow((void **)&stw, &cstw, sizeof *stw);
+        int m = nstw;
+        for (uint32_t i = 0; i < n; i++) {
+            uint64_t off = runs[i][0] - base, sz = runs[i][1] - runs[i][0];
+            if (!sz) continue;
+            if (m && stw[m - 1].r == r && stw[m - 1].off + stw[m - 1].size == off) stw[m - 1].size += sz;
+            else stw[m++] = (MRange){r, off, sz};
+        }
+        __atomic_store_n(&nstw, m, __ATOMIC_RELAXED);
+    } else {
+        while (cwbl < nwbl + (int)n) grow((void **)&wbl, &cwbl, sizeof *wbl);
+        int m = nwbl;
+        for (uint32_t i = 0; i < n; i++) {
+            uint64_t off = runs[i][0] - base, sz = runs[i][1] - runs[i][0];
+            if (!sz) continue;
+            if (m && wbl[m - 1].r == r && wbl[m - 1].off + wbl[m - 1].size == off && wbl[m - 1].tag == wb_tag)
+                wbl[m - 1].size += sz;
+            else wbl[m++] = (MRange){r, off, sz, wb_tag};
+        }
+        nwbl = m;
+    }
+    mirror_unlock(locked);
 }
 
 // A GPU write that stays in the mirror (the geometry stage's storage, vk_exec_draw.c gs_storage_writeback). Re-uploads
