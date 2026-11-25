@@ -24,6 +24,9 @@
 // any list that differs.
 #include <stdlib.h>
 #include <string.h>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 
 #include "host.h"
 #include "msort.h"
@@ -55,6 +58,7 @@ static struct {
     int mode;                   // rt_knob: 0 off, 1 on, 2 ab
     int on;                     // this submission has a snapshot
     int fast;                   // this submission takes the USNAP_FAST shortcuts (set in vk_usnap_begin)
+    int opt;                    // this submission takes the USNAP_OPT shortcuts (dedup cache, 8-bit radix, WC copy)
     uint64_t fence, gen;
     uint64_t dseq;              // drops made so far (vk_usnap_drops)
     Arena *arena;
@@ -375,6 +379,45 @@ static int nwr_sorted;   // U.wr[0, nwr_sorted) is the last prune's: sorted by l
 
 static void sort_new_writes(Wrote *a, int n, Wrote **tmp, size_t *cap) {
     if (n < 2) return;
+    if (U.opt) {
+        if (n <= 32) {
+            for (int i = 1; i < n; i++) {
+                Wrote w = a[i];
+                int j = i;
+                while (j > 0 && a[j - 1].lo > w.lo) a[j] = a[j - 1], j--;
+                a[j] = w;
+            }
+            return;
+        }
+        uint64_t first = a[0].lo, diff = 0;
+        int sorted = 1;
+        for (int i = 1; i < n; i++) {
+            uint64_t x = a[i].lo;
+            diff |= x ^ first;
+            if (x < a[i - 1].lo) sorted = 0;
+        }
+        if (sorted) return;
+        if (*cap < (size_t)n) {
+            Wrote *t = realloc(*tmp, (size_t)n * sizeof *t);
+            if (!t) rt_fatal("vk_usnap: out of memory");
+            *tmp = t, *cap = (size_t)n;
+        }
+        Wrote *src = a, *dst = *tmp;
+        for (int shift = 0; shift < 64; shift += 8) {
+            if (!((diff >> shift) & 0xffu)) continue;
+            int count[256] = {0};
+            for (int i = 0; i < n; i++) count[(src[i].lo >> shift) & 0xffu]++;
+            for (int k = 0, sum = 0; k < 256; k++) {
+                int c = count[k];
+                count[k] = sum, sum += c;
+            }
+            for (int i = 0; i < n; i++) dst[count[(src[i].lo >> shift) & 0xffu]++] = src[i];
+            Wrote *t = src;
+            src = dst, dst = t;
+        }
+        if (src != a) memcpy(a, src, (size_t)n * sizeof *a);
+        return;
+    }
     uint64_t lo = UINT64_MAX, hi = 0;
     for (int i = 0; i < n; i++) {
         if (a[i].lo < lo) lo = a[i].lo;
@@ -420,11 +463,96 @@ static void wr_prune(void) {
     int old = nwr_sorted < U.nwr ? nwr_sorted : U.nwr, nold = 0, nnew = 0;
     static Wrote *fresh, *out, *tmp;   // the replaying thread's (vk_usnap_begin)
     static size_t cfresh, cout, ctmp;
-    if (cfresh < (size_t)(U.nwr - old) || cout < (size_t)U.nwr) {
+    static uint64_t *pk0, *pk1;
+    static size_t cpk;
+    if (cout < (size_t)U.nwr) {
         size_t c = (size_t)U.nwr + 1024;
-        Wrote *f = realloc(fresh, c * sizeof *f), *o = f ? realloc(out, c * sizeof *o) : NULL;
-        if (!f || !o) rt_fatal("vk_usnap: out of memory");
-        fresh = f, out = o, cfresh = cout = c;
+        Wrote *o = realloc(out, c * sizeof *o);
+        if (!o) rt_fatal("vk_usnap: out of memory");
+        out = o, cout = c;
+    }
+    if (U.opt && U.nwr - old > 32) {
+        uint64_t lo_min = UINT64_MAX, lo_max = 0, prev_lo = 0;
+        int sorted = 1;
+        for (int i = old; i < U.nwr; i++) {
+            if (U.wr[i].fence <= done) continue;
+            uint64_t x = U.wr[i].lo;
+            if (nnew && x < prev_lo) sorted = 0;
+            prev_lo = x;
+            if (x < lo_min) lo_min = x;
+            if (x > lo_max) lo_max = x;
+            nnew++;
+        }
+        // Pack (lo - lo_min) (37 bits: up to 128 GiB at 1-byte precision) and index (27 bits) into 8 bytes,
+        // build all three 11-bit histograms on (lo - lo_min) >> 4 in one pass, skip constant digits, and merge
+        // directly from U.wr[old..] without copying 24-byte Wrote structs into fresh or tmp.
+        if (nnew > 32 && !sorted && (uint32_t)(U.nwr - old) < (1u << 27) && ((lo_max - lo_min) >> 4) < (1ull << 33)) {
+            if (cpk < (size_t)nnew) {
+                size_t c = (size_t)nnew + 1024;
+                uint64_t *p0 = realloc(pk0, c * sizeof *p0), *p1 = p0 ? realloc(pk1, c * sizeof *p1) : NULL;
+                if (!p0 || !p1) rt_fatal("vk_usnap: out of memory");
+                pk0 = p0, pk1 = p1, cpk = c;
+            }
+            int h[3][2048] = {{0}};
+            int k = 0;
+            uint32_t unaligned = 0;
+            for (int i = old; i < U.nwr; i++) {
+                if (U.wr[i].fence <= done) continue;
+                uint64_t d = U.wr[i].lo - lo_min;
+                unaligned |= (uint32_t)(d & 15u);
+                pk0[k++] = (d << 27) | (uint32_t)(i - old);
+                uint64_t q = d >> 4;
+                h[0][q & 2047u]++;
+                h[1][(q >> 11) & 2047u]++;
+                h[2][(q >> 22) & 2047u]++;
+            }
+            uint64_t *src = pk0, *dst = pk1;
+            for (int p = 0; p < 3; p++) {
+                int shift = 31 + p * 11;
+                uint32_t b0 = (uint32_t)((src[0] >> shift) & 2047u);
+                if (h[p][b0] == nnew) continue;
+                for (int c = 0, sum = 0; c < 2048; c++) {
+                    int cnt = h[p][c];
+                    h[p][c] = sum, sum += cnt;
+                }
+                for (int i = 0; i < nnew; i++) dst[h[p][(src[i] >> shift) & 2047u]++] = src[i];
+                uint64_t *t = src;
+                src = dst, dst = t;
+            }
+            if (unaligned) {
+                for (int i = 1; i < nnew; i++) {
+                    uint64_t v = src[i], vk = v >> 27;
+                    int j = i;
+                    while (j > 0 && (src[j - 1] >> 27) > vk) src[j] = src[j - 1], j--;
+                    src[j] = v;
+                }
+            }
+            for (int i = 0; i < old; i++)
+                if (U.wr[i].fence > done) U.wr[nold++] = U.wr[i];
+            const Wrote *base = U.wr + old;
+            const uint32_t idx_mask = (1u << 27) - 1u;
+            int m = 0;
+            for (int a = 0, b = 0; a < nold || b < nnew;) {
+                const Wrote *wb = b < nnew ? &base[(uint32_t)src[b] & idx_mask] : NULL;
+                const Wrote *w = !wb || (a < nold && U.wr[a].lo <= wb->lo) ? &U.wr[a++] : (b++, wb);
+                if (m && w->lo <= out[m - 1].hi) {
+                    if (w->hi > out[m - 1].hi) out[m - 1].hi = w->hi;
+                    if (w->fence > out[m - 1].fence) out[m - 1].fence = w->fence;
+                } else {
+                    out[m++] = *w;
+                }
+            }
+            memcpy(U.wr, out, (size_t)m * sizeof *out);
+            U.nwr = nwr_sorted = m;
+            return;
+        }
+        nnew = 0;
+    }
+    if (cfresh < (size_t)(U.nwr - old)) {
+        size_t c = (size_t)U.nwr + 1024;
+        Wrote *f = realloc(fresh, c * sizeof *f);
+        if (!f) rt_fatal("vk_usnap: out of memory");
+        fresh = f, cfresh = c;
     }
     for (int i = old; i < U.nwr; i++)
         if (U.wr[i].fence > done) fresh[nnew++] = U.wr[i];
@@ -500,6 +628,64 @@ static void list_check(const uint64_t *handles, int n) {
     U.ncol = 0, U.cols = cols, U.repeats = repeats;
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
+static int usnap_avx2(void) {
+    static int has = -1;
+    if (has < 0) has = __builtin_cpu_supports("avx2") ? 1 : 0;
+    return has;
+}
+
+// Streaming 256-bit non-temporal stores into write-combined BAR arena memory (dst is 32-byte aligned).
+__attribute__((target("avx2")))
+static void copy_wc_avx2(uint8_t *dst, const uint8_t *src, size_t n) {
+    size_t i = 0;
+    for (; i + 128 <= n; i += 128) {
+        __m256i v0 = _mm256_loadu_si256((const __m256i *)(src + i));
+        __m256i v1 = _mm256_loadu_si256((const __m256i *)(src + i + 32));
+        __m256i v2 = _mm256_loadu_si256((const __m256i *)(src + i + 64));
+        __m256i v3 = _mm256_loadu_si256((const __m256i *)(src + i + 96));
+        _mm256_stream_si256((__m256i *)(dst + i), v0);
+        _mm256_stream_si256((__m256i *)(dst + i + 32), v1);
+        _mm256_stream_si256((__m256i *)(dst + i + 64), v2);
+        _mm256_stream_si256((__m256i *)(dst + i + 96), v3);
+    }
+    for (; i + 32 <= n; i += 32) {
+        __m256i v = _mm256_loadu_si256((const __m256i *)(src + i));
+        _mm256_stream_si256((__m256i *)(dst + i), v);
+    }
+    if (i < n) memcpy(dst + i, src + i, n - i);
+}
+
+// Fused single-pass read from guest RAM into cached cpu_buf and streaming WC BAR arena memory.
+__attribute__((target("avx2")))
+static void copy_dual_wc_avx2(uint8_t *wc_dst, uint8_t *cpu_dst, const uint8_t *src, size_t n) {
+    size_t i = 0;
+    for (; i + 128 <= n; i += 128) {
+        __m256i v0 = _mm256_loadu_si256((const __m256i *)(src + i));
+        __m256i v1 = _mm256_loadu_si256((const __m256i *)(src + i + 32));
+        __m256i v2 = _mm256_loadu_si256((const __m256i *)(src + i + 64));
+        __m256i v3 = _mm256_loadu_si256((const __m256i *)(src + i + 96));
+        _mm256_storeu_si256((__m256i *)(cpu_dst + i), v0);
+        _mm256_storeu_si256((__m256i *)(cpu_dst + i + 32), v1);
+        _mm256_storeu_si256((__m256i *)(cpu_dst + i + 64), v2);
+        _mm256_storeu_si256((__m256i *)(cpu_dst + i + 96), v3);
+        _mm256_stream_si256((__m256i *)(wc_dst + i), v0);
+        _mm256_stream_si256((__m256i *)(wc_dst + i + 32), v1);
+        _mm256_stream_si256((__m256i *)(wc_dst + i + 64), v2);
+        _mm256_stream_si256((__m256i *)(wc_dst + i + 96), v3);
+    }
+    for (; i + 32 <= n; i += 32) {
+        __m256i v = _mm256_loadu_si256((const __m256i *)(src + i));
+        _mm256_storeu_si256((__m256i *)(cpu_dst + i), v);
+        _mm256_stream_si256((__m256i *)(wc_dst + i), v);
+    }
+    if (i < n) {
+        memcpy(cpu_dst + i, src + i, n - i);
+        memcpy(wc_dst + i, cpu_dst + i, n - i);
+    }
+}
+#endif
+
 static int drop_local;    // DKB_USNAP_DROP_LOCAL, for this submission (wr_local)
 static void wr_take(void);
 
@@ -513,6 +699,9 @@ static void usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
     static int fast_mode;   // stored +1: 0 is "not read yet"
     if (!fast_mode) fast_mode = rt_knob("USNAP_FAST", "1") + 1;
     U.fast = RT_KNOB_ON(fast_mode - 1);
+    static int opt_mode;    // stored +1: 0 is "not read yet" (DKB_USNAP_OPT)
+    if (!opt_mode) opt_mode = rt_knob("USNAP_OPT", "1") + 1;
+    U.opt = RT_KNOB_ON(opt_mode - 1);
     static int local_mode;   // the same for DKB_USNAP_DROP_LOCAL
     if (!local_mode) local_mode = rt_knob("USNAP_DROP_LOCAL", "1") + 1;
     drop_local = RT_KNOB_ON(local_mode - 1);
@@ -549,20 +738,36 @@ static void usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
     int want_cpu = __atomic_load_n(&cpu_reads, __ATOMIC_RELAXED);
     U.nreg = 0;
     uint64_t total = 0, cpu_total = 0;
+    uint64_t memo_lo = 0, memo_hi = 0;
+    int memo_ok = 0, wr_cur = 0;
     for (int i = 0; i < U.ncol;) {
         uint64_t lo = U.col[i].lo & ~RNG_C4, hi = U.col[i].hi, c4 = U.col[i].lo & RNG_C4;
         for (i++; i < U.ncol && (U.col[i].lo & ~RNG_C4) <= hi; i++) {
             c4 |= U.col[i].lo & RNG_C4;
             if (U.col[i].hi > hi) hi = U.col[i].hi;
         }
-        VkMemSpan sp;
-        if (!vk_mem_resolve(lo, hi - lo, &sp) || sp.alloc || !sp.pool || sp.avail < hi - lo ||
-            (sp.cls != VK_MCLS_HOST_CACHED && sp.cls != VK_MCLS_HOST_UNC)) {
+        int ok = 0;
+        if (U.opt && memo_ok && lo >= memo_lo && hi <= memo_hi) {
+            ok = 1;
+        } else {
+            VkMemSpan sp;
+            ok = vk_mem_resolve(lo, hi - lo, &sp) && !sp.alloc && sp.pool && sp.avail >= hi - lo &&
+                 (sp.cls == VK_MCLS_HOST_CACHED || sp.cls == VK_MCLS_HOST_UNC);
+            if (U.opt && ok) memo_lo = lo, memo_hi = lo + sp.avail, memo_ok = 1;
+        }
+        if (!ok) {
             U.refused++;
             continue;
         }
         // A GPU write kept in the mirror (vk_mem_gpu_kept) never reaches guest memory, which stays stale there.
-        if (wr_hits(lo, hi) || vk_mem_kept_overlaps(lo, hi - lo)) {
+        int hit;
+        if (U.opt) {
+            while (wr_cur < U.nwr && U.wr[wr_cur].hi <= lo) wr_cur++;
+            hit = wr_cur < U.nwr && U.wr[wr_cur].lo < hi;
+        } else {
+            hit = wr_hits(lo, hi);
+        }
+        if (hit || vk_mem_kept_overlaps(lo, hi - lo)) {
             U.inflight++;
             continue;
         }
@@ -581,12 +786,28 @@ static void usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
         cpu_cap = (cpu_buf = malloc(cpu_total)) ? cpu_total : 0;
     }
     U.cpu = (cpu_total && cpu_cap >= cpu_total) ? cpu_buf : NULL;
-    for (int i = 0; i < U.nreg; i++) {
-        const Reg *r = &U.reg[i];
-        uint64_t len = r->hi - r->lo;
-        const void *src = (const void *)(uintptr_t)r->lo;
-        if (U.cpu && r->cpu_off != REG_NO_CPU) src = memcpy(U.cpu + r->cpu_off, src, len);   // the guest's bytes once
-        memcpy(U.arena->map + r->off, src, len);
+#if defined(__x86_64__) || defined(_M_X64)
+    if (U.opt && usnap_avx2() && ((uintptr_t)U.arena->map & 31) == 0) {
+        for (int i = 0; i < U.nreg; i++) {
+            const Reg *r = &U.reg[i];
+            size_t len = (size_t)(r->hi - r->lo);
+            const uint8_t *src = (const uint8_t *)(uintptr_t)r->lo;
+            if (U.cpu && r->cpu_off != REG_NO_CPU)
+                copy_dual_wc_avx2(U.arena->map + r->off, U.cpu + r->cpu_off, src, len);
+            else
+                copy_wc_avx2(U.arena->map + r->off, src, len);
+        }
+        _mm_sfence();
+    } else
+#endif
+    {
+        for (int i = 0; i < U.nreg; i++) {
+            const Reg *r = &U.reg[i];
+            uint64_t len = r->hi - r->lo;
+            const void *src = (const void *)(uintptr_t)r->lo;
+            if (U.cpu && r->cpu_off != REG_NO_CPU) src = memcpy(U.cpu + r->cpu_off, src, len);   // the guest's bytes once
+            memcpy(U.arena->map + r->off, src, len);
+        }
     }
     vmaFlushAllocation(vk_ctx()->vma, U.arena->alloc, 0, total);   // a no-op on coherent memory
     U.on = 1;
@@ -721,15 +942,22 @@ static void wr_local(uint64_t addr, uint64_t n, uint64_t fence) {
         plat_mutex_unlock(&drop_lock);
         wr_mine = w;
     }
+    uint64_t hi = addr + n;
     plat_mutex_lock(&w->lock);
     w->added++;
     Wrote *last = w->n ? &w->a[w->n - 1] : NULL;   // as drop coalesces the tail of U.wr
-    if (U.fast && last && last->lo == addr && last->hi == addr + n) {
+    if (U.fast && last && last->lo == addr && last->hi == hi) {
         if (fence > last->fence) last->fence = fence;
+        w->coalesced++;
+    } else if (U.opt && last && last->lo <= addr && hi <= last->hi && fence <= last->fence) {
+        w->coalesced++;
+    } else if (U.opt && last && last->fence == fence && addr <= last->hi && last->lo <= hi) {
+        if (addr < last->lo) last->lo = addr;
+        if (hi > last->hi) last->hi = hi;
         w->coalesced++;
     } else {
         if (w->n == w->c) w->a = grow(w->a, &w->c, sizeof *w->a);
-        w->a[w->n++] = (Wrote){addr, addr + n, fence};
+        w->a[w->n++] = (Wrote){addr, hi, fence};
     }
     plat_mutex_unlock(&w->lock);
 }
