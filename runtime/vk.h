@@ -462,6 +462,7 @@ void vk_upload_end(void);
 void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc);
 uint64_t vk_upload_flush(int wait);
 int vk_upload_done(uint64_t seq);                 // the upload batch seq (vk_upload_flush's value) has completed
+void vk_upload_wait(uint64_t seq);                // waits for the batches up to seq, submitting it if open; not later ones
 // The sequence number of the open upload batch, the value vk_upload_flush will return for it. Only between
 // vk_upload_begin and vk_upload_end.
 uint64_t vk_upload_seq(void);
@@ -626,6 +627,9 @@ void vk_texture_write_back(uint64_t addr, uint64_t size);   // writes those imag
 // written to the storage by a later vk_texture_wb_poll once they completed. DKB_WB_ASYNC=0: vk_texture_write_back.
 void vk_texture_write_back_async(uint64_t addr, uint64_t size);
 void vk_texture_wb_poll(void);                      // finishes the asynchronous write-backs whose copies completed
+// The submitting thread, once the guest submission of value fence is on the queue: queues the copies of the targets it
+// rendered that waited reads hit lately, behind it (DKB_WB_AHEAD).
+void vk_texture_copy_ahead(uint64_t fence);
 void vk_texture_range_gone(uint64_t lo, uint64_t size, VmaAllocation alloc);   // vk_pool_fini: drop the images there
 void vk_texture_stats(uint64_t *images, uint64_t *uploads, uint64_t *reuploads);
 // Entries now, live and released (TextureFinalize, kept until sweep_released), with the bytes of their own memory

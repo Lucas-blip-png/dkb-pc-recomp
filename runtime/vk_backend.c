@@ -233,10 +233,16 @@ uint64_t gfx_replayed_submits(void) {
     return v;
 }
 
+static void nowait_flush(void);
+static void nowait_log(uint64_t frame, int total);
 static uint64_t submit_sync(const uint64_t *handles, int n, uint64_t submitted_ticks) {
     vk_sync_start();
+    vk_texture_wb_poll();   // the copies of reads that went on without a wait (read_nowait) whose batches completed
     vk_present_drain();
-    return vk_sync_submit_guest(handles, n, submitted_ticks);
+    uint64_t f = vk_sync_submit_guest(handles, n, submitted_ticks);
+    vk_texture_copy_ahead(f);   // the render targets read back lately that it rendered: their copies right behind it
+    nowait_flush();
+    return f;
 }
 
 static void replay_main(void *arg) {
@@ -372,7 +378,9 @@ static void replay_log(uint64_t frame, int total) {
 // vk_backend_shutdown.
 void gfx_exit_log(void) {
     static int32_t done;
-    if (gfx_replay_async() && r_started && !plat_xchg32(&done, 1)) replay_log(game_frames, 1);
+    if (plat_xchg32(&done, 1)) return;
+    if (!gfx_replay_async()) nowait_log(__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), 1);
+    else if (r_started) replay_log(game_frames, 1);
 }
 
 static void vk_be_present(const tex_t *t, const int crop[4], uint64_t at_ns) {
@@ -380,6 +388,7 @@ static void vk_be_present(const tex_t *t, const int crop[4], uint64_t at_ns) {
     if (!gfx_replay_async()) {
         uint64_t frame = __atomic_add_fetch(&gfx_counters.frames, 1, __ATOMIC_RELAXED);
         perf_present(frame);   // before vk_exec_frame_log, which resets the frame's exec counts the flight recorder reads
+        if (frame % 1800 == 0) nowait_log(frame, 0);
         present_image(t, crop, at_ns, kern_now_ns(), frame, 0, vk_antilag_frame());
         vk_antilag_input();   // AMD Anti-Lag 2: the next frame's input stage, where the driver waits for its start
         return;
@@ -536,7 +545,17 @@ static void vk_be_guest_written(uint64_t addr, uint64_t size) { vk_sync_start();
 // in memory, and the GPU's write lands when it gets there. Bananza invalidates 128 bytes of a pool every frame, and
 // waiting here held it for the replay and GPU work of the whole frame, about 15 ms of every frame. The write-back goes to the replay thread instead, queued after the submissions the
 // read would have waited for. This is opt-in with DKB_NX2_READ_NOWAIT=1: a deferred copy can overwrite a later CPU
-// write after invalidate returned. The default keeps the synchronous read-back even with DKB_REPLAY_ASYNC=1.
+// write after invalidate returned. The default keeps the synchronous read-back, with either replay.
+// With the replay on the submitting thread (the default) the same reads come from the game's job threads while the
+// render thread records the submission that writes the target (3.2.0, a level of the first save: three reads a frame
+// took 4.7 ms of those threads a frame, 4.1 ms of it waiting for the GPU; the 128-byte ones found their writer being
+// recorded). There the copy must follow the writer in queue order, or it would read the target before that render and
+// clear gpu_dirty for content the storage never got: a read whose writer is submitted queues the copy at once
+// (vk_texture_write_back_async puts it after every submitted part), one whose writer is still being recorded leaves
+// it to the submitting thread, which queues it once that submission is on the queue (nowait_flush). Either way the
+// copy lands at a later vk_texture_wb_poll with the asynchronous write-back's checks: a CPU write to the storage after
+// the render keeps the CPU's bytes. A read whose writer has completed still waits for its copy: on the console the
+// bytes are in memory by then.
 #define NOWAIT_MAX 4096
 #define NOWAIT_SEEN 8
 
@@ -575,31 +594,118 @@ int vk_backend_selftest(void) {
     return failures;
 }
 
+// Synchronous replay: reads whose writer was being recorded, for the submitting thread to queue after it (nw_lock).
+typedef struct { uint64_t addr, size, fence; } NowaitRead;
+static PlatMutex nw_lock = PLAT_MUTEX_INIT;
+static NowaitRead *nw_reads;
+static int nw_n, nw_cap;
+// The synchronous replay's reads of GPU-written storage (nw_lock), [0] since the last line, [1] over the run: calls,
+// the ones that waited for their write-back and that wait, the ones that went on without a wait, and of those the ones
+// left to their writer's submission.
+static uint64_t nw_calls[2], nw_waits[2], nw_ns[2], nw_free[2], nw_after[2];
+
+// The submitting thread, once its submission is on the queue (vk_sync_issued): the reads deferred to it queue their
+// copies, now behind it.
+static void nowait_flush(void) {
+    if (!__atomic_load_n(&nw_n, __ATOMIC_ACQUIRE)) return;
+    for (;;) {
+        NowaitRead take[16];
+        int k = 0;
+        plat_mutex_lock(&nw_lock);
+        uint64_t issued = vk_sync_issued();
+        for (int i = 0; i < nw_n && k < 16;) {
+            if (nw_reads[i].fence > issued) { i++; continue; }
+            take[k++] = nw_reads[i];
+            nw_reads[i] = nw_reads[nw_n - 1];
+            __atomic_store_n(&nw_n, nw_n - 1, __ATOMIC_RELEASE);
+        }
+        plat_mutex_unlock(&nw_lock);
+        for (int i = 0; i < k; i++) vk_texture_write_back_async(take[i].addr, take[i].size);
+        if (k < 16) return;
+    }
+}
+
+// Synchronous replay: queues the write-back of a read that goes on without a wait, behind its writer f in queue order.
+// issued is read under nw_lock, and nowait_flush takes nw_lock after the submission raised it: a read that finds f not
+// submitted yet is in the list before that flush looks, else it finds f submitted and queues the copy itself.
+static void nowait_sync(uint64_t addr, uint64_t size, uint64_t f) {
+    plat_mutex_lock(&nw_lock);
+    if (f > vk_sync_issued()) {
+        if (nw_n == nw_cap) {
+            int cap = nw_cap ? nw_cap * 2 : 16;
+            NowaitRead *n = realloc(nw_reads, sizeof *n * (size_t)cap);
+            if (!n) rt_fatal("vk: out of memory (deferred guest reads)");
+            nw_reads = n, nw_cap = cap;
+        }
+        nw_reads[nw_n] = (NowaitRead){addr, size, f};
+        __atomic_store_n(&nw_n, nw_n + 1, __ATOMIC_RELEASE);
+        nw_after[0]++, nw_after[1]++;
+        plat_mutex_unlock(&nw_lock);
+        return;
+    }
+    plat_mutex_unlock(&nw_lock);
+    vk_texture_wb_poll();   // the copies that completed land first: the read sees the newest bytes the GPU finished
+    vk_texture_write_back_async(addr, size);
+}
+
 static int read_nowait(uint64_t addr, uint64_t size, uint64_t f) {
-    static int on = -1;
+    static int on = -1;   // DKB_NX2_READ_NOWAIT: 0 (default), 1, or ab with the A/B blocks
     int enabled = __atomic_load_n(&on, __ATOMIC_ACQUIRE);
     if (enabled < 0) {
-        enabled = !rt_game_version && cfg_bool("DKB_NX2_READ_NOWAIT");
+        enabled = rt_game_version ? 0 : rt_knob("NX2_READ_NOWAIT", "0");
         __atomic_store_n(&on, enabled, __ATOMIC_RELEASE);
     }
-    if (!enabled || size > NOWAIT_MAX) return 0;
+    if (!RT_KNOB_ON(enabled) || size > NOWAIT_MAX) return 0;
     static PlatMutex m = PLAT_MUTEX_INIT;
     static NowaitSeen seen[NOWAIT_SEEN];
     static unsigned next;
     plat_mutex_lock(&m);
     int queued = nowait_covered(seen, &next, addr, size, f);
     plat_mutex_unlock(&m);
-    if (!queued) {
+    if (!queued && !gfx_replay_async()) {
+        nowait_sync(addr, size, f);
+    } else if (!queued) {
         ReplayItem it = {.kind = RI_WRITE_BACK, .at = addr, .queued = size};
         replay_enqueue(&it);
     }
     return 1;
 }
 
+// The synchronous replay's guest reads since the last line (every 1800 frames), or over the run (at exit).
+static void nowait_log(uint64_t frame, int total) {
+    plat_mutex_lock(&nw_lock);
+    int t = total ? 1 : 0;
+    uint64_t c = nw_calls[t], w = nw_waits[t], ns = nw_ns[t], fr = nw_free[t], af = nw_after[t];
+    nw_calls[0] = nw_waits[0] = nw_ns[0] = nw_free[0] = nw_after[0] = 0;
+    plat_mutex_unlock(&nw_lock);
+    if (c)
+        rt_log("vk: guest reads of GPU-written storage %s frame %llu: %llu calls, %llu waited %.1f ms, %llu without a wait "
+               "(%llu queued after their writer's submission)", total ? "over the run to" : "at",
+               (unsigned long long)frame, (unsigned long long)c, (unsigned long long)w, ns / 1e6,
+               (unsigned long long)fr, (unsigned long long)af);
+}
+
 static void vk_be_guest_read(uint64_t addr, uint64_t size) {
     if (!vk_texture_cpu_stale(addr, size)) return;
     vk_sync_start();
-    if (gfx_replay_async()) {
+    if (!gfx_replay_async()) {
+        uint64_t f = vk_texture_dirty_fence(addr, size);
+        if (f && vk_sync_fence_done() < f && read_nowait(addr, size, f)) {
+            plat_mutex_lock(&nw_lock);
+            nw_calls[0]++, nw_calls[1]++, nw_free[0]++, nw_free[1]++;
+            plat_mutex_unlock(&nw_lock);
+            return;
+        }
+        uint64_t t0 = kern_now_ns();
+        vk_present_drain();
+        vk_texture_write_back(addr, size);
+        uint64_t d = kern_now_ns() - t0;
+        plat_mutex_lock(&nw_lock);
+        nw_calls[0]++, nw_calls[1]++, nw_waits[0]++, nw_waits[1]++, nw_ns[0] += d, nw_ns[1] += d;
+        plat_mutex_unlock(&nw_lock);
+        return;
+    }
+    {
         uint64_t f = vk_texture_dirty_fence(addr, size);
         plat_mutex_lock(&rl);
         dr_calls[DR_GUEST_READ]++, dr_tcalls[DR_GUEST_READ]++;

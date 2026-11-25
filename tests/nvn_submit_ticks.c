@@ -83,6 +83,10 @@ int gfx_replay_async(void) { return async_mode; }
 uint64_t nvn_submit_count(void) { return lod_entered; }
 void vk_sync_start(void) {}
 void vk_present_drain(void) {}
+// The write-backs submit_sync starts around a submission (reads of GPU-written storage): none in this fixture.
+void vk_texture_wb_poll(void) {}
+void vk_texture_copy_ahead(uint64_t f) { (void)f; }
+static void nowait_flush(void) {}
 void vk_texture_new_submit(void) {}
 void vk_mem_count(int cls,int use,uint64_t size) { (void)cls;(void)use;(void)size; }
 int vk_mem_resolve(uint64_t addr,uint64_t size,VkMemSpan *m) { memset(m,0,sizeof *m);return addr && size==sizeof(NVNcounterData); }
