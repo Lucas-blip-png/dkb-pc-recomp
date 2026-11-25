@@ -265,7 +265,10 @@ void hostfn_seal(void) {
         rt_dispatch_set_hostfn(hostfn_entry_fast, (uint64_t)nslots);
     } else {
         fast_applied = 0;
-        if (fast_mode == 2) rt_log("hostfn: fast dispatch in the B blocks of DKB_AB only (DKB_HOSTFN_FAST=ab)");
+        if (fast_mode == 2) {
+            rt_dispatch_set_hostfn(hostfn_entry_fast, 0);
+            rt_log("hostfn: fast dispatch in the B blocks of DKB_AB only (DKB_HOSTFN_FAST=ab)");
+        }
     }
 }
 
@@ -274,7 +277,7 @@ void hostfn_ab_sync(int ab_side) {
     int on = ab_side != 0;
     if (on == fast_applied) return;
     fast_applied = on;
-    rt_dispatch_set_hostfn(hostfn_entry_fast, on ? (uint64_t)nslots : 0);
+    rt_dispatch_set_hostfn_slots(on ? (uint64_t)nslots : 0);
 }
 
 uint64_t hostfn_calls(void) {

@@ -30,8 +30,10 @@ int rt_linked_modules(RtModule *out, int max);
 void rt_register_host(uint64_t addr, GuestFn fn);
 
 // Direct dispatch for the contiguous hostfn window [RT_HOSTFN_BASE, RT_HOSTFN_BASE + 16 * slots): bypasses the
-// general host hash table on the slow path of rt_dispatch. Pass slots = 0 to disable.
+// general host hash table on the slow path of rt_dispatch. Set the entry once before guest threads start with
+// rt_dispatch_set_hostfn, then toggle only the active count with rt_dispatch_set_hostfn_slots (0 disables).
 void rt_dispatch_set_hostfn(GuestFn entry, uint64_t slots);
+void rt_dispatch_set_hostfn_slots(uint64_t slots);
 
 // Build the table from the modules (kept by pointer; they must outlive the process). Call it once, before any guest
 // thread starts: thread creation publishes the table to the threads. Fatal on a malformed table:

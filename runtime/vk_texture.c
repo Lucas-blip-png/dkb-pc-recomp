@@ -1247,6 +1247,8 @@ static Tex *entry_of(const tex_t *t) {
         tex_gen_bump(k.addr);
         vk_spec_world_changed();
     }
+    // Reads e->released directly rather than tex_is_released: a held slice's slot_resolve only reaches entry_of when
+    // by_key had no entry at all (e == NULL), and other callers run on the replay thread where view_upto is 0.
     if (e->released) {
         if (skipped_hold) {
             uint64_t seq = __atomic_add_fetch(&tex_tb_seq, 1, __ATOMIC_RELEASE);

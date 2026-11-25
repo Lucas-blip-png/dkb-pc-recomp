@@ -6687,50 +6687,26 @@ void vk_mem_gpu_wrote_many(void *pool, VkBuffer buffer, const uint64_t (*runs)[2
         WbLocal *w = wb_local();
         if (r->sfeed) {
             while (w->cs < w->ns + (int)n) grow((void **)&w->s, &w->cs, sizeof *w->s);
-            for (uint32_t i = 0; i < n; i++) {
-                uint64_t off = runs[i][0] - base, sz = runs[i][1] - runs[i][0];
-                if (!sz) continue;
-                if (w->ns && w->s[w->ns - 1].r == r && w->s[w->ns - 1].off + w->s[w->ns - 1].size == off)
-                    w->s[w->ns - 1].size += sz;
-                else w->s[w->ns++] = (MRange){r, off, sz};
-            }
+            for (uint32_t i = 0; i < n; i++)
+                if (runs[i][1] > runs[i][0]) range_add(&w->s, &w->ns, &w->cs, r, runs[i][0] - base, runs[i][1] - runs[i][0]);
             return;
         }
         plat_mutex_lock(&w->lock);
         while (w->cap < w->n + (int)n) grow((void **)&w->a, &w->cap, sizeof *w->a);
-        for (uint32_t i = 0; i < n; i++) {
-            uint64_t off = runs[i][0] - base, sz = runs[i][1] - runs[i][0];
-            if (!sz) continue;
-            if (w->n && w->a[w->n - 1].r == r && w->a[w->n - 1].off + w->a[w->n - 1].size == off &&
-                w->a[w->n - 1].tag == wb_tag)
-                w->a[w->n - 1].size += sz;
-            else w->a[w->n++] = (MRange){r, off, sz, wb_tag};
-        }
+        for (uint32_t i = 0; i < n; i++)
+            if (runs[i][1] > runs[i][0]) wb_range_add(&w->a, &w->n, &w->cap, r, runs[i][0] - base, runs[i][1] - runs[i][0]);
         plat_mutex_unlock(&w->lock);
         return;
     }
     int locked = mirror_lock_if_shared();
     if (r->sfeed) {
         while (cstw < nstw + (int)n) grow((void **)&stw, &cstw, sizeof *stw);
-        int m = nstw;
-        for (uint32_t i = 0; i < n; i++) {
-            uint64_t off = runs[i][0] - base, sz = runs[i][1] - runs[i][0];
-            if (!sz) continue;
-            if (m && stw[m - 1].r == r && stw[m - 1].off + stw[m - 1].size == off) stw[m - 1].size += sz;
-            else stw[m++] = (MRange){r, off, sz};
-        }
-        __atomic_store_n(&nstw, m, __ATOMIC_RELAXED);
+        for (uint32_t i = 0; i < n; i++)
+            if (runs[i][1] > runs[i][0]) range_add(&stw, &nstw, &cstw, r, runs[i][0] - base, runs[i][1] - runs[i][0]);
     } else {
         while (cwbl < nwbl + (int)n) grow((void **)&wbl, &cwbl, sizeof *wbl);
-        int m = nwbl;
-        for (uint32_t i = 0; i < n; i++) {
-            uint64_t off = runs[i][0] - base, sz = runs[i][1] - runs[i][0];
-            if (!sz) continue;
-            if (m && wbl[m - 1].r == r && wbl[m - 1].off + wbl[m - 1].size == off && wbl[m - 1].tag == wb_tag)
-                wbl[m - 1].size += sz;
-            else wbl[m++] = (MRange){r, off, sz, wb_tag};
-        }
-        nwbl = m;
+        for (uint32_t i = 0; i < n; i++)
+            if (runs[i][1] > runs[i][0]) wb_range_add(&wbl, &nwbl, &cwbl, r, runs[i][0] - base, runs[i][1] - runs[i][0]);
     }
     mirror_unlock(locked);
 }
