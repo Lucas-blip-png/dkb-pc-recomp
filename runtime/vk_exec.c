@@ -1054,11 +1054,40 @@ VkBuffer vk_exec_inline_buffer(VkDeviceSize size) {
     return t->b;
 }
 
+// Bananza ultrawide (runtime/dkb_wide.c, set dkbwide): the dkbwide UI sites divide the x row of every fresh UI
+// projection by aspect / 16:9, so the 1920x1080 layout canvas lands in a 16:9 band centred on the display. ui2d scissor
+// panes (HudStatus S_Scissor_00, which clips the Bananza badges next to the Bananergy ring) still get a pixel rectangle
+// computed for a canvas that fills the whole width, so the clip lands outside the narrowed HUD: the selected badge
+// inside the ring is clipped away and the badge row is cut. Apply the same mapping to a narrower scissor of a draw that
+// covers the whole width of a display-shaped target (the UI pass, at output_res or at the 2/3 render3d size), so the clip follows the HUD. Full-width
+// scissors, other targets and draws with a smaller viewport (the 3D scene, captures) keep the game's rectangle.
+static void dkb_wide_ui_scissor(const VkExec *ex, int64_t *x0, int64_t *x1) {
+    unsigned out[2];
+    if (!dkb_wide_output(out) || out[0] * 9 <= out[1] * 16) return;
+    int64_t w = ex->pass_w, h = ex->pass_h;
+    if (*x0 <= 0 && *x1 >= w) return;   // full-width scissor: nothing to map
+    // the HUD is drawn into the display-sized image or, with render3d (scene_res auto), into the 2/3 one
+    // (2293x960 at 3440x1440): accept any target with the display's shape, at least half its width
+    int64_t skew = w * (int64_t)out[1] - h * (int64_t)out[0];
+    int same_size = w * 2 >= (int64_t)out[0] && (skew < 0 ? -skew : skew) <= (int64_t)out[0];
+    // viewport spans the whole target width (the y row may be flipped, so only x and width are compared)
+    int vp_full = !ex->has_vp ||
+                  (fabs(fmin(ex->vp[0][0], ex->vp[0][0] + ex->vp[0][2])) < 0.5 && fabs(fabs(ex->vp[0][2]) - w) < 0.5);
+    int apply = same_size && vp_full;
+    if (!apply) return;
+    double factor = ((double)out[0] / out[1]) / (16.0 / 9.0), cx = w * 0.5;
+    *x0 = (int64_t)floor(cx + ((double)*x0 - cx) / factor);
+    *x1 = (int64_t)ceil(cx + ((double)*x1 - cx) / factor);
+    static int logged;
+    if (!logged) logged = 1, rt_log("vk_exec: ultrawide UI scissor follows the narrowed HUD (factor %.4f)", factor);
+}
+
 VkRect2D vk_exec_scissor(const VkExec *ex) {
     int64_t w = ex->pass_w, h = ex->pass_h;
     if (!ex->has_scissor) return (VkRect2D){{0, 0}, {(uint32_t)w, (uint32_t)h}};
     int64_t x0 = ex->scissor.x, y0 = ex->scissor.y;
     int64_t x1 = x0 + ex->scissor.w, y1 = y0 + ex->scissor.h;
+    dkb_wide_ui_scissor(ex, &x0, &x1);
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 > w) x1 = w;
