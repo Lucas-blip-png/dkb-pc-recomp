@@ -37,7 +37,7 @@ typedef struct { uint64_t lo, hi, fence; } Wrote;
 typedef struct { uint64_t lo, hi; } Rng;
 #define ALIGN 256u
 #define RNG_C4 1ull
-static struct { Wrote *wr; int nwr, cwr; int fast; Rng *col; int ncol, ccol; uint64_t repeats; int mode, on;
+static struct { Wrote *wr; int nwr, cwr; int fast, opt; Rng *col; int ncol, ccol; uint64_t repeats; int mode, on;
                 uint64_t wr_added, wr_coalesced, fence; } U;
 static void *grow(void *p, int *cap, size_t elem) {
     int n = *cap ? *cap * 2 : 1024;
@@ -522,20 +522,25 @@ int main(void) {
     int fails = 0;
     U.cwr = 2000000, U.wr = malloc(sizeof *U.wr * (size_t)U.cwr);
     if (!U.wr) return 2;
-    for (int fast = 0; fast < 2; fast++) {
-        U.fast = fast;
-        fails += prune_cases();
-    }
-    fails += sort_cases();
-    fails += col_cases();
-    fails += seen_cases();
-    fails += c4_seen_cases();
-    for (int fast = 0; fast < 2; fast++) {
-        U.fast = fast;
-        fails += coalesce_cases();
-        fails += drop_local_cases();
-        fails += drop_many_cases();
-        fails += sorted_prefix_cases();
+    for (int opt = 0; opt < 2; opt++) {
+        U.opt = opt;
+        for (int fast = 0; fast < 2; fast++) {
+            U.fast = fast;
+            fails += prune_cases();
+        }
+        fails += sort_cases();
+        if (!opt) {
+            fails += col_cases();
+            fails += seen_cases();
+            fails += c4_seen_cases();
+        }
+        for (int fast = 0; fast < 2; fast++) {
+            U.fast = fast;
+            fails += coalesce_cases();
+            fails += drop_local_cases();
+            fails += drop_many_cases();
+            fails += sorted_prefix_cases();   // wr_prune's sorted-prefix merge (DKB_RESET_FAST), with U.opt 0 and 1
+        }
     }
     printf("usnap prune: %d checks, %d failures\n", checks, fails);
     return fails != 0;
