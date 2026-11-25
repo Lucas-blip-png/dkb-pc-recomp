@@ -382,6 +382,42 @@ SI T FN(recpx)(Cpu *c, T a) {
     return FN(fv)(s | (~x & EXPM));
 }
 
+// Function-local lazy FCMP helpers (recomp/flags.py): keep the compared operands in Flags F so FCMP + B.cc / CSEL
+// folds to a single host ucomiss/ucomisd + jcc/cmov instead of packing and unpacking NZCV. On x86-64, rt_fpcr_sync
+// keeps MXCSR.DAZ == FPCR.FZ so host compares already flush denormal inputs in hardware (gen.py disables lazy FCMP in
+// functions that execute MSR FPCR / rt_fpcr_sync).
+SI void FN(ffcmp)(Flags *f, Cpu *c, T a, T b) {
+#if !(defined(__x86_64__) || defined(_M_X64))
+    a = FN(fz)(c, a), b = FN(fz)(c, b);
+#else
+    (void)c;
+#endif
+    f->FA = a;
+    f->FB = b;
+}
+SI int FN(fc_fcmp)(const Flags *f, int cc) {
+    T a = f->FA, b = f->FB;
+    switch (cc) {
+    case CC_EQ: return a == b;
+    case CC_NE: return !(a == b);
+    case CC_CS: case CC_PL: return !(a < b);
+    case CC_CC: case CC_MI: return a < b;
+    case CC_VS: return __builtin_isunordered(a, b);
+    case CC_VC: return !__builtin_isunordered(a, b);
+    case CC_HI: return !(a <= b);
+    case CC_LS: return a <= b;
+    case CC_GE: return a >= b;
+    case CC_LT: return !(a >= b);
+    case CC_GT: return a > b;
+    default: return !(a > b);
+    }
+}
+SI uint64_t FN(fnz_fcmp)(const Flags *f) {
+    T a = f->FA, b = f->FB;
+    return ((uint64_t)(a < b) << 31) | ((uint64_t)(a == b) << 30) |
+           ((uint64_t)!(a < b) << 29) | ((uint64_t)__builtin_isunordered(a, b) << 28);
+}
+
 #undef FN
 #undef SGN
 #undef EXPM

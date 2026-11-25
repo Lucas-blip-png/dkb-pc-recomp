@@ -267,7 +267,11 @@ SI int simd_directed(const Cpu *c) { return simd_directed_fpcr(c->fpcr); }
 #define VTU vu32
 #define VTS vs32
 #define NL 4
+#define FA fa
+#define FB fb
 #include "simd_fp.h"
+#undef FA
+#undef FB
 #undef F
 #undef T
 #undef U
@@ -288,7 +292,11 @@ SI int simd_directed(const Cpu *c) { return simd_directed_fpcr(c->fpcr); }
 #define VTU vu64
 #define VTS vs64
 #define NL 2
+#define FA da
+#define FB db
 #include "simd_fp.h"
+#undef FA
+#undef FB
 #undef F
 #undef T
 #undef U
