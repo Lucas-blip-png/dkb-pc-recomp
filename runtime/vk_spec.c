@@ -51,7 +51,22 @@ int vk_spec_failed(void) { return vk_spec_here ? vk_spec_part_failed(vk_spec_her
 uint64_t vk_spec_fence(void) { return vk_spec_here ? HS[vk_spec_here - 1].fence : 0; }
 void vk_spec_world_changed(void) { __atomic_add_fetch(&world, 1, __ATOMIC_RELEASE); }
 uint64_t vk_spec_world(void) { return __atomic_load_n(&world, __ATOMIC_ACQUIRE); }
-void vk_spec_event(void) { __atomic_add_fetch(&events, 1, __ATOMIC_RELAXED); }
+static int spec_draw_fast_on(void) {
+    static int mode = -1;
+    int m = __atomic_load_n(&mode, __ATOMIC_ACQUIRE);
+    if (m < 0) {
+        m = rt_knob("DRAW_FAST", "1");
+        __atomic_store_n(&mode, m, __ATOMIC_RELEASE);
+    }
+    return RT_KNOB_ON(m);
+}
+
+void vk_spec_event(void) {
+    // When no helper threads exist (DKB_REPLAY_PAR=0, the default), nothing ever reads `events`; skip the cross-core
+    // atomic RMW that every GPU-written range across all recording threads would otherwise execute.
+    if (!__atomic_load_n(&nhelpers, __ATOMIC_RELAXED) && spec_draw_fast_on()) return;
+    __atomic_add_fetch(&events, 1, __ATOMIC_RELAXED);
+}
 uint32_t vk_spec_events(void) { return __atomic_load_n(&events, __ATOMIC_RELAXED); }
 
 // ---- the threads
@@ -115,7 +130,7 @@ int vk_spec_on(void) {
                 snprintf(name[n], sizeof name[n], "vk helper %d", n + 1);
                 if (!(h->thread = plat_thread_new(spec_main, h, name[n]))) break;
             }
-            nhelpers = n;
+            __atomic_store_n(&nhelpers, n, __ATOMIC_RELEASE);
             if (!n) mode = 0;
         }
         rt_log("vk_spec: long runs of draws are %s (DKB_REPLAY_PAR=%s, %d helper thread%s)",

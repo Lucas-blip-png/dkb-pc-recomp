@@ -103,6 +103,7 @@
 #define view_of vk_exec_draw_view_of
 #define views_by_image vk_exec_draw_views_by_image
 #define twin_snap vk_exec_draw_twin_snap
+#define draw_fast_mode_val vk_exec_draw_fast_mode_val
 
 // The calls below are the replay thread's alone.
 #define vk_mem_count(cls, use, bytes) (OFF_MAIN(dc) ? (void)0 : vk_mem_count(cls, use, bytes))   // the census is not atomic
@@ -201,7 +202,16 @@ typedef struct { int cls, use; uint64_t bytes; } RsCount;
 #define RS_PTRS 4
 typedef struct { uint32_t off, len; } RsRange;
 typedef struct { int st; const GfxShaderRes *res; } RsPtr;
-typedef struct { uint32_t n, bytes; uint8_t sup, c0, ok, np; RsPtr p[RS_PTRS]; RsRange r[]; } RsList;
+// Pre-decoded per-binding metadata of VkPipeInfo, stored in the tail of RsList's single allocation so free(l) frees it.
+typedef struct { int8_t st, ssbo_slot; uint8_t ssbo_ubo, tex_kind; } RsBind;
+typedef struct {
+    uint32_t n, bytes, lo[2], hi[2], d0[2], nd, n_sets;
+    uint8_t sup, c0, ok, np, need_w, has_img, ndyn[2];
+    uint16_t dyn_d[2][VK_DYN_UBO_MAX];
+    RsPtr p[RS_PTRS];
+    const RsBind *binds;
+    RsRange r[];
+} RsList;
 
 // (program, stage, answers) -> shader, 4-way set-associative, most recently used first. A miss costs a SHA-256 of the
 // whole shader code (gfx_shader.c req_init), slow on CPUs without SHA instructions: a field frame looks up ~3000 and
@@ -281,7 +291,7 @@ typedef struct { VkImage image; uint32_t l0, l1, a0, a1; } SubRange;
 typedef struct {
     const prog_t *prog;
     uint64_t serial;
-    uint32_t gen, tex_serial;
+    uint32_t gen, tex_serial, pipe_serial;
     uint64_t tex[3][32], img[3][32];
     uint8_t geometry_input;
     VkPipeState pipe;
@@ -311,21 +321,28 @@ typedef struct DrawCtx {
     struct {
         uint64_t serial;
         int8_t idx[6];
-        uint8_t has_origin;
+        uint8_t has_origin, ngs_state, vs_fault;
         uint32_t len[6];
         uint64_t origin[6];
     } stagem[STAGEM_N];
+    int32_t stagem_last;
     // Texture and image types of a stage's first 32 slots, each kept with the handle and the generation and slot token it
     // was looked up under: a slot is looked up again, a hash probe, only when the handle changed or its slot may resolve
     // otherwise (slot_still).
     struct { uint64_t context, tex[32], img[32], ttok[32], itok[32]; uint32_t tgen[32], igen[32]; uint8_t tt[32], it[32]; } AC[6];
     struct { uint64_t serial; int st; uint32_t m; } slotm[SLOTM_N];
     struct { uint64_t context, h, tok; uint32_t gen; SubRange r; } FM[FM_N];
+    // Per-stage feedback_scan memos (0 vertex, 1 fragment, 2 geometry) so native GS draws do not thrash one slot.
+    struct { const VkExec *ex; const GfxShader *sh; uint64_t desc; uint32_t tser, pass, sg, mask; } fb_memo[3];
+    // twin_prepare memo and per-shader compare-sampler presence cache (64-entry direct-mapped).
+    struct { int valid; const VkExec *ex; const GfxShader *vs, *fs; uint64_t desc; uint32_t tser, pass, sg; int twv_n; } TW_MEMO;
+    struct { const GfxShader *sh; int8_t has; } tw_cmp[64];
     struct { int on, valid, has_fs, has_gs; MemoKey k; const GfxShader *vs, *fs, *gs; } SM;
     // The pipeline memo (draw_impl): the last draw's state and pipeline, and the recent ones by shader pair (PM_SETS
     // sets of PM_WAYS, replaced in turn).
     struct {
         int on, valid;
+        uint32_t pipe_serial;
         VkPipeState s;
         const VkPipeInfo *info;
         struct { VkPipeState s; const VkPipeInfo *info; } way[PM_SETS][PM_WAYS];
@@ -461,7 +478,7 @@ typedef struct DrawCtx {
     struct {
         const VkPipeInfo *info;
         uint64_t serial, pass, h[MAX_DESC];
-        uint32_t gen, ep, sg, nh;
+        uint32_t gen, ep, sg, nh, tex_serial;
         int nfbl;
         VkImage fbl[9];
     } TR;
@@ -540,6 +557,40 @@ static int dyn_keep_on(void) {
     static int mode = -1;
     return knob_on(&mode, "DYN_KEEP", "1");
 }
+// DKB_DRAW_FAST (on by default; ab alternates in DKB_AB blocks): fast draw replay path — partial command-buffer state
+// reset, pipe_serial shader/pipeline memo fast paths, cached stage/GS/fault metadata, memoized feedback_scan and
+// twin_prepare, precomputed RsList descriptor metadata, in-place graphics c0 update, and fast draw-merge handling.
+DRAW_SHARED int draw_fast_mode_val DRAW_SHARED_INIT(-1);
+static inline int draw_fast_on(void) {
+    int m = __atomic_load_n(&draw_fast_mode_val, __ATOMIC_ACQUIRE);
+    if (m < 0) {
+        m = rt_knob("DRAW_FAST", "1");
+        __atomic_store_n(&draw_fast_mode_val, m, __ATOMIC_RELEASE);
+    }
+    return RT_KNOB_ON(m);
+}
+
+// Inline 8-byte aligned compare/copy helpers for small/medium descriptor and signature buffers to avoid ucrtbase.dll
+// calls in the hot draw loop.
+static inline int mem_eq_fast(const void *a, const void *b, size_t n) {
+    if (((uintptr_t)a | (uintptr_t)b | n) & 7) return !memcmp(a, b, n);
+    const uint64_t *p = a, *q = b;
+    size_t nw = n >> 3;
+    for (size_t i = 0; i < nw; i++)
+        if (p[i] != q[i]) return 0;
+    return 1;
+}
+
+static inline void mem_cp_fast(void *dst, const void *src, size_t n) {
+    if (((uintptr_t)dst | (uintptr_t)src | n) & 7) {
+        memcpy(dst, src, n);
+        return;
+    }
+    uint64_t *d = dst;
+    const uint64_t *s = src;
+    size_t nw = n >> 3;
+    for (size_t i = 0; i < nw; i++) d[i] = s[i];
+}
 
 
 static const char *const BSF_NAME[BSF_N] = {
@@ -571,13 +622,35 @@ static void cb_done(void *arg) {   // completion thread
     free(r->written), free(r->written_slot), free(r->pools), free(r->chunks), free(r);
 }
 
+static inline void reset_cb_state(DrawCtx *dc) {
+    if (!draw_fast_on()) {
+        memset(&dc->B, 0, sizeof dc->B);
+        return;
+    }
+    // Every large payload buffer in dc->B (c0[4], c0_in[4], support, st, vb/vo/vsz/vstr/vin, ib, ds_dyn) is guarded by
+    // its validity flag or bound handle; clearing only the flags avoids a ~23 KiB memset at every slice and split.
+    dc->B.pipe[0] = dc->B.pipe[1] = VK_NULL_HANDLE;
+    dc->B.st_valid = 0, dc->B.st_is_pm = 0;
+    dc->B.vb_valid = 0, dc->B.vb_dirty = 0, dc->B.vstr_dirty = 0;
+    dc->B.ib_valid = 0;
+    dc->B.sup_valid = 0;
+    dc->B.c0_valid[0] = dc->B.c0_valid[1] = dc->B.c0_valid[2] = dc->B.c0_valid[3] = 0;
+    dc->B.ds_layout = VK_NULL_HANDLE;
+    dc->B.ds_bound[0] = dc->B.ds_bound[1] = VK_NULL_HANDLE;
+    dc->B.ds_last[0] = dc->B.ds_last[1] = VK_NULL_HANDLE;
+    dc->B.ds_last_layout[0] = dc->B.ds_last_layout[1] = VK_NULL_HANDLE;
+    dc->B.ds_pushed[0] = dc->B.ds_pushed[1] = 0;
+    dc->B.ds_ndyn[0] = dc->B.ds_ndyn[1] = 0;
+    dc->B.res_valid = 0;
+    dc->B.jit[0] = dc->B.jit[1] = 0;
+}
+
 void vk_exec_draw_new_cb(VkExec *ex) {
     if (ON_HELPER(ex)) {
         vk_exec_draw_h_new_cb(ex);
         return;
     }
-    DrawCtx *const dc = DC_OF(ex);
-    memset(&dc->B, 0, sizeof dc->B);
+    reset_cb_state(DC_OF(ex));
 }
 
 static CbRes *cb_res(VkExec *ex) {
@@ -586,7 +659,7 @@ static CbRes *cb_res(VkExec *ex) {
     dc->cur = calloc(1, sizeof *dc->cur);
     if (!dc->cur) rt_fatal("vk: out of memory");
     dc->cur_fence = ex->fence;
-    memset(&dc->B, 0, sizeof dc->B);
+    reset_cb_state(dc);
     vk_completion_add(ex->fence, cb_done, dc->cur);
     return dc->cur;
 }
@@ -1306,18 +1379,18 @@ static int find_stage_scan(const prog_t *p, int nvn_stage, const uint8_t **ctl, 
     return 0;
 }
 
-static int find_stage_origin(DrawCtx *dc, const prog_t *p, int nvn_stage, const uint8_t **ctl, const uint8_t **code, uint32_t *len,
-                             uint64_t *origin) {
-    if (!p->serial || (unsigned)nvn_stage >= 6) {
-        if (!find_stage_scan(p, nvn_stage, ctl, code, len)) return 0;
-        if (origin) *origin = nvn2_origin(*code);
-        return 1;
+static typeof(((DrawCtx *)0)->stagem[0]) *stagem_get(DrawCtx *dc, const prog_t *p, int memo, int want_origin) {
+    uint32_t slot;
+    if (memo && draw_fast_on() && dc->stagem_last >= 0 && dc->stagem[dc->stagem_last].serial == p->serial) {
+        slot = (uint32_t)dc->stagem_last;
+    } else {
+        slot = (uint32_t)(p->serial * 0x9E3779B97F4A7C15ull >> (memo ? 53 : 55));
+        if (memo) dc->stagem_last = (int32_t)slot;
     }
-    int memo = stage_origin_on();
-    typeof(dc->stagem[0]) *m = &dc->stagem[p->serial * 0x9E3779B97F4A7C15ull >> (memo ? 53 : 55)];
+    typeof(dc->stagem[0]) *m = &dc->stagem[slot];
     if (m->serial != p->serial) {
         m->serial = p->serial;
-        m->has_origin = 0;
+        m->has_origin = 0, m->ngs_state = 0, m->vs_fault = 0;
         memset(m->idx, -1, sizeof m->idx);
         for (uint32_t i = 0; i < p->nstage && i < 6; i++) {
             const uint8_t *c = p->sd[i].control;
@@ -1327,11 +1400,26 @@ static int find_stage_origin(DrawCtx *dc, const prog_t *p, int nvn_stage, const 
             if (st < 6 && m->idx[st] < 0) m->idx[st] = (int8_t)i, memcpy(&m->len[st], c + 0x704, 4);
         }
     }
-    if (memo && origin && !m->has_origin) {   // the origins of an entry are looked up at its first ask for one
+    if (memo && want_origin && !m->has_origin) {   // the origins of an entry are looked up at its first ask for one
         for (int st = 0; st < 6; st++)
             m->origin[st] = m->idx[st] < 0 ? 0 : nvn2_origin((const uint8_t *)(uintptr_t)p->sd[m->idx[st]].data);
+        uint64_t vo = m->origin[NVN_STAGE_VS];
+        m->vs_fault = vo == 0xba1dd1e7ae8abb33ull ? 1 : vo == 0x45e1a6f48cb7872eull ? 2
+                    : vo == 0xcae0ef8e9fe9147full ? 3 : 0;
         m->has_origin = 1;
     }
+    return m;
+}
+
+static int find_stage_origin(DrawCtx *dc, const prog_t *p, int nvn_stage, const uint8_t **ctl, const uint8_t **code, uint32_t *len,
+                             uint64_t *origin) {
+    if (!p->serial || (unsigned)nvn_stage >= 6) {
+        if (!find_stage_scan(p, nvn_stage, ctl, code, len)) return 0;
+        if (origin) *origin = nvn2_origin(*code);
+        return 1;
+    }
+    int memo = stage_origin_on();
+    typeof(dc->stagem[0]) *m = stagem_get(dc, p, memo, origin != NULL);
     int i = m->idx[nvn_stage];
     if (i < 0) return 0;
     *ctl = p->sd[i].control, *code = (const uint8_t *)(uintptr_t)p->sd[i].data, *len = m->len[nvn_stage];
@@ -1758,8 +1846,51 @@ static VkDescriptorBufferInfo c0_info(VkExec *ex, int st) {
     // (DKB_DESC_C0_SERIAL). Both paths leave B.c0_in[k] with the same ssbo and binst, so either may follow the other.
     if (st != NVN_STAGE_CS && c0_serial_on()) {
         uint32_t sser = dc->ssbo_serial[st];
+        if (dc->B.c0_valid[k] && dc->B.c0_in[k].binst == dc->c0_binst && dc->B.c0_sser[k] == sser)
+            return (VkDescriptorBufferInfo){dc->B.c0_buf[k], dc->B.c0_off[k], VK_C0_BYTES};
+        if (draw_fast_on()) {
+            // Graphics c0 is all zeros except the stage's 16-entry storage table at `base`, max point size at 0x610, and
+            // base_instance at 0x644 (gfx_c0.c gfx_c0_fill). Updating dc->B.c0[k] in place skips a 2 KiB memset, a 2 KiB
+            // memcmp, and an extra 2 KiB memcpy on every storage-buffer change (the GS terrain pass).
+            if (!dc->B.c0_valid[k]) {
+                c0_fill(dc, dc->B.c0[k], st, ex->ssbo[st], ex->ubo[st], dc->c0_dim, dc->c0_binst);
+                memcpy(scratch(ex, VK_C0_BYTES, &dc->B.c0_buf[k], &dc->B.c0_off[k]), dc->B.c0[k], VK_C0_BYTES);
+                memcpy(dc->B.c0_in[k].ssbo, ex->ssbo[st], sizeof ex->ssbo[st]);
+                dc->B.c0_in[k].binst = dc->c0_binst;
+                dc->B.c0_sser[k] = sser;
+                dc->B.c0_valid[k] = 1;
+            } else {
+                int base = st == NVN_STAGE_VS ? 0x110 : st == NVN_STAGE_FS ? 0x510 : 0x410;
+                uint8_t *bank = dc->B.c0[k];
+                int changed = 0;
+                if (dc->B.c0_sser[k] != sser) {
+                    uint8_t *tbl = bank + base;
+                    for (int r = 0; r < 16; r++) {
+                        uint64_t a = ex->ssbo[st][r].addr, oa;
+                        uint32_t n = (uint32_t)ex->ssbo[st][r].size, on;
+                        memcpy(&oa, tbl + 16 * r, 8);
+                        memcpy(&on, tbl + 16 * r + 8, 4);
+                        if (oa != a || on != n) {
+                            memcpy(tbl + 16 * r, &a, 8);
+                            memcpy(tbl + 16 * r + 8, &n, 4);
+                            changed = 1;
+                        }
+                    }
+                    memcpy(dc->B.c0_in[k].ssbo, ex->ssbo[st], sizeof ex->ssbo[st]);
+                    dc->B.c0_sser[k] = sser;
+                }
+                if (dc->B.c0_in[k].binst != dc->c0_binst) {
+                    memcpy(bank + 0x644, &dc->c0_binst, 4);
+                    dc->B.c0_in[k].binst = dc->c0_binst;
+                    changed = 1;
+                }
+                if (changed)
+                    memcpy(scratch(ex, VK_C0_BYTES, &dc->B.c0_buf[k], &dc->B.c0_off[k]), bank, VK_C0_BYTES);
+            }
+            return (VkDescriptorBufferInfo){dc->B.c0_buf[k], dc->B.c0_off[k], VK_C0_BYTES};
+        }
         if (dc->B.c0_valid[k] && dc->B.c0_in[k].binst == dc->c0_binst &&
-            (dc->B.c0_sser[k] == sser || !memcmp(dc->B.c0_in[k].ssbo, ex->ssbo[st], sizeof ex->ssbo[st]))) {
+            !memcmp(dc->B.c0_in[k].ssbo, ex->ssbo[st], sizeof ex->ssbo[st])) {
             dc->B.c0_sser[k] = sser;
             return (VkDescriptorBufferInfo){dc->B.c0_buf[k], dc->B.c0_off[k], VK_C0_BYTES};
         }
@@ -2092,16 +2223,60 @@ static SubRange sampled_sub(const VkExec *ex, uint64_t h) {   // texture lock he
     return img ? sub_of(img, &v, hv) : (SubRange){0};
 }
 
-// Attachments of the open pass the fragment shader fs samples; kept while the shader, the texture bindings and the
-// pass stay the same.
+// Attachments of the open pass the shader fs samples; kept while the shader, its stage's texture bindings, the
+// descriptor context and the pass stay the same.
 static uint32_t feedback_scan(VkExec *ex, const GfxShader *fs) {
     DrawCtx *const dc = DC_OF(ex);
+    int fast = draw_fast_on();
+    int st = nvn_stage_of(gfx_shader_stage(fs));
+    if (st < 0) return 0;
+    if (fast && (unsigned)st < 3) {
+        descriptor_state(ex);
+        uint32_t tser = st == NVN_STAGE_FS ? ex->fs_tex_serial : ex->tex_serial;
+        uint32_t sg = dc->desc_last.slots_gen;
+        typeof(dc->fb_memo[0]) *fm = &dc->fb_memo[st];
+        if (fm->ex == ex && fm->sh == fs && fm->tser == tser && fm->pass == ex->pass_serial &&
+            fm->desc == dc->descriptor_serial && fm->sg == sg)
+            return fm->mask;
+        const GfxShaderRes *res;
+        int n = gfx_shader_resources(fs, GFX_RES_TEX, &res);
+        uint32_t m = 0;
+        if (n) {
+            uint32_t gen = sg;
+            int memo = td_mode(), locked = 0;
+            for (int r = 0; r < n; r++)
+                for (int k = 0; k < (res[r].count ? res[r].count : 1); k++) {
+                    int slot = res[r].slot + k;
+                    uint64_t h = slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0;
+                    if (!h) continue;
+                    typeof(dc->FM[0]) *f = &dc->FM[(h * 0x9E3779B97F4A7C15ull) >> 51];
+                    if (memo && f->context == dc->descriptor_serial && f->h == h && slot_still(ex, &f->gen, f->tok, h, gen)) {
+                        if (memo == 2) {
+                            if (!locked) vk_texture_lock(), locked = 1;
+                            SubRange c = sampled_sub(ex, h);
+                            if (memcmp(&c, &f->r, sizeof c))
+                                rt_fatal("vk_exec: feedback memo of handle %#llx differs from a lookup", (unsigned long long)h);
+                        }
+                        m |= attached_as(ex, &f->r);
+                        continue;
+                    }
+                    uint64_t tok = token_of(ex, h);   // before the lookup
+                    if (!locked) vk_texture_lock(), locked = 1;
+                    SubRange sr = sampled_sub(ex, h);
+                    m |= attached_as(ex, &sr);
+                    if (tok) *f = (typeof(*f)){.context = dc->descriptor_serial, .h = h, .tok = tok, .gen = gen, .r = sr};
+                    else f->h = 0;
+                }
+            if (locked) vk_texture_unlock();
+        }
+        *fm = (typeof(*fm)){ex, fs, dc->descriptor_serial, tser, ex->pass_serial, sg, m};
+        return m;
+    }
+    dc->fb_memo[0].sh = dc->fb_memo[1].sh = dc->fb_memo[2].sh = NULL;
     descriptor_state(ex);
     if (ex->fb_fs == fs && ex->fb_serial == ex->tex_serial && ex->fb_pass == ex->pass_serial) return ex->fb_sampled;
     const GfxShaderRes *res;
     int n = gfx_shader_resources(fs, GFX_RES_TEX, &res);
-    int st = nvn_stage_of(gfx_shader_stage(fs));
-    if (st < 0) return 0;
     uint32_t m = 0, gen = vk_texture_slots_gen();   // before any lookup
     int memo = td_mode(), locked = 0;
     for (int r = 0; r < n; r++)
@@ -2159,6 +2334,7 @@ static uint32_t feedback_prepare(VkExec *ex, const GfxShader *fs) {
     DrawCtx *const dc = DC_OF(ex);
     int mode = vk_ctx()->feedback;
     if (mode == VK_FEEDBACK_OFF || !fs || !ex->in_pass) return 0;
+    if (draw_fast_on() && !(ex->fb_dirty | ex->fbl_mask)) return 0;
     uint32_t m = feedback_scan(ex, fs);
     uint32_t d = m & ex->fb_dirty;
     if (d) dc->frame->fb_draws++;
@@ -2539,18 +2715,39 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
 static void twin_prepare(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
     DrawCtx *const dc = DC_OF(ex);
     if (!ex->in_pass || (!twin_df(VK_FORMAT_R32_SFLOAT) && !twin_df(VK_FORMAT_R16_UNORM))) return;
+    int fast = draw_fast_on();
+    int twv_n = dc->twv ? dc->twv->n : 0;
+    uint32_t sg = 0;
+    if (fast) {
+        descriptor_state(ex);
+        sg = dc->desc_last.slots_gen;
+        if (dc->TW_MEMO.valid && dc->TW_MEMO.ex == ex && dc->TW_MEMO.vs == vs && dc->TW_MEMO.fs == fs &&
+            dc->TW_MEMO.tser == ex->tex_serial && dc->TW_MEMO.pass == ex->pass_serial &&
+            dc->TW_MEMO.desc == dc->descriptor_serial && dc->TW_MEMO.sg == sg && dc->TW_MEMO.twv_n == twv_n)
+            return;
+    } else {
+        dc->TW_MEMO.valid = 0;
+    }
     const GfxShader *const sh[2] = {fs, vs};
     uint64_t ids[TWINS];
     VkImage seen[TWINS];
     int n = 0, locked = 0;
     for (int s = 0; s < 2; s++) {
+        if (!sh[s]) continue;
+        typeof(dc->tw_cmp[0]) *tc = NULL;
+        if (fast) {
+            tc = &dc->tw_cmp[((uint32_t)((uintptr_t)sh[s] >> 4) * 0x9e3779b1u) >> 26];
+            if (tc->sh == sh[s] && !tc->has) continue;
+        }
         const GfxShaderRes *res;
-        int nr = sh[s] ? gfx_shader_resources(sh[s], GFX_RES_TEX, &res) : 0;
-        int st = sh[s] ? nvn_stage_of(gfx_shader_stage(sh[s])) : -1;
+        int nr = gfx_shader_resources(sh[s], GFX_RES_TEX, &res);
+        int st = nvn_stage_of(gfx_shader_stage(sh[s]));
+        int any_cmp = 0;
         for (int r = 0; st >= 0 && r < nr; r++) {
             VkImageViewType vt = res_view_type(res[r].type);
             if (!(res[r].type & 0x400) || res[r].separate || (vt != VK_IMAGE_VIEW_TYPE_2D && vt != VK_IMAGE_VIEW_TYPE_2D_ARRAY))
                 continue;
+            any_cmp = 1;
             for (int k = 0; k < (res[r].count ? res[r].count : 1); k++) {
                 int slot = res[r].slot + k;
                 uint64_t h = slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0;
@@ -2588,8 +2785,14 @@ static void twin_prepare(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
                 seen[n] = img->image, ids[n++] = h;
             }
         }
+        if (tc) tc->sh = sh[s], tc->has = (int8_t)any_cmp;
     }
     if (locked) vk_texture_unlock();
+    if (!n) {
+        if (fast)
+            dc->TW_MEMO = (typeof(dc->TW_MEMO)){1, ex, vs, fs, dc->descriptor_serial, ex->tex_serial, ex->pass_serial, sg, twv_n};
+        return;
+    }
     // A slice cannot end the pass: its draw keeps the colour image, and the target set learns the texture, whose twin
     // vk_exec.c par_start copies before its next sliced pass begins.
     if (n && IN_SLICE(dc)) {
@@ -3191,51 +3394,95 @@ static const RsList *rs_list(const VkExec *ex, const VkPipeInfo *info) {
     RsList *l = nvn_hm_get(&dc->rs_lists, &info);
     if (!l) {
         static _Thread_local RsRange tmp[MAX_DESC];
+        static _Thread_local RsBind btmp[MAX_BINDINGS];
         RsPtr ptr[RS_PTRS];
         uint32_t n = 0, nd = 0, np = 0;
+        uint32_t n_sets = info->n_sets ? info->n_sets : 1;
+        uint32_t lo[2] = {0, 0}, hi[2] = {0, 0}, d0[2] = {0, 0};
+        uint8_t need_w = 0, has_img = 0, ndyn[2] = {0, 0};
+        uint16_t dyn_d[2][VK_DYN_UBO_MAX];
+        for (uint32_t s = 0, i0 = 0; s < n_sets; s++) {
+            uint32_t i1 = i0;
+            while (i1 < info->n_bindings && (n_sets == 1 || info->bindings[i1].set == s)) i1++;
+            lo[s] = i0, hi[s] = i1, i0 = i1;
+            if (i1 > lo[s] && !info->tpl[s]) need_w = 1;
+        }
         int sup = 0, c0 = 0, ok = 1;
-        for (uint32_t i = 0; i < info->n_bindings && ok; i++) {
+        for (uint32_t i = 0; i < info->n_bindings; i++) {
             const VkPipeBinding *b = &info->bindings[i];
             const GfxShaderRes *r = b->res;
             uint32_t cnt = b->count ? b->count : 1;
-            if ((nd += cnt) > MAX_DESC) { ok = 0; break; }   // the build stops on it
+            if (n_sets == 2 && i == lo[1]) d0[1] = nd;
             int st = nvn_stage_of(b->stage);
             if (st < 0) rt_fatal("vk_exec: unsupported descriptor stage %u", b->stage);
+            RsBind rb = {.st = (int8_t)st, .ssbo_slot = -1, .ssbo_ubo = 0, .tex_kind = 0};
+            uint32_t s = n_sets == 1 ? 0 : b->set;
+            if (s < 2 && b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+                for (uint32_t k = 0; k < cnt && ndyn[s] < VK_DYN_UBO_MAX; k++)
+                    dyn_d[s][ndyn[s]++] = (uint16_t)(nd + k);
+            }
+            if (nd + cnt > MAX_DESC) ok = 0;
             if (b->kind == VK_PIPE_SUPPORT) {
                 sup = 1;
             } else if (b->kind == GFX_RES_UBO) {
-                for (uint32_t k = 0; k < cnt; k++) {
-                    int slot = r->slot + (int)k;
-                    if (slot == 0 && c0_on()) c0 = 1, rs_add(tmp, &n, ex, ex->ssbo[st], sizeof ex->ssbo[st]);
-                    else if (slot >= 3 && slot - 3 < 18) rs_add(tmp, &n, ex, &ex->ubo[st][slot - 3], sizeof(p_bind_buf));
-                }   // slot 1: the program (bind_sig); others: the zero buffer
-            } else if (b->kind == GFX_RES_SSBO) {   // every descriptor of the binding is the same range
-                int ubo, slot = ssbo_slot(r, st, &ubo);
-                if (slot >= 0 && slot < 16) {
-                    rs_add(tmp, &n, ex, ubo ? &ex->ubo[st][slot] : &ex->ssbo[st][slot], sizeof(p_bind_buf));
-                } else if (ubo_ptr_res(r)) {
-                    if (np == RS_PTRS) { ok = 0; break; }
-                    rs_add(tmp, &n, ex, &ex->ubo[st][r->cbuf_slot - 3], sizeof(p_bind_buf));
-                    ptr[np++] = (RsPtr){st, r};
+                if (ok) {
+                    for (uint32_t k = 0; k < cnt; k++) {
+                        int slot = r->slot + (int)k;
+                        if (slot == 0 && c0_on()) c0 = 1, rs_add(tmp, &n, ex, ex->ssbo[st], sizeof ex->ssbo[st]);
+                        else if (slot >= 3 && slot - 3 < 18) rs_add(tmp, &n, ex, &ex->ubo[st][slot - 3], sizeof(p_bind_buf));
+                    }   // slot 1: the program (bind_sig); others: the zero buffer
                 }
-            } else if ((b->kind == GFX_RES_TEX || b->kind == GFX_RES_IMG) && b->type != VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER &&
-                       b->type != VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
-                int img = b->kind == GFX_RES_IMG, cap = img ? 32 : 128;
-                for (uint32_t k = 0; k < cnt; k++) {
-                    int slot = r->slot + (int)k;
-                    if (slot >= 0 && slot < cap) rs_add(tmp, &n, ex, img ? &ex->img[st][slot] : &ex->tex[st][slot], 8);
+            } else if (b->kind == GFX_RES_SSBO) {   // every descriptor of the binding is the same range
+                int ubo = 0, slot = -1;
+                if (!(r->flags & GFX_RES_SSBO_GUARDED)) slot = ssbo_slot(r, st, &ubo);
+                rb.ssbo_slot = (int8_t)slot, rb.ssbo_ubo = (uint8_t)ubo;
+                if (ok) {
+                    if (slot >= 0 && slot < 16) {
+                        rs_add(tmp, &n, ex, ubo ? &ex->ubo[st][slot] : &ex->ssbo[st][slot], sizeof(p_bind_buf));
+                    } else if (ubo_ptr_res(r)) {
+                        if (np == RS_PTRS) ok = 0;
+                        else {
+                            rs_add(tmp, &n, ex, &ex->ubo[st][r->cbuf_slot - 3], sizeof(p_bind_buf));
+                            ptr[np++] = (RsPtr){st, r};
+                        }
+                    }
+                }
+            } else if (b->kind == GFX_RES_TEX || b->kind == GFX_RES_IMG) {
+                if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || b->type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
+                    rb.tex_kind = 3;
+                } else {
+                    int img = b->kind == GFX_RES_IMG, cap = img ? 32 : 128;
+                    rb.tex_kind = img ? 2 : 1;
+                    if (img) has_img = 1;
+                    if (ok) {
+                        for (uint32_t k = 0; k < cnt; k++) {
+                            int slot = r->slot + (int)k;
+                            if (slot >= 0 && slot < cap) rs_add(tmp, &n, ex, img ? &ex->img[st][slot] : &ex->tex[st][slot], 8);
+                        }
+                    }
                 }
             }
+            if (i < MAX_BINDINGS) btmp[i] = rb;
+            nd += cnt;
         }
+        if (n_sets == 2 && lo[1] == info->n_bindings) d0[1] = nd;
         uint64_t bytes = 0;
         for (uint32_t i = 0; i < n; i++) bytes += tmp[i].len;
         if (bytes > RS_BYTES) ok = 0;
-        l = malloc(sizeof *l + sizeof *tmp * n);
+        size_t rbytes = sizeof *tmp * n;
+        size_t nb = info->n_bindings <= MAX_BINDINGS ? info->n_bindings : 0;
+        l = malloc(sizeof *l + rbytes + sizeof *btmp * nb);
         if (!l) rt_fatal("vk: out of memory");
-        l->n = n, l->bytes = (uint32_t)bytes, l->sup = (uint8_t)sup, l->c0 = (uint8_t)c0, l->ok = (uint8_t)ok;
-        l->np = (uint8_t)np;
+        l->n = n, l->bytes = (uint32_t)bytes, l->n_sets = n_sets, l->nd = nd;
+        l->lo[0] = lo[0], l->lo[1] = lo[1], l->hi[0] = hi[0], l->hi[1] = hi[1], l->d0[0] = d0[0], l->d0[1] = d0[1];
+        l->sup = (uint8_t)sup, l->c0 = (uint8_t)c0, l->ok = (uint8_t)ok, l->np = (uint8_t)np;
+        l->need_w = need_w, l->has_img = has_img, l->ndyn[0] = ndyn[0], l->ndyn[1] = ndyn[1];
+        memcpy(l->dyn_d, dyn_d, sizeof dyn_d);
         memcpy(l->p, ptr, sizeof *ptr * np);
-        memcpy(l->r, tmp, sizeof *tmp * n);
+        memcpy(l->r, tmp, rbytes);
+        RsBind *bdst = (RsBind *)((uint8_t *)l->r + rbytes);
+        if (nb) memcpy(bdst, btmp, sizeof *btmp * nb);
+        l->binds = nb ? bdst : NULL;
         nvn_hm_put(&dc->rs_lists, &info, l);
     }
     dc->rs_last = info, dc->rs_last_l = l;
@@ -3311,14 +3558,18 @@ static int bind_sig(const VkExec *ex, const VkPipeInfo *info) {
     const uint8_t *e = (const uint8_t *)ex;
     uint8_t *d = dc->RS.body;
     int bd = diff != 0 && dc->RS.on != 2;
+    int fast_mem = draw_fast_on();
     if (st && !fast) dc->BSF.forced++;   // a bind op ran: the body has to be compared
     for (uint32_t i = 0; i < l->n; i++) {
         const RsRange *r = &l->r[i];
-        if (!bd && memcmp(d, e + r->off, r->len)) {
+        if (!bd && (fast_mem ? !mem_eq_fast(d, e + r->off, r->len) : memcmp(d, e + r->off, r->len) != 0)) {
             bd = 1;
             if (st) dc->BSF.cls[rs_class(ex, r)]++;
         }
-        if (bd) memcpy(d, e + r->off, r->len);
+        if (bd) {
+            if (fast_mem) mem_cp_fast(d, e + r->off, r->len);
+            else memcpy(d, e + r->off, r->len);
+        }
         d += r->len;
     }
     if (st && bd) dc->BSF.body++;
@@ -3449,29 +3700,61 @@ static int tex_repeat_on(void) {
 // in bind_d. 0: they must be looked up; the key is kept, and the lookups that follow fill bind_d for the next draw. A
 // storage image notes its binding at every lookup, so a draw with any is always looked up. A memo hit of tex_info has no
 // effect either while the epoch stays, which the key holds.
-static int tex_repeat(VkExec *ex, const VkPipeInfo *info, const TexPend *tp, int n) {
+static int tex_repeat(VkExec *ex, const VkPipeInfo *info, const TexPend *tp, int n, int has_img) {
     DrawCtx *const dc = DC_OF(ex);
     // Only with the texture memo in its normal mode: DKB_TEX_MEMO=0 turns the lookups on, and the check mode (2)
     // must compare every lookup.
     if (!tex_repeat_on() || td_mode() != 1) return dc->TR.info = NULL, 0;
+    if (has_img) return dc->TR.info = NULL, 0;
+    typeof(dc->TR) *k = &dc->TR;
+    if (draw_fast_on()) {
+        descriptor_state(ex);   // a new descriptor context bumps descriptor_serial
+        uint32_t gen = dc->desc_last.slots_gen, ep = vk_texture_epoch(), sg = vk_sampler_gen();
+        int hdr_ok = k->info == info && k->serial == dc->descriptor_serial && k->gen == gen && k->ep == ep && k->sg == sg &&
+                     k->pass == ex->pass_serial && k->nfbl == ex->nfbl &&
+                     (!ex->nfbl || !memcmp(k->fbl, ex->fbl_img, sizeof(VkImage) * (size_t)ex->nfbl));
+        if (hdr_ok && k->tex_serial == ex->tex_serial) return 1;
+        uint32_t nh = 0;
+        int same = hdr_ok;
+        for (int t = 0; t < n; t++) {
+            if (tp[t].img) return k->info = NULL, 0;
+            const uint64_t *ts = ex->tex[tp[t].st];
+            int base = tp[t].r->slot;
+            for (uint32_t j = 0; j < tp[t].cnt; j++) {
+                int slot = base + (int)j;
+                uint64_t hv = slot >= 0 && slot < 128 ? ts[slot] : 0;
+                if (same && (nh >= k->nh || k->h[nh] != hv)) same = 0;
+                k->h[nh++] = hv;
+            }
+        }
+        if (same && k->nh == nh) {
+            k->tex_serial = ex->tex_serial;
+            return 1;
+        }
+        k->info = info, k->nh = nh, k->serial = dc->descriptor_serial, k->gen = gen, k->ep = ep, k->sg = sg;
+        k->pass = ex->pass_serial, k->nfbl = ex->nfbl, k->tex_serial = ex->tex_serial;
+        if (ex->nfbl) memcpy(k->fbl, ex->fbl_img, sizeof(VkImage) * (size_t)ex->nfbl);
+        return 0;
+    }
     uint64_t h[MAX_DESC];
     uint32_t nh = 0;
     for (int t = 0; t < n; t++) {
         if (tp[t].img) return dc->TR.info = NULL, 0;
-        for (uint32_t k = 0; k < tp[t].cnt; k++) {
-            int slot = tp[t].r->slot + (int)k;
+        for (uint32_t j = 0; j < tp[t].cnt; j++) {
+            int slot = tp[t].r->slot + (int)j;
             h[nh++] = slot >= 0 && slot < 128 ? ex->tex[tp[t].st][slot] : 0;
         }
     }
     descriptor_state(ex);   // a new descriptor context bumps descriptor_serial
     uint32_t gen = vk_texture_slots_gen(), ep = vk_texture_epoch(), sg = vk_sampler_gen();
-    typeof(dc->TR) *k = &dc->TR;
     if (k->info == info && k->nh == nh && k->serial == dc->descriptor_serial && k->gen == gen && k->ep == ep && k->sg == sg &&
         k->pass == ex->pass_serial && k->nfbl == ex->nfbl && !memcmp(k->fbl, ex->fbl_img, sizeof(VkImage) * (size_t)ex->nfbl) &&
-        !memcmp(k->h, h, sizeof(uint64_t) * nh))
+        !memcmp(k->h, h, sizeof(uint64_t) * nh)) {
+        k->tex_serial = ex->tex_serial;
         return 1;
+    }
     k->info = info, k->nh = nh, k->serial = dc->descriptor_serial, k->gen = gen, k->ep = ep, k->sg = sg;
-    k->pass = ex->pass_serial, k->nfbl = ex->nfbl;
+    k->pass = ex->pass_serial, k->nfbl = ex->nfbl, k->tex_serial = ex->tex_serial;
     memcpy(k->fbl, ex->fbl_img, sizeof k->fbl), memcpy(k->h, h, sizeof(uint64_t) * nh);
     return 0;
 }
@@ -3500,15 +3783,26 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         if (skip == 2) memcpy(dc->RS.pcnt, dc->RS.cnt, sizeof dc->RS.cnt), dc->RS.pncnt = dc->RS.ncnt;
         dc->RS.rec = 1, dc->RS.ncnt = 0, dc->RS.cnt_over = 0, dc->RS.volatile_ = 0, dc->RS.cmds = 0;
     }
-    uint32_t n_sets = info->n_sets ? info->n_sets : 1;
-    uint32_t lo[2] = {0, 0}, hi[2] = {0, 0}, d0[2] = {0, 0};   // bindings [lo, hi) and first descriptor per set
-    int need_w = 0;                                             // a set without a template: fill the write structs
-    for (uint32_t s = 0, i0 = 0; s < n_sets; s++) {
-        uint32_t i1 = i0;
-        while (i1 < info->n_bindings && (n_sets == 1 || info->bindings[i1].set == s)) i1++;
-        lo[s] = i0, hi[s] = i1, i0 = i1;
-        if (i1 > lo[s] && !info->tpl[s]) need_w = 1;
+    int fast = draw_fast_on();
+    const RsList *rl = fast ? rs_list(ex, info) : NULL;
+    uint32_t n_sets, lo[2], hi[2], d0[2] = {0, 0};
+    int need_w;
+    if (rl && rl->binds) {
+        n_sets = rl->n_sets;
+        lo[0] = rl->lo[0], lo[1] = rl->lo[1], hi[0] = rl->hi[0], hi[1] = rl->hi[1];
+        d0[0] = rl->d0[0], d0[1] = rl->d0[1], need_w = rl->need_w;
+    } else {
+        n_sets = info->n_sets ? info->n_sets : 1;
+        lo[0] = lo[1] = hi[0] = hi[1] = 0;
+        need_w = 0;                                             // a set without a template: fill the write structs
+        for (uint32_t s = 0, i0 = 0; s < n_sets; s++) {
+            uint32_t i1 = i0;
+            while (i1 < info->n_bindings && (n_sets == 1 || info->bindings[i1].set == s)) i1++;
+            lo[s] = i0, hi[s] = i1, i0 = i1;
+            if (i1 > lo[s] && !info->tpl[s]) need_w = 1;
+        }
     }
+    const RsBind *rbs = rl ? rl->binds : NULL;
     uint32_t nd = 0;
     int tex_locked = 0;
     TexPend *const tp = dc->bind_tp;
@@ -3518,9 +3812,9 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         const GfxShaderRes *r = b->res;
         uint32_t cnt = b->count ? b->count : 1;
         if (nd + cnt > MAX_DESC) rt_fatal("vk: %u descriptors exceed the replay's %d", nd + cnt, MAX_DESC);
-        if (n_sets == 2 && i == lo[1]) d0[1] = nd;
+        if (!rbs && n_sets == 2 && i == lo[1]) d0[1] = nd;
         VkDescSlot *o = &d[nd];
-        int st = nvn_stage_of(b->stage), kind = 0;   // kind: 0 buffer, 1 image, 2 texel buffer view
+        int st = rbs ? rbs[i].st : nvn_stage_of(b->stage), kind = 0;   // kind: 0 buffer, 1 image, 2 texel buffer view
         if (st < 0) rt_fatal("vk_exec: unsupported descriptor stage %u", b->stage);
         if (b->kind == VK_PIPE_SUPPORT) {
             float in[3];
@@ -3576,7 +3870,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     // make 70% of the draws in runs of thousands, and DKB_BIND_STATS put what differs between those draws in the
     // uniform ranges (58%) and the storage table (16%), in the textures 0.1%. The lookups took 92 ns of a draw's 780
     // (DKB_DRAW_PROFILE); with the reuse 13.
-    if (ntp && gfx && tex_repeat(ex, info, tp, ntp)) {
+    if (ntp && gfx && tex_repeat(ex, info, tp, ntp, rl ? rl->has_img : 0)) {
         DP_MARK(DP_SIG);
         ntp = 0;
         DP_MARK(DP_TEX);
@@ -3642,7 +3936,8 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         }
         if (s ? info->push1 : info->push) {
             uint32_t n = gfx && push_skip_on() ? dbytes : 0;
-            if (n && dc->B.ds_pushed[s] && dc->DS.pn[s] == n && !memcmp(dc->DS.psig[s], ds, n)) {
+            if (n && dc->B.ds_pushed[s] && dc->DS.pn[s] == n &&
+                (fast ? mem_eq_fast(dc->DS.psig[s], ds, n) : !memcmp(dc->DS.psig[s], ds, n))) {
                 dc->BS.push_skip++;
                 continue;
             }
@@ -3652,7 +3947,11 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             dc->RS.cmds++;
             if (gfx) {
                 dc->B.ds_bound[s] = VK_NULL_HANDLE, dc->B.ds_pushed[s] = n != 0;
-                if (n) dc->DS.pn[s] = n, memcpy(dc->DS.psig[s], ds, n);
+                if (n) {
+                    dc->DS.pn[s] = n;
+                    if (fast) mem_cp_fast(dc->DS.psig[s], ds, n);
+                    else memcpy(dc->DS.psig[s], ds, n);
+                }
             }
         } else if (!gfx || s > 1) {
             VkDescriptorSet set = alloc_set(ex, s ? info->set_layout1 : info->set_layout);
@@ -3669,26 +3968,39 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             if (dyn_mode < 0) dyn_mode = rt_knob("DYN_UBO", vk_caps.intel ? "0" : "1");   // same default as vk_pipeline.c ensure_init
             int dyn_split = RT_KNOB_ON(dyn_mode);
             uint32_t dyn[VK_DYN_UBO_MAX], ndyn = 0;
-            for (uint32_t i = i0, j = d0[s]; i < i1; i++) {
-                const VkPipeBinding *b = &info->bindings[i];
-                uint32_t cnt = b->count ? b->count : 1;
-                if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)
-                    for (uint32_t k = 0; k < cnt && ndyn < VK_DYN_UBO_MAX; k++) {
-                        VkDescriptorBufferInfo *bi = &d[j + k].buffer;
-                        VkDeviceSize base = bi->range == VK_WHOLE_SIZE || !dyn_split ? bi->offset
-                                                                                     : bi->offset & ~(VkDeviceSize)0x7fffffff;
-                        dyn[ndyn++] = (uint32_t)(bi->offset - base);
-                        bi->offset = base;
-                    }
-                j += cnt;
+            if (rl) {
+                ndyn = rl->ndyn[s];
+                for (uint32_t m = 0; m < ndyn; m++) {
+                    VkDescriptorBufferInfo *bi = &d[rl->dyn_d[s][m]].buffer;
+                    VkDeviceSize base = bi->range == VK_WHOLE_SIZE || !dyn_split ? bi->offset
+                                                                                 : bi->offset & ~(VkDeviceSize)0x7fffffff;
+                    dyn[m] = (uint32_t)(bi->offset - base);
+                    bi->offset = base;
+                }
+            } else {
+                for (uint32_t i = i0, j = d0[s]; i < i1; i++) {
+                    const VkPipeBinding *b = &info->bindings[i];
+                    uint32_t cnt = b->count ? b->count : 1;
+                    if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)
+                        for (uint32_t k = 0; k < cnt && ndyn < VK_DYN_UBO_MAX; k++) {
+                            VkDescriptorBufferInfo *bi = &d[j + k].buffer;
+                            VkDeviceSize base = bi->range == VK_WHOLE_SIZE || !dyn_split ? bi->offset
+                                                                                         : bi->offset & ~(VkDeviceSize)0x7fffffff;
+                            dyn[ndyn++] = (uint32_t)(bi->offset - base);
+                            bi->offset = base;
+                        }
+                    j += cnt;
+                }
             }
-            memcpy(alld + nall, dyn, ndyn * sizeof *dyn), nall += ndyn;
+            if (skip == 2 && ndyn) memcpy(alld + nall, dyn, ndyn * sizeof *dyn), nall += ndyn;
             VkDescriptorSet set = dc->B.ds_last[s];
-            if (!set || dc->B.ds_last_layout[s] != sl || dc->DS.n[s] != dbytes || memcmp(dc->DS.sig[s], ds, dbytes)) {
+            if (!set || dc->B.ds_last_layout[s] != sl || dc->DS.n[s] != dbytes ||
+                (fast ? !mem_eq_fast(dc->DS.sig[s], ds, dbytes) : memcmp(dc->DS.sig[s], ds, dbytes) != 0)) {
                 set = alloc_set(ex, sl);
                 write_set(info, s, set, ds, w, i0, i1);
                 dc->B.ds_last[s] = set, dc->B.ds_last_layout[s] = sl, dc->DS.n[s] = dbytes;
-                memcpy(dc->DS.sig[s], ds, dbytes);
+                if (fast) mem_cp_fast(dc->DS.sig[s], ds, dbytes);
+                else memcpy(dc->DS.sig[s], ds, dbytes);
                 dc->BS.set_new++;
                 dc->RS.cmds++;
             } else {
@@ -3963,6 +4275,18 @@ static int light_quad_fault_skip(const VkExec *ex, const GfxShader *vs, const Gf
         if (on && !nv) rt_log("vk: DKB_FIX_VS_FAULT=all: the light quad skip (#196, #197) also runs on this non-NVIDIA GPU");
     }
     if (!on || !vs || !fs) return 0;
+    static int nine = -1;
+    if (nine < 0) nine = !strcasecmp(cfg_value("DKB_FIX_VS_FAULT"), "9");
+    if (draw_fast_on() && !nine && ex->prog && ex->prog->serial && stage_origin_on()) {
+        const typeof(dc->stagem[0]) *m = stagem_get(dc, ex->prog, 1, 1);
+        if (!m->vs_fault || m->vs_fault == 3) return 0;
+        if (m->vs_fault == 1) {
+            warn_once(W_FAULT_SKIP2, "the light quads of NVN 2 vertex stage ba1dd1e7ae8abb33 are skipped (#196, #197)");
+            return 1;
+        }
+        warn_once(W_FAULT_SKIP, "the draws of NVN 2 vertex stage 45e1a6f48cb7872e are skipped (#304)");
+        return 1;
+    }
     const uint64_t vs_origin = stage_origin(dc, ex->prog, NVN_STAGE_VS);
     if (vs_origin == 0xba1dd1e7ae8abb33ull) {
         warn_once(W_FAULT_SKIP2, "the light quads of NVN 2 vertex stage ba1dd1e7ae8abb33 are skipped (#196, #197)");
@@ -3976,8 +4300,6 @@ static int light_quad_fault_skip(const VkExec *ex, const GfxShader *vs, const Gf
     // #9 route (new game, first guide movie, mining tunnel, 600 s) ran twice without a fault here with those quads
     // drawn (RTX 5060 Ti), and a player's runs drew them past the first guide movie and later layers on Turing, Ada
     // and Blackwell (#62). Skipping them hid the particles they draw.
-    static int nine = -1;
-    if (nine < 0) nine = !strcasecmp(cfg_value("DKB_FIX_VS_FAULT"), "9");
     if (!nine) return 0;
     if (gfx_spirv_lq_folded(vs)) return 0;   // gfx_spirv.c folds this vertex stage, so its draws are drawn
     if (vs_origin == 0xcae0ef8e9fe9147full) {
@@ -4058,7 +4380,7 @@ static void descriptor_state(VkExec *ex) {
 
 static void memo_key(const VkExec *ex, uint32_t gen, MemoKey *k) {
     DrawCtx *const dc = DC_OF(ex);
-    k->prog = ex->prog, k->serial = ex->prog->serial, k->gen = gen, k->tex_serial = ex->tex_serial;
+    k->prog = ex->prog, k->serial = ex->prog->serial, k->gen = gen, k->tex_serial = ex->tex_serial, k->pipe_serial = ex->pipe_serial;
     memcpy(k->tex[0], ex->tex[NVN_STAGE_VS], sizeof k->tex[0]), memcpy(k->tex[1], ex->tex[NVN_STAGE_FS], sizeof k->tex[1]);
     memcpy(k->img[0], ex->img[NVN_STAGE_VS], sizeof k->img[0]), memcpy(k->img[1], ex->img[NVN_STAGE_FS], sizeof k->img[1]);
     k->geometry_input = dc->geometry_input;
@@ -4073,9 +4395,14 @@ static int memo_match(VkExec *ex, uint32_t gen, MemoKey *k) {
     DrawCtx *const dc = DC_OF(ex);
     descriptor_state(ex);
     if (!dc->SM.valid) return 0;
-    if (k->prog != ex->prog || k->serial != ex->prog->serial || k->gen != gen || k->geometry_input != dc->geometry_input ||
-        memcmp(&k->pipe, &ex->pipe, sizeof k->pipe))
+    int fast = draw_fast_on();
+    if (k->prog != ex->prog || k->serial != ex->prog->serial || k->gen != gen || k->geometry_input != dc->geometry_input)
         return 0;
+    if (!(fast && k->pipe_serial == ex->pipe_serial)) {
+        if (memcmp(&k->pipe, &ex->pipe, sizeof k->pipe)) return 0;
+        k->pipe_serial = ex->pipe_serial;
+    }
+    if (fast && k->tex_serial == ex->tex_serial) return 1;
     if (dc->geometry_input && (memcmp(k->tex[2], ex->tex[NVN_STAGE_GS], sizeof k->tex[2]) ||
                            memcmp(k->img[2], ex->img[NVN_STAGE_GS], sizeof k->img[2]))) return 0;
     if (k->tex_serial == ex->tex_serial) return 1;
@@ -4113,29 +4440,67 @@ static int geometry_draw(VkExec *ex, uint32_t prim) {
     DrawCtx *const dc = DC_OF(ex);
     dc->geometry_input = 0;
     if (native_gs_on() && ex->prog) {   // native failures keep VS/FS; ordinary stages retain their separate opt-in
-        const uint8_t *ctl, *code, *fctl, *fcode;
-        uint32_t len, flen, sph[5];
-        uint64_t origin = 0;
-        if (!find_stage_origin(dc, ex->prog, NVN_STAGE_GS, &ctl, &code, &len, &origin)) return 0;
-        if (origin) {
-            if (len < 0x30 + 0x60 || !find_stage(dc, ex->prog, NVN_STAGE_FS, &fctl, &fcode, &flen) ||
-                vk_geometry_input(prim) != GFX_GEOMETRY_TRIANGLES) return 0;
-            memcpy(sph, code + 0x30, sizeof sph);
-            if (!(sph[0] & (1u << 24)) || sph[2] >> 24 != 1 || (sph[3] >> 24 & 15) != 7 || (sph[4] & 0xfff) != 1) {
-                warn_once(W_GEOMETRY, "native GS: a stage outside the passthrough subset keeps the vertex and fragment path");
+        if (draw_fast_on() && ex->prog->serial && stage_origin_on()) {
+            typeof(dc->stagem[0]) *m = stagem_get(dc, ex->prog, 1, 1);
+            // ngs_state: 0 unknown, 1 no GS, 2 ordinary GS (origin 0), 3 native GS ineligible (short or no FS),
+            // 4 native GS non-passthrough (warn), 5 native GS valid passthrough triangles.
+            if (!m->ngs_state) {
+                int gi = m->idx[NVN_STAGE_GS];
+                if (gi < 0) m->ngs_state = 1;
+                else if (!m->origin[NVN_STAGE_GS]) m->ngs_state = 2;
+                else if (m->len[NVN_STAGE_GS] < 0x30 + 0x60 || m->idx[NVN_STAGE_FS] < 0) m->ngs_state = 3;
+                else {
+                    uint32_t sph[5];
+                    const uint8_t *code = (const uint8_t *)(uintptr_t)ex->prog->sd[gi].data;
+                    memcpy(sph, code + 0x30, sizeof sph);
+                    m->ngs_state = (!(sph[0] & (1u << 24)) || sph[2] >> 24 != 1 || (sph[3] >> 24 & 15) != 7 ||
+                                    (sph[4] & 0xfff) != 1)
+                                       ? 4
+                                       : 5;
+                }
+            }
+            if (m->ngs_state == 1 || m->ngs_state == 3) return 0;
+            if (m->ngs_state == 5) {
+                if (vk_geometry_input(prim) != GFX_GEOMETRY_TRIANGLES) return 0;
+                if (!vk_geometry_supported()) {
+                    warn_once(W_GEOMETRY, "native GS: the device has no geometryShader: draws that need one are skipped");
+                    __atomic_fetch_add(&gfx_counters.draws_skipped, 1, __ATOMIC_RELAXED);
+                    return -1;
+                }
+                dc->geometry_input = GFX_GEOMETRY_TRIANGLES;
+                return 1;
+            }
+            if (m->ngs_state == 4) {
+                if (vk_geometry_input(prim) == GFX_GEOMETRY_TRIANGLES)
+                    warn_once(W_GEOMETRY, "native GS: a stage outside the passthrough subset keeps the vertex and fragment path");
                 return 0;
             }
-            // Metal has no geometry stage (MoltenVK): skip before the pipeline and the lowered GS are built. The vertex
-            // and fragment stages alone would draw black, so the draw is dropped and counted in draws skipped.
-            if (!vk_geometry_supported()) {
-                warn_once(W_GEOMETRY, "native GS: the device has no geometryShader: draws that need one are skipped");
-                __atomic_fetch_add(&gfx_counters.draws_skipped, 1, __ATOMIC_RELAXED);
-                return -1;
+            // ngs_state == 2: ordinary GS falls through to experimental_geometry_on() below.
+        } else {
+            const uint8_t *ctl, *code, *fctl, *fcode;
+            uint32_t len, flen, sph[5];
+            uint64_t origin = 0;
+            if (!find_stage_origin(dc, ex->prog, NVN_STAGE_GS, &ctl, &code, &len, &origin)) return 0;
+            if (origin) {
+                if (len < 0x30 + 0x60 || !find_stage(dc, ex->prog, NVN_STAGE_FS, &fctl, &fcode, &flen) ||
+                    vk_geometry_input(prim) != GFX_GEOMETRY_TRIANGLES) return 0;
+                memcpy(sph, code + 0x30, sizeof sph);
+                if (!(sph[0] & (1u << 24)) || sph[2] >> 24 != 1 || (sph[3] >> 24 & 15) != 7 || (sph[4] & 0xfff) != 1) {
+                    warn_once(W_GEOMETRY, "native GS: a stage outside the passthrough subset keeps the vertex and fragment path");
+                    return 0;
+                }
+                // Metal has no geometry stage (MoltenVK): skip before the pipeline and the lowered GS are built. The vertex
+                // and fragment stages alone would draw black, so the draw is dropped and counted in draws skipped.
+                if (!vk_geometry_supported()) {
+                    warn_once(W_GEOMETRY, "native GS: the device has no geometryShader: draws that need one are skipped");
+                    __atomic_fetch_add(&gfx_counters.draws_skipped, 1, __ATOMIC_RELAXED);
+                    return -1;
+                }
+                dc->geometry_input = GFX_GEOMETRY_TRIANGLES;
+                return 1;
             }
-            dc->geometry_input = GFX_GEOMETRY_TRIANGLES;
-            return 1;
+            // An ordinary GS still follows its own opt-in and validation below.
         }
-        // An ordinary GS still follows its own opt-in and validation below.
     }
     if (!experimental_geometry_on() || !ex->prog) return 0;
     int found = 0, portable = 0;
@@ -4275,6 +4640,16 @@ static void merge_pick(VkExec *ex, VkPipeState *s, VkPipeline *p, const VkPipeIn
             dc->MR.c4[1] = dc->MR.c4[0];   // the stages read the same blocks: one copy
             continue;
         }
+        int fast = draw_fast_on();
+        if (fast) {
+            // Contiguous 256-byte c4 blocks already lying in one snapshot region bind straight from the arena with zero
+            // CPU copies and one snapshot lookup instead of n.
+            uint64_t base = dc->MR.addr[k][0];
+            int contig = base != 0 && dc->MR.size[k][0] == MERGE_BLOCK;
+            for (int i = 1; contig && i < n; i++)
+                contig = dc->MR.size[k][i] == MERGE_BLOCK && dc->MR.addr[k][i] == base + (uint64_t)i * MERGE_BLOCK;
+            if (contig && vk_usnap_find(base, (uint64_t)n * MERGE_BLOCK, LIM.ubo_align, &dc->MR.c4[k])) continue;
+        }
         VkBuffer b;
         VkDeviceSize o;
         uint8_t *dst = scratch(ex, (uint64_t)n * MERGE_BLOCK, &b, &o);
@@ -4284,8 +4659,12 @@ static void merge_pick(VkExec *ex, VkPipeState *s, VkPipeline *p, const VkPipeIn
             // As ubo_info would bind it: the snapshot range at the uniform alignment; a zero size binds zeros.
             if (sz && !(src = vk_usnap_bytes_aligned(dc->MR.addr[k][i], sz, LIM.ubo_align)))
                 goto fall;
-            if (sz) memcpy(dst, src, sz);
-            if (sz < MERGE_BLOCK) memset(dst + sz, 0, MERGE_BLOCK - sz);
+            if (fast && sz == MERGE_BLOCK) {
+                memcpy(dst, src, MERGE_BLOCK);
+            } else {
+                if (sz) memcpy(dst, src, sz);
+                if (sz < MERGE_BLOCK) memset(dst + sz, 0, MERGE_BLOCK - sz);
+            }
         }
         dc->MR.c4[k] = (VkDescriptorBufferInfo){b, o, (VkDeviceSize)n * MERGE_BLOCK};
     }
@@ -4393,13 +4772,9 @@ static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
     if (!geometry_feedback_safe(ex, vs, gs)) return 0;
     uint32_t fbl = feedback_prepare(ex, fs);
     twin_prepare(ex, vs, fs);   // after feedback_prepare: its restart keeps the twins fresh (pass_restart)
-    VkPipeState s = ex->pipe;
-    s.vs = vs, s.fs = fs, s.gs = gs;
-    s.feedback = (uint8_t)((fbl & 0xff ? 1 : 0) | (fbl & 0x100 ? 2 : 0));
-    s.prim = (uint8_t)prim;
-    s.depth_minus_w = (uint8_t)(nvn_depth_minus_w() != 0);
-    s.y_flip = 1;
-    s.prim_restart = (uint8_t)(restart != 0);
+    uint8_t fb_bits = (uint8_t)((fbl & 0xff ? 1 : 0) | (fbl & 0x100 ? 2 : 0));
+    uint8_t dmw = (uint8_t)(nvn_depth_minus_w() != 0);
+    uint8_t pr = (uint8_t)(restart != 0);
     const VkPipeInfo *info = NULL;
     int pending;
     // A draw of at most 6 vertices over half the render area or more (a full-screen triangle or quad, a tile) waits for
@@ -4425,17 +4800,37 @@ static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
     const char *why = NULL;
     uint64_t w0 = 0;
     int pmemo = pipe_memo_on(dc);
-    uint32_t pm_set = pm_set_of(&s);
-    int pm_same_as_prev = pmemo && dc->PM.valid && !memcmp(&dc->PM.s, &s, sizeof s);
+    VkPipeState s;
+    const VkPipeState *sp = NULL;
+    int pm_same_as_prev = pmemo && draw_fast_on() && dc->PM.valid && dc->PM.pipe_serial == ex->pipe_serial &&
+                          dc->PM.s.vs == vs && dc->PM.s.fs == fs && dc->PM.s.gs == gs && dc->PM.s.prim == (uint8_t)prim &&
+                          dc->PM.s.feedback == fb_bits && dc->PM.s.depth_minus_w == dmw && dc->PM.s.prim_restart == pr;
     int pm_hit = pm_same_as_prev;
-    if (pmemo && !pm_hit) {
-        const VkPipeInfo *wi = pm_way_find(dc, pm_set, &s);
-        if (wi) pm_hit = 1, dc->PM.valid = 1, dc->PM.s = s, dc->PM.info = wi, dc->B.st_is_pm = 0;
+    if (pm_hit) {
+        sp = &dc->PM.s;
+    } else {
+        s = ex->pipe;
+        s.vs = vs, s.fs = fs, s.gs = gs;
+        s.feedback = fb_bits;
+        s.prim = (uint8_t)prim;
+        s.depth_minus_w = dmw;
+        s.y_flip = 1;
+        s.prim_restart = pr;
+        sp = &s;
+        pm_same_as_prev = pmemo && dc->PM.valid && !memcmp(&dc->PM.s, &s, sizeof s);
+        if (pm_same_as_prev) dc->PM.pipe_serial = ex->pipe_serial;
+        pm_hit = pm_same_as_prev;
+        if (pmemo && !pm_hit) {
+            uint32_t pm_set = pm_set_of(&s);
+            const VkPipeInfo *wi = pm_way_find(dc, pm_set, &s);
+            if (wi) pm_hit = 1, dc->PM.valid = 1, dc->PM.pipe_serial = ex->pipe_serial, dc->PM.s = s, dc->PM.info = wi, dc->B.st_is_pm = 0;
+        }
     }
     if (pm_hit) {
         info = dc->PM.info, pending = 0;
         p = __atomic_load_n(&info->pipeline, __ATOMIC_ACQUIRE);
     } else {
+        uint32_t pm_set = pm_set_of(&s);
         w0 = t0 ? t0 : wait_ms ? kern_now_ns() : 0;   // the clock is read only for draws that may wait
         p = vk_pipeline_graphics_async(&s, &info, &pending, wait_ms);
         if (t0) {
@@ -4454,7 +4849,7 @@ static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
         dc->PM.valid = !pending && p && info;
         dc->B.st_is_pm = 0;
         if (dc->PM.valid) {
-            dc->PM.s = s, dc->PM.info = info;
+            dc->PM.pipe_serial = ex->pipe_serial, dc->PM.s = s, dc->PM.info = info;
             pm_way_put(dc, pm_set, &s, info);
         }
     }
@@ -4471,13 +4866,16 @@ static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
     DP_MARK(DP_PIPE);
     if (pending) return 0;   // a background worker is building it: the draw is skipped until it is ready
     if (!p || !info) return warn_once(W_PIPELINE, "a graphics pipeline could not be created: draws with it are skipped"), 0;
-    if (dc->MR.want) merge_pick(ex, &s, &p, &info);   // a run of draws that may go as instances (vk_exec_draw_merge)
+    if (dc->MR.want) {
+        if (sp != &s) s = *sp, sp = &s;
+        merge_pick(ex, &s, &p, &info);   // a run of draws that may go as instances (vk_exec_draw_merge)
+    }
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     if (!(pm_same_as_prev && dc->B.st_valid && dc->B.st_is_pm && !dc->MR.want)) {
-        if (!dc->B.st_valid || memcmp(&dc->B.st, &s, sizeof s)) {
-            vk_pipeline_set_dynamic_from(ex->cb, &s, dc->B.st_valid ? &dc->B.st : NULL);   // only what differs from B.st
+        if (!dc->B.st_valid || memcmp(&dc->B.st, sp, sizeof *sp)) {
+            vk_pipeline_set_dynamic_from(ex->cb, sp, dc->B.st_valid ? &dc->B.st : NULL);   // only what differs from B.st
             ex->recorded++;
-            dc->B.st = s, dc->B.st_valid = 1;
+            dc->B.st = *sp, dc->B.st_valid = 1;
         }
         dc->B.st_is_pm = dc->PM.valid && !dc->MR.want;
     }
@@ -4486,16 +4884,16 @@ static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
     record_fixed(ex);
     repeat_stats(ex, info);
     DP_MARK(DP_STATE);
-    merge_prep(ex, info, &s);
+    merge_prep(ex, info, sp);
     if (dc->DP.active) dc->DP.t = dp_now();   // the detector's snapshot stays out of the profile
     bind_resources(ex, info);
     if (fbl & ex->fb_dirty) feedback_barrier(ex);
-    feedback_written(ex, &s);
+    feedback_written(ex, sp);
     DP_MARK(DP_FEEDBACK);
     bind_vertex_buffers(ex);
     DP_MARK(DP_VB);
     if (dc->DIG.on) dig_state(dc);
-    if (vk_dump_armed && !OFF_MAIN(dc)) vk_dump_draw(ex, &s, p, info);   // the dump is the replay thread's
+    if (vk_dump_armed && !OFF_MAIN(dc)) vk_dump_draw(ex, sp, p, info);   // the dump is the replay thread's
     vk_exec_oq_draw(ex);
     DP_MARK(DP_TAIL);
     return 1;
@@ -5232,15 +5630,15 @@ static void op_draw_impl(VkExec *ex, uint32_t op, const void *payload) {
         switch (b->kind) {
         case 0:
             memcpy(&bs, b->bytes, sizeof bs);
-            if (bs.target < 8) ex->pipe.blend[bs.target] = bs;
+            if (bs.target < 8) ex->pipe.blend[bs.target] = bs, ex->pipe_serial++;
             break;
-        case 1: memcpy(&ex->pipe.color, b->bytes, sizeof ex->pipe.color); break;
-        case 2: memcpy(&ex->pipe.chmask, b->bytes, sizeof ex->pipe.chmask); break;
-        case 3: memcpy(&ex->pipe.ms, b->bytes, sizeof ex->pipe.ms); break;
-        case 4: memcpy(&ex->pipe.poly, b->bytes, sizeof ex->pipe.poly); break;
-        case 5: memcpy(&ex->pipe.ds, b->bytes, sizeof ex->pipe.ds); break;
+        case 1: memcpy(&ex->pipe.color, b->bytes, sizeof ex->pipe.color); ex->pipe_serial++; break;
+        case 2: memcpy(&ex->pipe.chmask, b->bytes, sizeof ex->pipe.chmask); ex->pipe_serial++; break;
+        case 3: memcpy(&ex->pipe.ms, b->bytes, sizeof ex->pipe.ms); ex->pipe_serial++; break;
+        case 4: memcpy(&ex->pipe.poly, b->bytes, sizeof ex->pipe.poly); ex->pipe_serial++; break;
+        case 5: memcpy(&ex->pipe.ds, b->bytes, sizeof ex->pipe.ds); ex->pipe_serial++; break;
         case 6: memcpy(&ex->point_size, b->bytes, sizeof ex->point_size); break;
-        case 7: memcpy(&ex->pipe.alpha_ref, b->bytes, sizeof ex->pipe.alpha_ref); break;
+        case 7: memcpy(&ex->pipe.alpha_ref, b->bytes, sizeof ex->pipe.alpha_ref); ex->pipe_serial++; break;
         }
         break;
     }
@@ -5249,6 +5647,7 @@ static void op_draw_impl(VkExec *ex, uint32_t op, const void *payload) {
         if (b->first < 0 || b->n < 0 || b->first + b->n > 16) break;
         memset(ex->pipe.vattr, 0, sizeof ex->pipe.vattr);   // MNG: the new list replaces the old one
         memcpy(&ex->pipe.vattr[b->first], b->st, sizeof(uint32_t) * (size_t)b->n);
+        ex->pipe_serial++;
         break;
     }
     case OP_BIND_VSTREAM: {
@@ -5257,6 +5656,7 @@ static void op_draw_impl(VkExec *ex, uint32_t op, const void *payload) {
         memset(ex->pipe.vstream, 0, sizeof ex->pipe.vstream);
         memcpy(&ex->pipe.vstream[b->first], b->st, sizeof(vs_st) * (size_t)b->n);
         dc->B.vstr_dirty = 0xFFFFu;
+        ex->pipe_serial++;
         break;
     }
     case OP_BIND_VBUF: {
@@ -5311,6 +5711,7 @@ static void op_draw_impl(VkExec *ex, uint32_t op, const void *payload) {
             b->stage < 3 && b->first + b->n > ex->tex_hi[b->stage])
             ex->tex_hi[b->stage] = (uint8_t)(b->first + b->n);
         ex->tex_serial++;
+        if (b->stage == NVN_STAGE_FS) ex->fs_tex_serial++;
         dc->bind_gen++;
         break;
     }
@@ -5460,18 +5861,38 @@ int vk_exec_draw_merge(VkExec *ex, const op_hdr *const *ops, int n, int *draws) 
     if (!__atomic_load_n(&LIM.ubo_max, __ATOMIC_ACQUIRE)) limits_init();
     int cap = LIM.ubo_max / MERGE_BLOCK < MERGE_MAX ? (int)(LIM.ubo_max / MERGE_BLOCK) : MERGE_MAX;
     p_bind_buf c4[2] = {ex->ubo[NVN_STAGE_VS][1], ex->ubo[NVN_STAGE_FS][1]};
-    int nd = 0, used = 0;   // the run's draws, and the ops through its last draw
+    uint8_t c4_set[2] = {0, 0};
+    int nd = 0, used = 0, fast = draw_fast_on();   // the run's draws, and the ops through its last draw
     for (int k = 0; k < n && nd < cap; k++) {
         const void *a = nvn_op_payload(ops[k]);
         if (ops[k]->op == OP_DRAW_IDX) {
-            if ((k && memcmp(a, d0, sizeof *d0)) || c4[0].size > MERGE_BLOCK || c4[1].size > MERGE_BLOCK) break;
+            if (k) {
+                if (fast) {
+                    const p_draw_idx *dk = a;
+                    if (dk->prim != d0->prim || dk->itype != d0->itype || dk->count != d0->count ||
+                        dk->base_vertex != d0->base_vertex || dk->instances != d0->instances ||
+                        dk->base_instance != d0->base_instance || dk->ibuf != d0->ibuf)
+                        break;
+                } else if (memcmp(a, d0, sizeof *d0)) {
+                    break;
+                }
+            }
+            if (c4[0].size > MERGE_BLOCK || c4[1].size > MERGE_BLOCK) break;
             for (int st = 0; st < 2; st++) dc->MR.addr[st][nd] = c4[st].addr, dc->MR.size[st][nd] = (uint32_t)c4[st].size;
             nd++, used = k + 1;
         } else if (ops[k]->op == OP_BIND_UBO) {
             const p_bind_buf *b = a;
-            if (b->index == 1 && (b->stage == NVN_STAGE_VS || b->stage == NVN_STAGE_FS)) c4[b->stage] = *b;
-            else if (b->stage < 0 || b->stage >= 6 || b->index < 0 || b->index >= 18 || memcmp(b, &ex->ubo[b->stage][b->index], sizeof *b))
+            if (b->index == 1 && (b->stage == NVN_STAGE_VS || b->stage == NVN_STAGE_FS)) {
+                c4[b->stage] = *b;
+                c4_set[b->stage] = 1;
+            } else if (b->stage < 0 || b->stage >= 6 || b->index < 0 || b->index >= 18) {
                 break;
+            } else if (fast) {
+                const p_bind_buf *cur = &ex->ubo[b->stage][b->index];
+                if (cur->stage != b->stage || cur->index != b->index || cur->addr != b->addr || cur->size != b->size) break;
+            } else if (memcmp(b, &ex->ubo[b->stage][b->index], sizeof *b)) {
+                break;
+            }
         } else {
             break;
         }
@@ -5483,8 +5904,19 @@ int vk_exec_draw_merge(VkExec *ex, const op_hdr *const *ops, int n, int *draws) 
     dc->MR.want = dc->MR.took = 0;
     dc->MR.c4[0].buffer = dc->MR.c4[1].buffer = VK_NULL_HANDLE;
     // Not taken: the rest one by one, here, so that the run is looked at once and not again from each of its draws.
-    for (int k = 1; k < used; k++)
-        if (!took || ops[k]->op == OP_BIND_UBO) vk_exec_op_draw(ex, ops[k]->op, nvn_op_payload(ops[k]));
+    // Taken: every OP_BIND_UBO in the run either bound c4 (VS/FS index 1) or repeated ex->ubo verbatim; when the draw
+    // profiler is off, writing only the final c4 values leaves ex identical without replaying up to 512 bind ops.
+    if (took && fast && !dp_on(dc)) {
+        for (int st = 0; st < 2; st++) {
+            if (!c4_set[st]) continue;
+            ex->ubo[st][1] = c4[st];
+            if (2 > ex->ubo_hi[st]) ex->ubo_hi[st] = 2;
+        }
+        dc->bind_gen++;
+    } else {
+        for (int k = 1; k < used; k++)
+            if (!took || ops[k]->op == OP_BIND_UBO) vk_exec_op_draw(ex, ops[k]->op, nvn_op_payload(ops[k]));
+    }
     *draws = nd;
     return used;
 }
@@ -5506,7 +5938,8 @@ void vk_exec_draw_rebase(VkExec *ex) {
     DrawCtx *const dc = DC_OF(ex);
     dc->bind_gen++;
     for (int i = 0; i < 6; i++) dc->ssbo_serial[i]++;
-    dc->SM.valid = 0, dc->PM.valid = 0, dc->TR.info = NULL;
+    dc->SM.valid = 0, dc->PM.valid = 0, dc->TR.info = NULL, dc->TW_MEMO.valid = 0;
+    dc->fb_memo[0].sh = dc->fb_memo[1].sh = dc->fb_memo[2].sh = NULL;
     vk_exec_draw_new_cb(ex);
 }
 
@@ -5528,6 +5961,7 @@ struct DrawCtx *vk_exec_draw_main(void) {
     if (!ready) {
         ready = 1;
         draw_main.bind_gen = 1, draw_main.descriptor_serial = 1, draw_main.frame = &vk_exec_frame;
+        draw_main.stagem_last = -1;
         draw_main.BS.on = draw_main.RS.on = draw_main.DP.on = draw_main.SM.on = draw_main.PM.on = -1;
         draw_main.skip_vs.n = draw_main.skip_fs.n = draw_main.skip_cs.n = -1, draw_main.GCL.on = -1;
     }
@@ -5554,6 +5988,8 @@ static DrawCtx *ctx_new(void) {
     memset(&c->BSF, 0, sizeof c->BSF), memset(&c->DIG, 0, sizeof c->DIG);
     c->pools_created = 0, c->pools_taken = 0;
     c->SM.valid = 0, c->PM.valid = 0, c->RS.info = NULL, c->DP.active = 0;
+    c->stagem_last = -1, c->TW_MEMO.valid = 0;
+    memset(c->fb_memo, 0, sizeof c->fb_memo);
     memset(&c->helper_frame, 0, sizeof c->helper_frame);
     c->frame = &c->helper_frame;
     c->GCL.records = 0;
