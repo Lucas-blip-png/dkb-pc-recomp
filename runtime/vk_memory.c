@@ -7211,6 +7211,15 @@ static void pre_map_rawify(PreMap *m, const PoolRec *r, uint64_t lo, uint64_t hi
     out = old, cout = ocap;
 }
 
+// A staged write of an already-submitted part: stale snapshots over its range turn raw-only first (before the cpu_read
+// early returns, so a pool flipped to CPU reads loses them too), then the range joins the raw-only list.
+static void pre_scan_staged_sealed(PoolRec *r, uint64_t off, uint64_t size) {
+    uint64_t lim = r->import_hi - r->import_lo, hi = off + size;
+    if (hi > lim) hi = lim;
+    if (off < hi) pre_map_rawify(&spre_map, r, off, hi);
+    pre_scan_staged_range(r, off, size, &pre_sraw, &pre_nsraw, &pre_csraw);
+}
+
 // A write of an already-submitted part: the map's segments over its range turn raw-only, and the uncovered rest joins
 // the raw-only list.
 static void pre_raw_add(MRange **a, int *n, int *cap, PreMap *m, PoolRec *r, uint64_t off, uint64_t size) {
@@ -7252,7 +7261,7 @@ static void pre_collect_uncovered(uint32_t upto, MRange **wtmp, int *nwtmp, int 
         if (stw[i].tag > upto) { deferred = 1; s_adv = 0; continue; }
         if (s_adv) stw_scan = i + 1;
         if ((uint64_t)stw[i].tag < pre_sealed_next) {
-            pre_scan_staged_range(stw[i].r, stw[i].off, stw[i].size, &pre_sraw, &pre_nsraw, &pre_csraw);
+            pre_scan_staged_sealed(stw[i].r, stw[i].off, stw[i].size);
             continue;
         }
         pre_scan_staged_range(stw[i].r, stw[i].off, stw[i].size, stmp, nstmp, cstmp);
@@ -7279,7 +7288,7 @@ static void pre_collect_uncovered(uint32_t upto, MRange **wtmp, int *nwtmp, int 
             if (w->s[i].tag > upto) { w_def = deferred = 1; ss_adv = 0; continue; }
             if (ss_adv) w->scan_s = i + 1;
             if ((uint64_t)w->s[i].tag < pre_sealed_next) {
-                pre_scan_staged_range(w->s[i].r, w->s[i].off, w->s[i].size, &pre_sraw, &pre_nsraw, &pre_csraw);
+                pre_scan_staged_sealed(w->s[i].r, w->s[i].off, w->s[i].size);
                 continue;
             }
             pre_scan_staged_range(w->s[i].r, w->s[i].off, w->s[i].size, stmp, nstmp, cstmp);
@@ -7334,7 +7343,7 @@ static void pre_reserve_end(uint64_t fence) {
         pre_nsraw = 0;
         for (int i = 0; i < nstw; i++) {
             if ((uint64_t)stw[i].tag < pre_sealed_next) {   // already submitted: raw write-back, kept out of snapshots
-                pre_scan_staged_range(stw[i].r, stw[i].off, stw[i].size, &pre_sraw, &pre_nsraw, &pre_csraw);
+                pre_scan_staged_sealed(stw[i].r, stw[i].off, stw[i].size);
                 continue;
             }
             pre_scan_staged_range(stw[i].r, stw[i].off, stw[i].size, &stmp, &nstmp, &cstmp);

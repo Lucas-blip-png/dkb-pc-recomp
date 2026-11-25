@@ -506,6 +506,28 @@ static void test_pre_map_and_telescoping(void) {
     CHECK(!pre_raw_only(&wpre_map, &pool, 0xd000, 0xd800) && !pre_raw_only(&wpre_map, &pool, 0xe800, 0xf000));
     CHECK(pre_map_covers(&wpre_map, &pool, 0xd000, 0xf000));
 
+    // 5a''. The staged twin: a tag-1 staged write is snapshotted, then a late tag-0 staged write (already submitted)
+    //       lands on it; the overlap turns raw-only, the rest keeps its snapshot.
+    reset_pre_state();
+    staged_fault = 1;
+    pre_sealed_next = 1;
+    uint8_t cr_all[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    PoolRec spool = {.kind = POOL_IMPORT, .lo = 0x400000, .size = 0x8000, .import_lo = 0x400000, .import_hi = 0x408000,
+                     .sfeed = 1, .cpu_read = cr_all};
+    wb_range_add(&stw, &nstw, &cstw, &spool, 0x1000, 0x3000);
+    stw[nstw - 1].tag = 1;
+    pre_walk_writes++;
+    pre_prepare_part(UINT32_MAX, 19);
+    CHECK(pre_map_covers(&spre_map, &spool, 0x1000, 0x4000) && !pre_raw_only(&spre_map, &spool, 0x1000, 0x4000));
+    npre_pend = 0;
+    wb_range_add(&stw, &nstw, &cstw, &spool, 0x2000, 0x1000);
+    stw[nstw - 1].tag = 0;
+    pre_walk_writes++;
+    pre_prepare_part(UINT32_MAX, 20);
+    CHECK(pre_raw_only(&spre_map, &spool, 0x2000, 0x3000));
+    CHECK(!pre_raw_only(&spre_map, &spool, 0x1000, 0x2000) && !pre_raw_only(&spre_map, &spool, 0x3000, 0x4000));
+    npre_pend = 0;
+
     // 5b. Two held parts simultaneously in flight (H1 tag 0, H2 tag 1) + cheap DKB_MIRROR_DIFF=0 bypass.
     reset_pre_state();
     wb_tag = 0;

@@ -172,6 +172,7 @@ def main():
         definition(mem, 'static void pre_scan_staged_range('),
         definition(mem, 'static void pre_map_rawify('),
         definition(mem, 'static void pre_raw_add('),
+        definition(mem, 'static void pre_scan_staged_sealed('),
         definition(mem, 'static int pre_need_scan('),
         definition(mem, 'static void pre_collect_uncovered('),
         definition(mem, 'static void pre_prepare_part('),
