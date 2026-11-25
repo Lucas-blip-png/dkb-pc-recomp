@@ -1,0 +1,18 @@
+#version 450
+
+// Reset disjoint 20-byte NVN 2 indirect draw records ({0, 1, 0, 0, 0}) at 4-byte-aligned word offsets.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) writeonly restrict buffer Destination { uint dst[]; };
+layout(std430, binding = 1) readonly restrict buffer Offsets { uint word_offsets[]; };
+layout(push_constant) uniform Params { uint first_record; uint count; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= count) return;
+    uint base = word_offsets[first_record + idx];
+    dst[base + 0u] = 0u;
+    dst[base + 1u] = 1u;
+    dst[base + 2u] = 0u;
+    dst[base + 3u] = 0u;
+    dst[base + 4u] = 0u;
+}

@@ -465,6 +465,57 @@ static int drop_many_cases(void) {
     return fails;
 }
 
+// wr_prune with a long already-sorted prefix (>= 256 ranges, as vk_usnap_drop_many appends) followed by an unsorted
+// tail: the 3-way merge path must produce the exact same merged list as sorting all ranges together.
+static int sorted_prefix_cases(void) {
+    int fails = 0;
+    Wrote *wr = U.wr;
+    int cwr = U.cwr;
+    done_fence = 0;
+    for (int round = 0; round < 32; round++) {
+        int nold = (int)(rnd() % 600), npref = 256 + (int)(rnd() % 1024), ntail = (int)(rnd() % 800);
+        uint64_t f = (uint64_t)(round + 10);
+        done_fence = f - 3;
+        int n0 = 0, n1 = 0;
+        uint64_t cur = 0x700000000ull;
+        for (int i = 0; i < nold; i++) {
+            cur += 32 + (rnd() % 256);
+            Wrote w = {cur, cur + 16 + (rnd() % 20), f - (rnd() % 5)};
+            ref_wr[n0++] = w, loc_wr[n1++] = w;
+        }
+        cur = 0x700000000ull;
+        for (int i = 0; i < npref; i++) {
+            cur += 20 + (rnd() % 64);
+            Wrote w = {cur, cur + 20, f - (rnd() % 5 == 0 ? 4 : 0)};
+            loc_wr[n1++] = w;
+            ref_wr[n0++] = w;
+        }
+        // Put a reversed pair at the front of ref_wr's new entries so ref_wr always takes the standard full-sort path.
+        for (int i = 0; i < ntail; i++) {
+            uint64_t lo = 0x700000000ull + (rnd() % (1 << 16)) * 4;
+            Wrote w = {lo, lo + 4 + (rnd() % 128), f - (rnd() % 4)};
+            loc_wr[n1++] = w;
+            ref_wr[n0++] = w;
+        }
+        if (npref >= 2) {
+            Wrote tmp = ref_wr[nold];
+            ref_wr[nold] = ref_wr[nold + npref - 1];
+            ref_wr[nold + npref - 1] = tmp;
+        }
+        U.wr = ref_wr, U.cwr = 400000, U.nwr = n0, nwr_sorted = nold, wr_prune();
+        int nr0 = U.nwr;
+        U.wr = loc_wr, U.cwr = 400000, U.nwr = n1, nwr_sorted = nold, wr_prune();
+        int nr1 = U.nwr;
+        checks++;
+        if (nr0 != nr1 || memcmp(ref_wr, loc_wr, (size_t)nr0 * sizeof *ref_wr)) {
+            fails++, printf("FAIL: sorted_prefix round %d: %d vs %d ranges\n", round, nr1, nr0);
+            break;
+        }
+    }
+    U.wr = wr, U.cwr = cwr, U.nwr = 0, nwr_sorted = 0;
+    return fails;
+}
+
 int main(void) {
     int fails = 0;
     U.cwr = 2000000, U.wr = malloc(sizeof *U.wr * (size_t)U.cwr);
@@ -482,6 +533,7 @@ int main(void) {
         fails += coalesce_cases();
         fails += drop_local_cases();
         fails += drop_many_cases();
+        fails += sorted_prefix_cases();
     }
     printf("usnap prune: %d checks, %d failures\n", checks, fails);
     return fails != 0;

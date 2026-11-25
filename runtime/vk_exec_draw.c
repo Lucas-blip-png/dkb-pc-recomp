@@ -39,6 +39,9 @@
 #include "vk_exec_draw_helper.h"
 #include "vk_spec.h"
 #include "platform/platform.h"
+#ifndef VK_EXEC_DRAW_HELPER
+#include "indirect_reset_spv.h"
+#endif
 
 // A helper thread records part of a submission into its own command buffer while the replay thread and the other
 // helpers record the parts before and after it. What lets them run without a lock is that the state a draw changes
@@ -674,10 +677,192 @@ static void note_written(VkExec *ex, uint64_t addr, uint64_t size, VkBuffer buf)
     vk_mem_gpu_pending(addr, size & ~VK_WB_LAZY);   // the flag travels in the list only
 }
 
+// Batched note_written for nr disjoint runs [runs[i][0], runs[i][1]) written through buf: reserves both arrays once so
+// an indirect reset of thousands of records does not rehash written_slot six times per reset.
+static void note_written_many(VkExec *ex, const uint64_t (*runs)[2], uint32_t nr, VkBuffer buf) {
+    DrawCtx *const dc = DC_OF(ex);
+    if (!nr || (IS_HELPER(dc) && vk_spec_fail(VK_SPEC_WRITE))) return;
+    CbRes *r = cb_res(ex);
+    int total = r->nwritten + (int)nr;
+    if (total > r->cwritten) {
+        int want = r->cwritten ? r->cwritten : 64;
+        while (want < total) want *= 2;
+        Range *p = realloc(r->written, (size_t)want * sizeof *p);
+        if (!p) rt_fatal("vk: out of memory");
+        r->written = p, r->cwritten = want;
+    }
+    uint32_t need = (uint32_t)total * 2u + 1u;
+    if (need > r->written_slots) {
+        uint32_t slots = r->written_slots ? r->written_slots * 2 : 256;
+        while (slots < need) slots *= 2;
+        uint32_t *table = calloc(slots, sizeof *table);
+        if (!table) rt_fatal("vk: out of memory");
+        uint32_t mask = slots - 1;
+        for (int i = 0; i < r->nwritten; i++) {
+            uint32_t at = written_hash(r->written[i].addr, r->written[i].size) & mask;
+            while (table[at]) at = (at + 1) & mask;
+            table[at] = (uint32_t)i + 1;
+        }
+        free(r->written_slot);
+        r->written_slot = table, r->written_slots = slots;
+    }
+    uint32_t mask = r->written_slots - 1;
+    uint32_t *table = r->written_slot;
+    const int shadow = vk_mem_shadow_on();
+    if (!r->nwritten) {
+        for (uint32_t i = 0; i < nr; i++) {
+            uint64_t addr = runs[i][0], size = runs[i][1] - addr;
+            if (!size) continue;
+            uint32_t at = written_hash(addr, size) & mask;
+            while (table[at]) at = (at + 1) & mask;
+            r->written[r->nwritten++] = (Range){addr, size, buf};
+            table[at] = (uint32_t)r->nwritten;
+            if (shadow) vk_mem_gpu_pending(addr, size);
+        }
+        return;
+    }
+    for (uint32_t i = 0; i < nr; i++) {
+        uint64_t addr = runs[i][0], size = runs[i][1] - addr;
+        if (!size) continue;
+        uint32_t at = written_hash(addr, size) & mask;
+        int found = 0;
+        for (; table[at]; at = (at + 1) & mask) {
+            Range *w = &r->written[table[at] - 1];
+            if (w->addr == addr && (w->size & ~VK_WB_LAZY) == size) {
+                w->size &= ~VK_WB_LAZY;
+                if (w->buf != buf) w->buf = VK_NULL_HANDLE;
+                found = 1;
+                break;
+            }
+        }
+        if (found) continue;
+        r->written[r->nwritten++] = (Range){addr, size, buf};
+        table[at] = (uint32_t)r->nwritten;
+        if (shadow) vk_mem_gpu_pending(addr, size);
+    }
+}
+
+#ifndef VK_EXEC_DRAW_HELPER
+// Compute pipeline for disjoint NVN 2 indirect-record resets (runtime/shaders/indirect_reset.comp): one dispatch per
+// target buffer instead of thousands of 20-byte vkCmdCopyBuffer regions.
+static struct {
+    int tried;
+    PFN_vkCmdPushDescriptorSetKHR push;
+    VkDescriptorSetLayout set;
+    VkPipelineLayout layout;
+    VkPipeline pipeline;
+} reset_pipe;
+
+static int reset_pipe_init(VkCtx *c) {
+    if (reset_pipe.tried) return reset_pipe.pipeline != VK_NULL_HANDLE;
+    reset_pipe.tried = 1;
+    reset_pipe.push = vk_pipeline_push_fn();
+    if (!reset_pipe.push) return 0;
+    VkDescriptorSetLayoutBinding bindings[2] = {
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+    };
+    VkDescriptorSetLayoutCreateInfo set = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+                                           .bindingCount = 2, .pBindings = bindings};
+    if (vkCreateDescriptorSetLayout(c->device, &set, NULL, &reset_pipe.set) != VK_SUCCESS) return 0;
+    VkPushConstantRange push = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 2 * sizeof(uint32_t)};
+    VkPipelineLayoutCreateInfo layout = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                         .setLayoutCount = 1, .pSetLayouts = &reset_pipe.set,
+                                         .pushConstantRangeCount = 1, .pPushConstantRanges = &push};
+    if (vkCreatePipelineLayout(c->device, &layout, NULL, &reset_pipe.layout) != VK_SUCCESS) return 0;
+    VkShaderModule shader;
+    VkShaderModuleCreateInfo module = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                       .codeSize = sizeof indirect_reset_spv, .pCode = indirect_reset_spv};
+    if (vkCreateShaderModule(c->device, &module, NULL, &shader) != VK_SUCCESS) return 0;
+    VkComputePipelineCreateInfo pipe = {
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                  .module = shader, .pName = "main"},
+        .layout = reset_pipe.layout
+    };
+    VkResult result = vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &pipe, NULL, &reset_pipe.pipeline);
+    vkDestroyShaderModule(c->device, shader, NULL);
+    return result == VK_SUCCESS;
+}
+
+static void reset_pipe_destroy(VkCtx *c) {
+    if (reset_pipe.pipeline) vkDestroyPipeline(c->device, reset_pipe.pipeline, NULL);
+    if (reset_pipe.layout) vkDestroyPipelineLayout(c->device, reset_pipe.layout, NULL);
+    if (reset_pipe.set) vkDestroyDescriptorSetLayout(c->device, reset_pipe.set, NULL);
+    memset(&reset_pipe, 0, sizeof reset_pipe);
+}
+
+static int reset_pipe_dispatch(VkExec *ex, VkBuffer dst, const uint64_t *offs, uint32_t n) {
+    if (n < 64) return 0;
+    VkCtx *c = vk_ctx();
+    if (!reset_pipe_init(c)) return 0;
+    uint32_t groups = (n + 63u) / 64u;
+    if (groups > c->props.limits.maxComputeWorkGroupCount[0]) return 0;
+    uint64_t align = c->props.limits.minStorageBufferOffsetAlignment;
+    if (align < 4) align = 4;
+    if (align > 256) return 0;   // scratch() guarantees 256-byte alignment
+    uint64_t max_range = c->props.limits.maxStorageBufferRange;
+    uint64_t off_bytes = (uint64_t)n * sizeof(uint32_t);
+    if (off_bytes > max_range) return 0;
+    // Require strictly increasing, 4-byte-aligned, non-overlapping destination offsets so threads never race even on
+    // aliased virtual-pool mappings.
+    for (uint32_t i = 0; i < n; i++) {
+        if ((offs[i] & 3u) != 0) return 0;
+        if (i && offs[i] < offs[i - 1] + NVN_INDIRECT_RESET_RECORD_BYTES) return 0;
+    }
+    uint64_t base_off = offs[0] - (offs[0] % align);
+    uint64_t range = (offs[n - 1] + NVN_INDIRECT_RESET_RECORD_BYTES) - base_off;
+    if (range > max_range) return 0;
+    VkBuffer off_buf;
+    VkDeviceSize off_pos;
+    uint32_t *words = (uint32_t *)scratch(ex, off_bytes, &off_buf, &off_pos);
+    for (uint32_t i = 0; i < n; i++) words[i] = (uint32_t)((offs[i] - base_off) >> 2);
+    CbRes *resources = cb_res(ex);
+    Chunk *chunk = &resources->chunks[resources->nchunks - 1];
+    if (vmaFlushAllocation(c->vma, chunk->alloc, off_pos, off_bytes) != VK_SUCCESS)
+        rt_fatal("vk: flushing indirect-reset offsets failed");
+    VkDescriptorBufferInfo infos[2] = {{dst, base_off, range}, {off_buf, off_pos, off_bytes}};
+    VkWriteDescriptorSet writes[2] = {
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &infos[0]},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &infos[1]},
+    };
+    uint32_t params[2] = {0u, n};
+    vkCmdBindPipeline(ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, reset_pipe.pipeline);
+    DC_OF(ex)->B.pipe[1] = VK_NULL_HANDLE;
+    rec_push(reset_pipe.push, ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, reset_pipe.layout, 0, 2, writes);
+    vkCmdPushConstants(ex->cb, reset_pipe.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, params);
+    vkCmdDispatch(ex->cb, groups, 1, 1);
+    ex->recorded += 4;
+    return 1;
+}
+#else
+static int reset_pipe_dispatch(VkExec *ex, VkBuffer dst, const uint64_t *offs, uint32_t n) {
+    (void)ex, (void)dst, (void)offs, (void)n;
+    return 0;
+}
+#endif
+
+typedef struct { uint64_t gen, lo, hi; } ResetMapCtx;
+
 static int reset_mapped(void *context, uint64_t addr, uint32_t size) {
     (void)context;
     VkMemSpan span;
     return vk_mem_resolve(addr, size, &span);
+}
+
+static int reset_mapped_fast(void *context, uint64_t addr, uint32_t size) {
+    ResetMapCtx *ctx = context;
+    uint64_t g = vk_mem_pool_gen();
+    if (ctx->lo < ctx->hi && g == ctx->gen && addr >= ctx->lo && addr + size <= ctx->hi) return 1;
+    VkMemSpan span;
+    uint64_t lo = 0, hi = 0, base = 0;
+    if (!vk_mem_resolve_range(addr, size, &span, &lo, &hi, &base)) return 0;
+    if (lo < hi && vk_mem_pool_gen() == g) ctx->gen = g, ctx->lo = lo, ctx->hi = hi;
+    else ctx->lo = ctx->hi = 0;
+    return 1;
 }
 
 #define U64_LESS(x, y) (*(x) < *(y))
@@ -727,6 +912,99 @@ static int reset_sort(const uint64_t *pointers, uint32_t count, uint64_t **out, 
     for (uint32_t i = 1; i < m && !overlap; i++) overlap = sorted[i] - sorted[i - 1] < NVN_INDIRECT_RESET_RECORD_BYTES;
     *out = sorted, *n = m;
     return overlap;
+}
+
+// DKB_RESET_FAST: O(n) sorted check + 11-bit LSD radix sort on (addr - lo) >> 2 (nvn_indirect_reset_targets already
+// verified 4-byte alignment of every nonnull target), falling back to sort_u64 when the address span exceeds 32 GiB.
+static int reset_sort_fast(const uint64_t *pointers, uint32_t count, uint64_t **out, uint32_t *n) {
+    static uint64_t *sorted, *sbuf;   // the replaying thread's
+    static size_t cap, scap;
+    if (cap < count) {
+        free(sorted);
+        cap = count;
+        if (!(sorted = malloc(cap * sizeof *sorted))) rt_fatal("vk: out of memory checking indirect-reset targets");
+    }
+    uint32_t m = 0;
+    uint64_t lo = UINT64_MAX, hi = 0, prev = 0;
+    int unsorted = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t a = pointers[i];
+        if (!a) continue;
+        if (m && a < prev) unsorted = 1;
+        prev = a;
+        if (a < lo) lo = a;
+        if (a > hi) hi = a;
+        sorted[m++] = a;
+    }
+    if (unsorted && m >= 2) {
+        uint64_t span = (hi - lo) >> 2;
+        if (m >= 64 && !(span >> 33)) {
+            if (scap < m) {
+                uint64_t *t = realloc(sbuf, (size_t)m * sizeof *t);
+                if (!t) rt_fatal("vk: out of memory sorting indirect-reset targets");
+                sbuf = t, scap = m;
+            }
+            int passes = span < (1u << 11) ? 1 : span < (1u << 22) ? 2 : 3;
+            uint64_t *src = sorted, *dst = sbuf;
+            for (int pass = 0; pass < passes; pass++) {
+                int shift = pass * 11;
+                uint32_t cnt[2048] = {0};
+                for (uint32_t i = 0; i < m; i++) cnt[((src[i] - lo) >> 2) >> shift & 2047]++;
+                uint32_t sum = 0;
+                for (uint32_t k = 0; k < 2048; k++) {
+                    uint32_t c = cnt[k];
+                    cnt[k] = sum, sum += c;
+                }
+                for (uint32_t i = 0; i < m; i++) dst[cnt[((src[i] - lo) >> 2) >> shift & 2047]++] = src[i];
+                uint64_t *t = src;
+                src = dst, dst = t;
+            }
+            if (src != sorted) memcpy(sorted, src, (size_t)m * sizeof *sorted);
+        } else {
+            sort_u64(sorted, m, &sbuf, &scap);
+        }
+    }
+    int overlap = 0;
+    for (uint32_t i = 1; i < m && !overlap; i++) overlap = sorted[i] - sorted[i - 1] < NVN_INDIRECT_RESET_RECORD_BYTES;
+    *out = sorted, *n = m;
+    return overlap;
+}
+
+static void reset_group_flush(VkExec *ex, void *pool, VkBuffer buf, int cls, const uint64_t *offs, uint32_t ng,
+                              const uint64_t (*runs)[2], uint32_t nr, uint64_t bytes, VkBuffer *src_buf,
+                              VkDeviceSize *src_off, uint64_t *n_dispatched) {
+    DrawCtx *const dc = DC_OF(ex);
+    const uint64_t rec = NVN_INDIRECT_RESET_RECORD_BYTES;
+    if (reset_pipe_dispatch(ex, buf, offs, ng)) {
+        (*n_dispatched) += ng;
+    } else {
+        if (!*src_buf) {
+            static const uint32_t record[5] = {0, 1, 0, 0, 0};
+            memcpy(scratch(ex, sizeof record, src_buf, src_off), record, sizeof record);
+            CbRes *resources = cb_res(ex);
+            Chunk *chunk = &resources->chunks[resources->nchunks - 1];
+            if (vmaFlushAllocation(vk_ctx()->vma, chunk->alloc, *src_off, sizeof record) != VK_SUCCESS)
+                rt_fatal("vk: flushing indirect-reset values failed");
+        }
+        VkBufferCopy regions[128];
+        uint32_t nregions = 0;
+        for (uint32_t i = 0; i < ng; i++) {
+            if (nregions && (nregions == sizeof regions / sizeof regions[0] ||
+                             offs[i] < regions[nregions - 1].dstOffset + rec)) {
+                vkCmdCopyBuffer(ex->cb, *src_buf, buf, nregions, regions);
+                ex->recorded++;
+                nregions = 0;
+            }
+            regions[nregions++] = (VkBufferCopy){*src_off, offs[i], rec};
+        }
+        if (nregions) {
+            vkCmdCopyBuffer(ex->cb, *src_buf, buf, nregions, regions);
+            ex->recorded++;
+        }
+    }
+    vk_mem_count(cls, VK_MUSE_GPU_WRITE, bytes);
+    vk_mem_gpu_wrote_many(pool, buf, runs, nr);
+    note_written_many(ex, runs, nr, buf);
 }
 
 // The bookkeeping of the records the reset just copied, sorted and disjoint: once per run of records that touch end
@@ -802,8 +1080,22 @@ int vk_exec_reset_indirect(VkExec *ex, uint64_t list_addr, uint32_t descriptor_b
     if (IN_SLICE(dc)) return vk_exec_par_hazard(), 0;   // its barriers and reads are the primary's (sliced passes)
     NvnIndirectResetList list;
     if (!nvn_indirect_reset_list(list_addr, descriptor_bytes, first, count, &list)) return 0;
-    uint64_t *pointers = malloc(list.bytes);
-    if (!pointers) rt_fatal("vk: out of memory reading an indirect-reset pointer list");
+    static int fast_mode = -1;
+    const int fast = knob_on(&fast_mode, "RESET_FAST", "1");
+    static uint64_t *ptrs_buf;
+    static uint32_t ptrs_cap;
+    uint64_t *pointers;
+    if (fast) {
+        if (ptrs_cap < list.count) {
+            uint64_t *p = realloc(ptrs_buf, list.bytes);
+            if (!p) rt_fatal("vk: out of memory reading an indirect-reset pointer list");
+            ptrs_buf = p, ptrs_cap = list.count;
+        }
+        pointers = ptrs_buf;
+    } else {
+        pointers = malloc(list.bytes);
+        if (!pointers) rt_fatal("vk: out of memory reading an indirect-reset pointer list");
+    }
     static int cpu_list = -1;
     if (cpu_list < 0) cpu_list = cfg_int("DKB_RESET_CPU_LIST");
     VkMemSpan list_span;
@@ -833,12 +1125,92 @@ int vk_exec_reset_indirect(VkExec *ex, uint64_t list_addr, uint32_t descriptor_b
             rt_log("vk: indirect-reset list: %llu of %llu guest copies differ from the GPU's (%u entries)",
                    (unsigned long long)n_diff, (unsigned long long)n_cmp, list.count);
         free(guest);
-        if (!have) { free(pointers); return 0; }
+        if (!have) { if (!fast) free(pointers); return 0; }
     }
+    ResetMapCtx rmctx = {0};
     if ((!have && !vk_exec_read_buffer(ex, list.begin, list.bytes, pointers)) ||
-        !nvn_indirect_reset_targets(&list, pointers, reset_mapped, NULL)) {
-        free(pointers);
+        !nvn_indirect_reset_targets(&list, pointers, fast ? reset_mapped_fast : reset_mapped, fast ? &rmctx : NULL)) {
+        if (!fast) free(pointers);
         return 0;
+    }
+    // DKB_RESET_BATCH (on by default; 0 as before; ab alternates with the A/B blocks): disjoint targets are copied in
+    // address order, so the copies into one buffer share commands of up to 128 regions, and their bookkeeping is done
+    // once per run of adjacent records (reset_batch) instead of once per record.
+    static int batch_mode = -1;
+    uint32_t nsorted = 0;
+    uint64_t *sorted = NULL;
+    int ordered;
+    if (knob_on(&batch_mode, "RESET_BATCH", "1"))
+        ordered = fast ? reset_sort_fast(pointers, list.count, &sorted, &nsorted)
+                       : reset_sort(pointers, list.count, &sorted, &nsorted);
+    else ordered = reset_targets_overlap(pointers, list.count);
+    int batch = sorted && !ordered;   // overlapping targets keep their input order, one barrier apart, as before
+    if (batch && fast) {
+        const uint64_t rec = NVN_INDIRECT_RESET_RECORD_BYTES;
+        static uint64_t *g_offs;
+        static uint64_t (*runs)[2];
+        static uint32_t g_cap;
+        static uint64_t n_resets, n_records, n_runs, n_dispatched;
+        if (g_cap < nsorted) {
+            uint64_t *o = realloc(g_offs, (size_t)nsorted * sizeof *o);
+            uint64_t (*r)[2] = o ? realloc(runs, (size_t)nsorted * sizeof *r) : NULL;
+            if (!o || !r) rt_fatal("vk: out of memory batching indirect-reset writes");
+            g_offs = o, runs = r, g_cap = nsorted;
+        }
+        vk_exec_barrier(ex);   // the reset writes follow every earlier access to the records
+        uint64_t c_gen = 0, c_lo = 0, c_hi = 0, c_base = 0;
+        VkMemSpan c_span = {0};
+        int c_valid = 0, unbacked = 0;
+        void *g_pool = NULL;
+        VkBuffer g_buf = VK_NULL_HANDLE, src_buf = VK_NULL_HANDLE;
+        VkDeviceSize src_off = 0;
+        int g_cls = 0;
+        uint32_t g_n = 0, nr = 0, g_r0 = 0;
+        uint64_t g_bytes = 0;
+        for (uint32_t i = 0; i < nsorted; i++) {
+            uint64_t addr = sorted[i];
+            VkMemSpan span;
+            if (c_valid && addr >= c_lo && addr + rec <= c_hi && vk_mem_pool_gen() == c_gen) {
+                span = c_span;
+                span.offset = addr - c_base;
+            } else {
+                uint64_t lo = 0, hi = 0, base = 0, g = vk_mem_pool_gen();
+                int ok = vk_mem_resolve_range(addr, rec, &span, &lo, &hi, &base);
+                if (!ok && !unbacked) rt_fatal("vk: an indirect-reset mapping changed during replay");
+                if (ok) VK_MEM_USE(span);
+                if (!ok || !span.buffer) {
+                    unbacked = 1, c_valid = 0;
+                    continue;
+                }
+                if (lo < hi && vk_mem_pool_gen() == g)
+                    c_gen = g, c_lo = lo, c_hi = hi, c_base = base, c_span = span, c_valid = 1;
+                else c_valid = 0;
+            }
+            if (g_n && (span.pool != g_pool || span.buffer != g_buf || span.cls != g_cls)) {
+                reset_group_flush(ex, g_pool, g_buf, g_cls, g_offs, g_n, (const uint64_t (*)[2])(runs + g_r0),
+                                  nr - g_r0, g_bytes, &src_buf, &src_off, &n_dispatched);
+                g_n = 0, g_bytes = 0, g_r0 = nr;
+            }
+            if (!g_n) g_pool = span.pool, g_buf = span.buffer, g_cls = span.cls;
+            if (nr > g_r0 && runs[nr - 1][1] == addr && g_n && span.offset == g_offs[g_n - 1] + rec)
+                runs[nr - 1][1] = addr + rec;
+            else runs[nr][0] = addr, runs[nr][1] = addr + rec, nr++;
+            g_offs[g_n++] = span.offset;
+            g_bytes += rec;
+        }
+        if (g_n)
+            reset_group_flush(ex, g_pool, g_buf, g_cls, g_offs, g_n, (const uint64_t (*)[2])(runs + g_r0),
+                              nr - g_r0, g_bytes, &src_buf, &src_off, &n_dispatched);
+        vk_usnap_drop_many((const uint64_t (*)[2])runs, nr);
+        n_records += nsorted, n_runs += nr;
+        if ((rt_trace & RT_TRACE_PERF) && ++n_resets >= 3600) {
+            rt_log("vk: indirect resets: %.1f records in %.1f runs a reset (%.1f dispatched, DKB_RESET_FAST)",
+                   (double)n_records / (double)n_resets, (double)n_runs / (double)n_resets,
+                   (double)n_dispatched / (double)n_resets);
+            n_resets = n_records = n_runs = n_dispatched = 0;
+        }
+        vk_exec_barrier(ex);   // subsequent shader accesses and indirect reads see every completed record
+        return 1;
     }
     VkBuffer source;
     VkDeviceSize source_offset;
@@ -848,16 +1220,6 @@ int vk_exec_reset_indirect(VkExec *ex, uint64_t list_addr, uint32_t descriptor_b
     Chunk *chunk = &resources->chunks[resources->nchunks - 1];
     if (vmaFlushAllocation(vk_ctx()->vma, chunk->alloc, source_offset, sizeof record) != VK_SUCCESS)
         rt_fatal("vk: flushing indirect-reset values failed");
-    // DKB_RESET_BATCH (on by default; 0 as before; ab alternates with the A/B blocks): disjoint targets are copied in
-    // address order, so the copies into one buffer share commands of up to 128 regions, and their bookkeeping is done
-    // once per run of adjacent records (reset_batch) instead of once per record.
-    static int batch_mode = -1;
-    uint32_t nsorted = 0;
-    uint64_t *sorted = NULL;
-    int ordered;
-    if (knob_on(&batch_mode, "RESET_BATCH", "1")) ordered = reset_sort(pointers, list.count, &sorted, &nsorted);
-    else ordered = reset_targets_overlap(pointers, list.count);
-    int batch = sorted && !ordered;   // overlapping targets keep their input order, one barrier apart, as before
     VkBuffer dst = VK_NULL_HANDLE;
     VkBufferCopy regions[128];
     uint32_t nregions = 0;
@@ -910,7 +1272,7 @@ int vk_exec_reset_indirect(VkExec *ex, uint64_t list_addr, uint32_t descriptor_b
         ex->recorded++;
     }
     if (batch) reset_batch(ex, sorted, nsorted);
-    free(pointers);
+    if (!fast) free(pointers);
     vk_exec_barrier(ex);   // subsequent shader accesses and indirect reads see every completed record
     return 1;
 }
@@ -1092,6 +1454,7 @@ void vk_exec_draw_shutdown(void) {
     memset(SD, 0, sizeof SD);
     kept_release(&draw_main, c);
     helpers_release(c);
+    reset_pipe_destroy(c);
     vk_usnap_shutdown();
     if (standins.ready) {
         vkDestroyBufferView(c->device, standins.zview, NULL);

@@ -354,6 +354,7 @@ void vk_mem_pick(VkMemSpan *sp);
 #define VK_MEM_USE(sp) do { if (vk_mirror_on && (sp).pool) vk_mem_use(&(sp)); } while (0)
 #define VK_MEM_PICK(sp) do { if (vk_mirror_on && (sp).pool) vk_mem_pick(&(sp)); } while (0)
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size);
+void vk_mem_gpu_wrote_many(void *pool, VkBuffer buffer, const uint64_t (*runs)[2], uint32_t n);
 int vk_mem_gpu_kept(const VkMemSpan *sp, uint64_t size);    // as vk_mem_gpu_wrote, but whole pages stay in the mirror; 0: none did
 int vk_mem_kept_overlaps(uint64_t addr, uint64_t size);     // a kept GPU write lies in the range
 uint64_t vk_mem_mirror_gen(void);   // changes whenever a mirror is made or dropped, and with every submission
@@ -427,6 +428,10 @@ const VmaDeviceMemoryCallbacks *vk_headroom_callbacks(void);
 void vk_headroom_start(void);
 void vk_headroom_stop(void);   // before vmaDestroyAllocator
 int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out);   // 1 when all of [addr, addr+size) is backed
+// As vk_mem_resolve, and when the pool overlaps no other index entry sets [*lo_out, *hi_out) and *base_out so a caller
+// scanning addresses in the same pool_gen can reuse the span without resolving each one; zeros them otherwise.
+int vk_mem_resolve_range(uint64_t addr, uint64_t size, VkMemSpan *out,
+                         uint64_t *lo_out, uint64_t *hi_out, uint64_t *base_out);
 // Changes whenever vk_mem_resolve plus VK_MEM_USE may give another span for an address: a pool added, finalized or
 // mapped, a mirror created, refused or forgotten, a submission started.
 uint64_t vk_mem_gen(void);
