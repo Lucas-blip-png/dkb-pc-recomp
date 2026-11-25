@@ -151,9 +151,9 @@ static void thaw_locked(uint64_t r, int why, int writable) {
     if (!f) return;
     uint64_t a = r << FRZ_SHIFT, end = a + FRZ_SIZE, b;
     // A region committed throughout at its freeze is still committed throughout and read-only: nothing decommits a page
-    // or changes its protection without thawing first (commit, decommit and protect below), the lazy heap's fault handler
-    // and mem_touch commit reserved pages only, and the one race left (win32.c lazy_commit) can only make a page
-    // read-write again. A guard that makes one of its pages PAGE_NOACCESS (mem_guard_own, mem_probe_protect) marks the
+    // or changes its protection without thawing first (commit, decommit and protect below), and the lazy heap's fault
+    // handler and mem_touch thaw the region before they commit a reserved page (lazy_commit_thaw), which a region
+    // committed throughout has none of anyway. A guard that makes one of its pages PAGE_NOACCESS (mem_guard_own, mem_probe_protect) marks the
     // region FRZ_HOLES under frz_lock first, so a FRZ_WHOLE region holds no guarded page. So one protection change
     // thaws it, with no query. A query would report the whole run of
     // read-only pages after the address, all the frozen regions above it, and on Windows its cost grows with that run:
@@ -417,7 +417,8 @@ static void prb_record(int kind, uint64_t addr, uint32_t v, int write, int guest
 // The guarded pages and the frozen regions (frz_lock). A guarded page lies in a frozen region when its guard came after
 // the freeze: mem_guard_own, mem_guard_own_range and mem_probe_protect make it PAGE_NOACCESS under frz_lock and mark a
 // FRZ_WHOLE region FRZ_HOLES (frz_holes_locked), so the region's thaw queries its read-only runs and leaves the page
-// alone instead of making the whole 2 MiB read-write; freeze_locked refuses a region that holds one. Every protection
+// alone instead of making the whole 2 MiB read-write; freeze_locked freezes a region that holds one only as FRZ_HOLES, under
+// DKB_FRZ_LAZY=1 and with every guarded page settled (owned, not claimed nor read-probed), and refuses it otherwise. Every protection
 // change of a guarded page is made under frz_lock, as thaws and freezes make their query and protection changes under
 // it, so neither runs between the other's query and protection change:
 // - a page the read probe opens goes back to what it would be without the probe (prb_unprotect): read-only in a
