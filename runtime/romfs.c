@@ -544,12 +544,20 @@ static void ps_prompts_init(void) {
 // is only known once it connects, after the archives are read), the Nintendo ones for nintendo
 // (input_map_face_keys). Runs only when the PlayStation prompts did not load; ABXY loads nothing.
 static void keys_prompts_init(void) {
-    if (ps_prompts_active) return;
     const char *layout = cfg_value("DKB_PAD_LAYOUT");
+    // Bananza has no romfs-patches-xbox (that folder is Tears of the Kingdom's): for pad_layout = xbox_prompts the menu's
+    // "files missing" and "after restart" notes (menu.cpp pad_layout_note) follow the letter folder loaded here, or the
+    // PlayStation prompts, which name the buttons by their own symbols.
+    int want_xbox = !strcasecmp(layout, "xbox_prompts");
+    if (want_xbox) xbox_prompts_ready = xbox_prompts_active = ps_prompts_active;
+    if (ps_prompts_active) return;
     char spec[5], keys[5], dir[2100], manifest[2200];
     input_map_face_spec_cfg(input_pad_layout_pick(layout, 0), spec);
     input_map_face_keys(spec, !strcasecmp(layout, "nintendo"), keys);
-    if (!strcmp(keys, "ABXY")) return;
+    if (!strcmp(keys, "ABXY")) {   // the labels already match the Switch letters: nothing to load
+        if (want_xbox) xbox_prompts_ready = xbox_prompts_active = 1;
+        return;
+    }
     if (strcmp(keys, "ABYX") && strcmp(keys, "BAXY") && strcmp(keys, "BAYX")) {
         rt_log("RomFS overlay: pad_layout = %s and the bind_ lines put the letters %s on the glyphs A, B, X, Y; no prompt "
                "folder covers that, so the prompts name the Switch letters", layout, keys);
@@ -563,7 +571,9 @@ static void keys_prompts_init(void) {
                "name the Switch letters", keys, manifest);
         return;
     }
+    if (want_xbox) xbox_prompts_ready = 1;
     int loaded = font_overlay_load(dir);
+    if (want_xbox) xbox_prompts_active = loaded > 0;
     if (loaded >= 0)
         rt_log("RomFS overlay: %s", loaded ? "Switch letters follow the face buttons" : "Switch letters failed their check; the Switch letters stay");
     if (loaded > 0) rt_log("RomFS overlay: glyphs A, B, X, Y show %s (%s)", keys, dir + strlen(index_dir) + 1);
@@ -606,10 +616,11 @@ static void overlay_init(void) {
                    rt_game_version ? "make_romfs_patches.py" : "dkb_wide_layout.py", out[0], out[1]);
         }
     }
-    xbox_prompts_ready =
+    // Bananza: keys_prompts_init below decides the Xbox prompts from its letter folders.
+    xbox_prompts_ready = rt_game_version &&
         snprintf(xbox, sizeof xbox, "%s/romfs-patches-xbox/manifest.tsv", index_dir) < (int)sizeof xbox &&
         plat_file_exists(xbox);
-    int want_xbox = !strcasecmp(cfg_value("DKB_PAD_LAYOUT"), "xbox_prompts");
+    int want_xbox = rt_game_version && !strcasecmp(cfg_value("DKB_PAD_LAYOUT"), "xbox_prompts");
     if (!patches && want_xbox && xbox_prompts_ready) {
         xbox[strlen(xbox) - strlen("/manifest.tsv")] = 0;
         xbox_prompts_active = overlay_load(xbox, 1);
