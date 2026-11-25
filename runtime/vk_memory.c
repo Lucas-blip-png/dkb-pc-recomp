@@ -969,7 +969,8 @@ int vk_mem_descriptor_key(uint64_t addr, uint64_t size, VkDescKey *out) {
 
 int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out) {
     int fast = mem_fast_on();
-    if (!fast) memset(out, 0, sizeof *out);
+    // The fast path sets every field on a hit; DKB_RESOLVE_CHECK=1 memcmp()s the whole struct, so it needs the padding zeroed too.
+    if (!fast || __builtin_expect(resolve_check_on(), 0)) memset(out, 0, sizeof *out);
     uint64_t g = __atomic_load_n(&pool_gen, __ATOMIC_ACQUIRE), end = addr + size;
     const ResolveHit *h = end >= addr ? rhit_find(g, addr, end) : NULL;
     // A copy without a buffer is a staged pool's (resolve_locked); once the pool was imported after all

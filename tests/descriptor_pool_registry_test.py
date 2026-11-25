@@ -266,7 +266,7 @@ def source():
             'static nvn_hmap desc_buckets', 'static uint32_t slots_gen',
             'static uint32_t samp_gen', 'static uint32_t reg_serial', 'static uint32_t agen[AGEN_N]', 'static uint64_t agen_tb[AGEN_N]', 'static _Thread_local uint64_t view_upto', 'static uint32_t rgen[RGEN_N]', 'static uint64_t chk[CHK_N]',
             'static uint32_t submit_epoch', 'static volatile int32_t tex_ready', 'static int tex_frozen')),
-            (memory, ('static PlatMutex pool_lock', 'static pidx pool_index')),
+            (memory, ('static PlatMutex pool_lock', 'static pidx pool_index', 'static uint64_t pool_gen', 'static int mem_fast_mode')),
             (common, ('static PlatMutex once_lock', 'static PlatCond once_done'))):
         parts += [statement(text, name) for name in names]
     parts += [r'''
@@ -284,7 +284,7 @@ void plat_yield(void) {}   // lock_unfrozen: no pass end is held back here, so n
                 'static uint32_t agen_idx(', 'static inline int tex_is_released(', 'static inline int tb_bucket_stale(',
                 'static void make_key(', 'static int same_but_swizzle(',
                 'static uint32_t rgen_idx(', 'static void rgen_bump(', 'static uint32_t chk_idx(')),
-            (memory, ('static void pool_lock_shared(', 'int vk_mem_descriptor_key(',)),
+            (memory, ('static void pool_lock_shared(', 'static inline int mem_fast_on(', 'int vk_mem_descriptor_key(',)),
             (tex, ('static uint64_t desc_bucket_id(', 'static void desc_bucket_add(', 'static void desc_bucket_del(',
                 'static int descriptor_key(', 'static DescSlot *descriptor_slot(', 'static void descriptor_registered(',
                 'void vk_texture_register(', 'static Tex *slot_resolve(', 'uint64_t vk_texture_slot_token(', 'uint64_t vk_texture_slot_token_stamped(',
