@@ -68,7 +68,7 @@ const GfxShader *gfx_shader_await(int stage,const uint8_t *ctl,const uint8_t *co
     base = base.replace(old_stage, '').replace(old_res, providers)
     # The stage lookup and the slot masks; their tables are draw context members.
     stages = '\n'.join(function(draw, prefix) for prefix in (
-        'static int find_stage_scan(', 'static int find_stage_origin(', 'static int find_stage(', 'static uint64_t stage_origin(',
+        'static int find_stage_scan(', 'static typeof(((DrawCtx *)0)->stagem[0]) *stagem_get(', 'static int find_stage_origin(', 'static int find_stage(', 'static uint64_t stage_origin(',
         'static uint32_t slotm_idx(', 'static int slot_mask_stage(', 'static uint32_t slot_mask_of(',
         'static void slot_mask_learn(')) + '\n'
     where = base.index('static int nvn_stage_of(')

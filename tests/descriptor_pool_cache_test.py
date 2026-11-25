@@ -124,6 +124,7 @@ static uint64_t ubo_ptr(const VkExec *ex,int st,const GfxShaderRes *r) { (void)e
 '''
     # The descriptor switches (DKB_DESC_*), which tex_info_lookup and descriptor_state ask.
     knobs = draw[draw.index('static int knob_on('):draw.index('static const char *const BSF_NAME[')]
+    knobs = '#define DRAW_SHARED\n#define DRAW_SHARED_INIT(...) = __VA_ARGS__\n' + knobs   # draw_fast_mode_val sits in this slice
     # Only the fields consumed by bind_sig are needed; pipeline range discovery
     # supplies one original fragment texture handle range, without a GPU pipeline.
     adapters = r'''

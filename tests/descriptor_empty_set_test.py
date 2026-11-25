@@ -33,7 +33,8 @@ def source(draw):
     if len(consumers.splitlines()) != 2:
         raise RuntimeError('the recorder push consumer seam changed')
     production = '\n'.join(function(draw, prefix) for prefix in (
-        'static int nvn_stage_of(', 'static void write_set(', 'static void bind_resources('))
+        'static inline int mem_eq_fast(', 'static inline void mem_cp_fast(', 'static int nvn_stage_of(', 'static void write_set(',
+        'static void bind_resources('))
     fixture = (ROOT / 'tests/descriptor_empty_set.c').read_text()
     return fixture.replace('@CONTEXT@', context).replace('@RECORDER@', declarations + '\n' + producers).replace(
         '@CONSUMERS@', consumers).replace('@BINDER@', production)

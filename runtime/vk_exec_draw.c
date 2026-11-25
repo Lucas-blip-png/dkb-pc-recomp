@@ -336,6 +336,8 @@ typedef struct DrawCtx {
     struct { uint64_t serial; int st; uint32_t m; } slotm[SLOTM_N];
     struct { uint64_t context, h, tok; uint32_t gen; SubRange r; } FM[FM_N];
     // Per-stage feedback_scan memos (0 vertex, 1 fragment, 2 geometry) so native GS draws do not thrash one slot.
+    // fb_memo, TW_MEMO and tw_cmp key by GfxShader pointer: the shaders gfx_shader_get returns live for the process
+    // (vk_pipeline.c), and gfx_shader_drop_memory, the only free, is the shader probes', which replay no draws.
     struct { const VkExec *ex; const GfxShader *sh; uint64_t desc; uint32_t tser, pass, sg, mask; } fb_memo[3];
     // twin_prepare memo and per-shader compare-sampler presence cache (64-entry direct-mapped).
     struct { int valid; const VkExec *ex; const GfxShader *vs, *fs; uint64_t desc; uint32_t tser, pass, sg; int twv_n; } TW_MEMO;

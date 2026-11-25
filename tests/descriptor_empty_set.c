@@ -69,7 +69,9 @@ uint32_t vk_sampler_gen(void) { return 0; }
 static void dig_bound(DrawCtx *dc) { (void)dc; abort(); }
 static void dig_desc(DrawCtx *dc,const VkPipeInfo *info,const VkDescSlot *d) { (void)dc; (void)info; (void)d; abort(); }
 static uint32_t twin_pass;
-static int tex_repeat(VkExec *ex,const VkPipeInfo *info,const TexPend *tp,int n) { (void)ex; (void)info; (void)tp; (void)n; return 0; }
+static int tex_repeat(VkExec *ex,const VkPipeInfo *info,const TexPend *tp,int n,int has_img) { (void)ex; (void)info; (void)tp; (void)n; (void)has_img; return 0; }
+static int draw_fast_on(void) { return 0; }   // the descriptor build without the RsList metadata
+static const RsList *rs_list(const VkExec *ex,const VkPipeInfo *info) { (void)ex; (void)info; return NULL; }
 static int tex_info_hit(VkExec *ex,const GfxShaderRes *r,uint64_t h,int separate,VkDescriptorImageInfo *out) {
     (void)ex; (void)r; (void)h; (void)separate; (void)out; abort();
 }

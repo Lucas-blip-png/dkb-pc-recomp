@@ -37,7 +37,7 @@ static unsigned checks, failures;
 #define CHECK(c,message) do { checks++; if (!(c)) { failures++; fprintf(stderr,"FAIL: %s\n",message); } } while (0)
 void rt_fatal(const char *fmt,...) { (void)fmt; abort(); }
 static int ab;   // every switch is "ab": on while this is 1
-int rt_knob(const char *name,const char *def) { (void)name; (void)def; return 2; }
+int rt_knob(const char *name,const char *def) { (void)def; return !strcmp(name,"DRAW_FAST") ? 0 : 2; }   // DRAW_FAST off: its in-place c0 update assumes the real bank layout, which the stand-in c0_fill below lacks
 int rt_ab(void) { return ab; }
 // Scratch in host memory: one 4 KiB block per copy, its index as the offset, so equal ranges mean the same copy.
 static uint8_t scratch_mem[1024][4096];
@@ -61,6 +61,7 @@ static void c0_fill(DrawCtx *dc,uint8_t bank[VK_C0_BYTES],int stage,const p_bind
 static DrawCtx ctx;   // the replay thread's: c0_lay NULL (NVN 1), the bank memo B, c0_binst, ssbo_serial
 '''
     knobs = draw[draw.index('static int knob_on('):draw.index('static const char *const BSF_NAME[')]
+    knobs = '#define DRAW_SHARED\n#define DRAW_SHARED_INIT(...) = __VA_ARGS__\n' + knobs   # draw_fast_mode_val sits in this slice
     c0 = function(draw, 'static VkDescriptorBufferInfo c0_info(')
     # vk_texture.c: a slot's kind and serial are what descriptor_registered sets; its key and bucket position
     # (desc_buckets) it keeps across the reset.
