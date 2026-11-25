@@ -774,13 +774,24 @@ static int rec_class(const PoolRec *r) {
          : r->flags & NVN_MEMORY_POOL_FLAGS_CPU_CACHED ? VK_MCLS_HOST_CACHED : VK_MCLS_HOST_UNC;
 }
 
-typedef struct { uint64_t lo, hi, base, end; VkBuffer buf; VmaAllocation alloc; int cls; void *pool; } ResolveHit;
+typedef struct { uint64_t lo, hi, base, end; VkBuffer buf; VmaAllocation alloc; int cls; uint8_t staged; void *pool; } ResolveHit;
 #define RPOOL_N 255   // rmap holds an index
 #define RMAP_BLOCKS 4096
 static _Thread_local ResolveHit rpool[RPOOL_N];
 static _Thread_local int rpool_n;
 static _Thread_local uint64_t rpool_gen;
 static _Thread_local uint8_t rmap[RMAP_BLOCKS];   // the rpool index that held an address of the block last
+static volatile int32_t staged_fallback;          // set before staged_import runs lazy_import; 0 means no staged pool imported after all
+static int mem_fast_mode = -1;
+
+static inline int mem_fast_on(void) {
+    int m = __atomic_load_n(&mem_fast_mode, __ATOMIC_RELAXED);
+    if (__builtin_expect(m < 0, 0)) {
+        m = rt_knob("MEM_FAST", "1");
+        __atomic_store_n(&mem_fast_mode, m, __ATOMIC_RELAXED);
+    }
+    return RT_KNOB_ON(m);
+}
 
 static uint8_t *rmap_slot(uint64_t addr) { return &rmap[(addr >> 16 ^ addr >> 28) & (RMAP_BLOCKS - 1)]; }
 
@@ -892,8 +903,28 @@ done:
 }
 
 int vk_mem_descriptor_key(uint64_t addr, uint64_t size, VkDescKey *out) {
+    if (!addr || !size || addr > UINT64_MAX - size) {
+        memset(out, 0, sizeof *out);
+        return 0;
+    }
+    static _Thread_local struct { uint64_t gen, lo, hi, serial, base; } dkey_memo[2];
+    int fast = mem_fast_on();
+    uint64_t g = 0;
+    if (fast) {
+        g = __atomic_load_n(&pool_gen, __ATOMIC_ACQUIRE);
+        uint64_t end = addr + size;
+        if (dkey_memo[0].gen == g && addr >= dkey_memo[0].lo && end <= dkey_memo[0].hi) {
+            *out = (VkDescKey){dkey_memo[0].serial, dkey_memo[0].serial ? addr - dkey_memo[0].base : addr};
+            return 1;
+        }
+        if (dkey_memo[1].gen == g && addr >= dkey_memo[1].lo && end <= dkey_memo[1].hi) {
+            typeof(dkey_memo[0]) hit = dkey_memo[1];
+            dkey_memo[1] = dkey_memo[0], dkey_memo[0] = hit;
+            *out = (VkDescKey){hit.serial, hit.serial ? addr - hit.base : addr};
+            return 1;
+        }
+    }
     memset(out, 0, sizeof *out);
-    if (!addr || !size || addr > UINT64_MAX - size) return 0;
     int ok = 0;
     pool_lock_shared();
     const pidx_ent *e = pidx_find(&pool_index, addr, size);
@@ -901,9 +932,23 @@ int vk_mem_descriptor_key(uint64_t addr, uint64_t size, VkDescKey *out) {
     if (r && r->kind == POOL_IMPORT) {
         *out = (VkDescKey){0, addr};
         ok = 1;
+        if (fast) {
+            int i = (int)(e - pool_index.e);
+            if ((i == 0 || pool_index.maxhi[i - 1] <= e->lo) && (i + 1 == pool_index.n || pool_index.e[i + 1].lo >= e->hi)) {
+                dkey_memo[1] = dkey_memo[0];
+                dkey_memo[0] = (typeof(dkey_memo[0])){__atomic_load_n(&pool_gen, __ATOMIC_RELAXED), e->lo, e->hi, 0, 0};
+            }
+        }
     } else if (r && r->kind == POOL_PHYS) {
         *out = (VkDescKey){r->storage_serial, addr - r->lo};
         ok = 1;
+        if (fast) {
+            int i = (int)(e - pool_index.e);
+            if ((i == 0 || pool_index.maxhi[i - 1] <= e->lo) && (i + 1 == pool_index.n || pool_index.e[i + 1].lo >= e->hi)) {
+                dkey_memo[1] = dkey_memo[0];
+                dkey_memo[0] = (typeof(dkey_memo[0])){__atomic_load_n(&pool_gen, __ATOMIC_RELAXED), e->lo, e->hi, r->storage_serial, r->lo};
+            }
+        }
     } else if (r && r->kind == POOL_VIRT) {
         uint64_t rel = addr - r->lo, k = rel / NVN_VPOOL_PAGE;
         const PoolRec *ph = k < r->npages ? r->pt[k].phys : NULL;
@@ -923,22 +968,30 @@ int vk_mem_descriptor_key(uint64_t addr, uint64_t size, VkDescKey *out) {
 }
 
 int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out) {
-    memset(out, 0, sizeof *out);
+    int fast = mem_fast_on();
+    if (!fast) memset(out, 0, sizeof *out);
     uint64_t g = __atomic_load_n(&pool_gen, __ATOMIC_ACQUIRE), end = addr + size;
     const ResolveHit *h = end >= addr ? rhit_find(g, addr, end) : NULL;
     // A copy without a buffer is a staged pool's (resolve_locked); once the pool was imported after all
     // (staged_import), the locked lookup gives the import and puts it in the copy.
-    if (h && !h->buf && (!h->pool || !staged_pending(h->pool))) h = NULL;
+    if (h && !h->buf) {
+        if (fast) {
+            if (!h->staged || (__atomic_load_n(&staged_fallback, __ATOMIC_ACQUIRE) && !staged_pending(h->pool))) h = NULL;
+        } else {
+            if (!h->pool || !staged_pending(h->pool)) h = NULL;
+        }
+    }
     if (h) {
+        uint64_t off = addr - h->base;
         out->buffer = h->buf;
-        out->offset = addr - h->base;
+        out->offset = off;
         out->avail = h->end - addr;
         out->alloc = h->alloc;
+        out->alloc_offset = h->alloc ? off : 0;
         out->cls = h->cls;
         out->pool = h->pool;
-        if (h->alloc) out->alloc_offset = out->offset;
-        if (shadow_on && h->pool && !((PoolRec *)h->pool)->stouched) shadow_touch(h->pool);
-        if (resolve_check_on()) {
+        if (__builtin_expect(shadow_on && h->pool && !((PoolRec *)h->pool)->stouched, 0)) shadow_touch(h->pool);
+        if (__builtin_expect(resolve_check_on(), 0)) {
             VkMemSpan s;
             if (!resolve_locked(addr, size, &s) || memcmp(&s, out, sizeof s))
                 rt_fatal("vk: resolve cache of 0x%llx differs from the pool index", (unsigned long long)addr);
@@ -969,8 +1022,9 @@ static int resolve_locked(uint64_t addr, uint64_t size, VkMemSpan *out) {
             // pool_gen is stable here: it changes only under the exclusive lock.
             ResolveHit *h = rhit_add(__atomic_load_n(&pool_gen, __ATOMIC_RELAXED), e->lo, e->hi);
             h->cls = rec_class(r);
-            if (r->kind == POOL_IMPORT) h->buf = ib, h->base = r->import_lo, h->end = r->import_hi, h->alloc = NULL, h->pool = r;
-            else h->buf = r->buf, h->base = r->lo, h->end = r->lo + r->size, h->alloc = r->alloc, h->pool = NULL;
+            if (r->kind == POOL_IMPORT)
+                h->buf = ib, h->base = r->import_lo, h->end = r->import_hi, h->alloc = NULL, h->staged = (uint8_t)st, h->pool = r;
+            else h->buf = r->buf, h->base = r->lo, h->end = r->lo + r->size, h->alloc = r->alloc, h->staged = 0, h->pool = NULL;
         }
     }
     if (r && r->kind == POOL_IMPORT && (ib || st)) {
@@ -3530,16 +3584,151 @@ static volatile int64_t st_sort_ns, st_sort_waits[2], st_sort_wait_ns[2];
 static void st_sort_job(StJob *j) {
     static _Thread_local StRange *sbuf;
     static _Thread_local size_t scap;
+    static _Thread_local uint64_t *pk0, *pk1;
+    static _Thread_local size_t pkap;
+    int fast = 1;
+#ifdef RT_KNOB_ON
+    static int st_fast_mode = -1;
+    if (__builtin_expect(st_fast_mode < 0, 0)) st_fast_mode = rt_knob("MEM_FAST", "1");
+    fast = RT_KNOB_ON(st_fast_mode);
+#endif
     uint64_t t0 = qpc();
-    sort_st_ranges(j->o, (size_t)j->no, &sbuf, &scap);
-    int o = 0;
-    for (int i = 0; i < j->no; i++) {
-        StRange *l = o ? &j->o[o - 1] : NULL;
-        if (l && l->r == j->o[i].r && j->o[i].off <= l->off + l->size) {
-            if (j->o[i].off + j->o[i].size > l->off + l->size) l->size = j->o[i].off + j->o[i].size - l->off;
-        } else j->o[o++] = j->o[i];
+    int n = j->no;
+    int did_fast = 0;
+    if (fast && n > 32) {
+        // Bucket by distinct PoolRec* (typically 1-8 pools per submission), radix-sort 8-byte (delta32, idx) keys per
+        // pool with a 4 KiB L1 fused 4x8-bit histogram skipping constant bytes, and gather-merge directly into sbuf.
+        enum { MAX_B = 64 };
+        struct { PoolRec *r; uint64_t lo, hi, prev; int count, start, cur, sorted; } pb[MAX_B];
+        int nb = 0, last = -1, ok = 1;
+        for (int i = 0; i < n; i++) {
+            PoolRec *r = j->o[i].r;
+            uint64_t off = j->o[i].off;
+            int b = (last >= 0 && pb[last].r == r) ? last : -1;
+            if (b < 0) {
+                for (int k = 0; k < nb; k++)
+                    if (pb[k].r == r) { b = k; break; }
+            }
+            if (b < 0) {
+                if (nb == MAX_B) { ok = 0; break; }
+                b = nb++;
+                pb[b].r = r, pb[b].lo = pb[b].hi = pb[b].prev = off;
+                pb[b].count = 1, pb[b].sorted = 1;
+            } else {
+                if (off < pb[b].prev) pb[b].sorted = 0;
+                pb[b].prev = off;
+                if (off < pb[b].lo) pb[b].lo = off;
+                if (off > pb[b].hi) pb[b].hi = off;
+                pb[b].count++;
+            }
+            last = b;
+        }
+        if (ok) {
+            for (int b = 0; b < nb; b++)
+                if (pb[b].hi - pb[b].lo > UINT32_MAX) { ok = 0; break; }
+        }
+        if (ok) {
+            for (int i = 1; i < nb; i++) {
+                typeof(pb[0]) v = pb[i];
+                int k = i;
+                while (k > 0 && (uintptr_t)pb[k - 1].r > (uintptr_t)v.r) pb[k] = pb[k - 1], k--;
+                pb[k] = v;
+            }
+            int pos = 0;
+            for (int b = 0; b < nb; b++) pb[b].start = pb[b].cur = pos, pos += pb[b].count;
+            if (pkap < (size_t)n) {
+                size_t c = (size_t)n + 1024;
+                uint64_t *p0 = realloc(pk0, c * sizeof *p0), *p1 = p0 ? realloc(pk1, c * sizeof *p1) : NULL;
+                if (!p0 || !p1) rt_fatal("vk: out of memory");
+                pk0 = p0, pk1 = p1, pkap = c;
+            }
+            if (scap < (size_t)n) {
+                size_t c = (size_t)n + 1024;
+                StRange *sb = realloc(sbuf, c * sizeof *sb);
+                if (!sb) rt_fatal("vk: out of memory");
+                sbuf = sb, scap = c;
+            }
+            if (nb == 1) {
+                uint64_t base = pb[0].lo;
+                for (int i = 0; i < n; i++) pk0[i] = ((uint64_t)(uint32_t)(j->o[i].off - base) << 32) | (uint32_t)i;
+            } else {
+                last = 0;
+                for (int i = 0; i < n; i++) {
+                    PoolRec *r = j->o[i].r;
+                    int b = pb[last].r == r ? last : 0;
+                    if (pb[b].r != r) {
+                        int lo = 0, hi = nb;
+                        while (lo < hi) {
+                            int m = (lo + hi) / 2;
+                            if ((uintptr_t)pb[m].r < (uintptr_t)r) lo = m + 1;
+                            else hi = m;
+                        }
+                        b = lo;
+                    }
+                    last = b;
+                    pk0[pb[b].cur++] = ((uint64_t)(uint32_t)(j->o[i].off - pb[b].lo) << 32) | (uint32_t)i;
+                }
+            }
+            for (int b = 0; b < nb; b++) {
+                int cnt = pb[b].count;
+                if (cnt <= 1 || pb[b].sorted) continue;
+                uint64_t *a = pk0 + pb[b].start;
+                if (cnt <= 32) {
+                    for (int i = 1; i < cnt; i++) {
+                        uint64_t v = a[i];
+                        int k = i;
+                        while (k > 0 && (a[k - 1] >> 32) > (v >> 32)) a[k] = a[k - 1], k--;
+                        a[k] = v;
+                    }
+                    continue;
+                }
+                int h[4][256] = {{0}};
+                for (int i = 0; i < cnt; i++) {
+                    uint32_t d = (uint32_t)(a[i] >> 32);
+                    h[0][d & 0xffu]++;
+                    h[1][(d >> 8) & 0xffu]++;
+                    h[2][(d >> 16) & 0xffu]++;
+                    h[3][d >> 24]++;
+                }
+                uint64_t *src = a, *dst = pk1 + pb[b].start;
+                for (int p = 0; p < 4; p++) {
+                    int shift = 32 + p * 8;
+                    uint32_t b0 = (uint32_t)((src[0] >> shift) & 0xffu);
+                    if (h[p][b0] == cnt) continue;
+                    for (int c = 0, sum = 0; c < 256; c++) {
+                        int cc = h[p][c];
+                        h[p][c] = sum, sum += cc;
+                    }
+                    for (int i = 0; i < cnt; i++) dst[h[p][(src[i] >> shift) & 0xffu]++] = src[i];
+                    uint64_t *t = src;
+                    src = dst, dst = t;
+                }
+                if (src != a) memcpy(a, src, (size_t)cnt * sizeof *a);
+            }
+            int o = 0;
+            for (int i = 0; i < n; i++) {
+                const StRange *cur = &j->o[(uint32_t)pk0[i]];
+                StRange *l = o ? &sbuf[o - 1] : NULL;
+                if (l && l->r == cur->r && cur->off <= l->off + l->size) {
+                    if (cur->off + cur->size > l->off + l->size) l->size = cur->off + cur->size - l->off;
+                } else sbuf[o++] = *cur;
+            }
+            memcpy(j->o, sbuf, (size_t)o * sizeof *sbuf);
+            j->no = o;
+            did_fast = 1;
+        }
     }
-    j->no = o;
+    if (!did_fast) {
+        sort_st_ranges(j->o, (size_t)j->no, &sbuf, &scap);
+        int o = 0;
+        for (int i = 0; i < j->no; i++) {
+            StRange *l = o ? &j->o[o - 1] : NULL;
+            if (l && l->r == j->o[i].r && j->o[i].off <= l->off + l->size) {
+                if (j->o[i].off + j->o[i].size > l->off + l->size) l->size = j->o[i].off + j->o[i].size - l->off;
+            } else j->o[o++] = j->o[i];
+        }
+        j->no = o;
+    }
     plat_add64(&st_sort_ns, (int64_t)(qpc() - t0));
     __atomic_store_n(&j->sorted, 1, __ATOMIC_RELEASE);
 }
@@ -4316,6 +4505,7 @@ static void staged_import(VkMemSpan *sp, int why) {
                                            "the device-local allocation failed",
                                            "first used on a DKB_REPLAY_PAR helper thread", "its VRAM mirror was refused"};
     PoolRec *r = sp->pool;
+    __atomic_store_n(&staged_fallback, 1, __ATOMIC_RELEASE);   // vk_mem_resolve now re-checks staged_pending(h->pool)
     uint64_t t0 = qpc();
     pool_lock_shared();   // as resolve_locked: the record stays alive while lazy_import runs
     int ok = staged_inject() == INJECT_IMPORT ? inject_import_fail(r) : lazy_import(r, -1, "for a staged pool after all");

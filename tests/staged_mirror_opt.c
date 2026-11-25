@@ -508,9 +508,53 @@ static void test_staged_split_own(void) {
     free(stw), stw = NULL, nstw = cstw = 0;
 }
 
+static void test_st_sort_job_radix(void) {
+    // Compare st_sort_job (radix fast path + >64-pool and >4 GiB offset fallbacks) against sort_st_ranges + merge.
+    enum { MAX_P = 80 };
+    static PoolRec pools[MAX_P];
+    memset(pools, 0, sizeof pools);
+    for (int i = 0; i < MAX_P; i++) pools[i].lo = 0x100000000ull + (uint64_t)i * 0x10000000ull, pools[i].storage_serial = (uint64_t)(i + 1);
+    static StRange *ref_buf;
+    static size_t ref_cap;
+    const int counts[] = {0, 1, 17, 32, 33, 500, 4000};
+    const int npools[] = {1, 4, 16, 72};
+    uint64_t rng = 0x123456789abcdef0ull;
+    for (size_t ci = 0; ci < sizeof counts / sizeof *counts; ci++) {
+        for (size_t pi = 0; pi < sizeof npools / sizeof *npools; pi++) {
+            int n = counts[ci], np = npools[pi];
+            StRange *a = n ? malloc((size_t)n * sizeof *a) : NULL;
+            StRange *b = n ? malloc((size_t)n * sizeof *b) : NULL;
+            for (int i = 0; i < n; i++) {
+                rng ^= rng << 13, rng ^= rng >> 7, rng ^= rng << 17;
+                int p = (int)(rng % (uint64_t)np);
+                uint64_t off = ((rng >> 16) % 0x1000000ull) & ~15ull;
+                if (pi == 1 && ci == 5 && i == 0) off = 0x1000000000ull;   // >4 GiB span fallback case
+                uint64_t sz = 16 + ((rng >> 40) % 4096ull);
+                a[i] = b[i] = (StRange){&pools[p], pools[p].lo, pools[p].storage_serial, off, sz, 0};
+            }
+            StJob jf = {.o = a, .no = n};
+            st_sort_job(&jf);
+            sort_st_ranges(b, (size_t)n, &ref_buf, &ref_cap);
+            int o = 0;
+            for (int i = 0; i < n; i++) {
+                StRange *l = o ? &b[o - 1] : NULL;
+                if (l && l->r == b[i].r && b[i].off <= l->off + l->size) {
+                    if (b[i].off + b[i].size > l->off + l->size) l->size = b[i].off + b[i].size - l->off;
+                } else b[o++] = b[i];
+            }
+            CHECK(jf.no == o);
+            for (int i = 0; i < jf.no && i < o; i++)
+                CHECK(jf.o[i].r == b[i].r && jf.o[i].off == b[i].off && jf.o[i].size == b[i].size);
+            free(a), free(b);
+        }
+    }
+    free(ref_buf), ref_buf = NULL, ref_cap = 0;
+}
+
 int main(void) {
     test_cpu_written_and_decommit();
     test_staged_split_own();
+    test_st_sort_job_radix();
     CHECK(mutex_excl == 0 && mutex_shared == 0);
     free(pool_index.e), free(pool_index.maxhi);
     printf("staged-mirror-opt: %u checks, %u failures\n", checks, failures);
