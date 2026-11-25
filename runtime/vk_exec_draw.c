@@ -2384,7 +2384,8 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
         uint64_t lead = vk_caps.sbuf_align ? b->addr & (vk_caps.sbuf_align - 1) : 0;
         int how = !written ? 0 : st == NVN_STAGE_GS && !gs_storage_writeback() ? 2 : 1;
         // Unsized storage bindings (size 0: NVN 2 raw root pointers, UBO pointers, or zero-sized c0 slots) cap the
-        // bound range itself at 8 MiB past b->addr (matching Eglantine BufferCache::StorageBufferBinding), so the
+        // bound range itself at 8 MiB past b->addr (matching Eglantine video_core/buffer_cache/buffer_cache.h
+        // BufferCache::StorageBufferBinding), so the
         // descriptor range, write-back, and uniform-snapshot invalidation agree instead of sweeping a large arena.
         uint64_t bound_max = !b->size && !ubo && (8ull << 20) + lead < max ? (8ull << 20) + lead : max;
         if (bind_range(ex, b->addr - lead, b->size ? b->size + lead : 0, align, bound_max, ubo ? VK_MUSE_UBO : VK_MUSE_SSBO,

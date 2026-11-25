@@ -2745,14 +2745,6 @@ static void mirror_mode(int discrete, uint32_t vendor) {
     }
     vk_mirror_on = mode > 0;
     mirror_verify = mode == 2;
-    mirror_diff_mode = vk_mirror_on && !shadow_on ? rt_knob("MIRROR_DIFF", "1") : 0;
-    mirror_diff_cur = 0;
-    if (mirror_diff_mode) pre_cache_open(), hd_open();
-    if (vk_mirror_on)
-        rt_log("mem: differential mirror write-back %s (DKB_MIRROR_DIFF=%s)",
-               shadow_on ? "off (shadow storage)" :
-               mirror_diff_mode == 2 ? "on in the B blocks" : mirror_diff_mode ? "on" : "off",
-               shadow_on ? "0" : mirror_diff_mode == 2 ? "ab" : mirror_diff_mode ? "1" : "0");
     // The sparse write-back dispatch (sparse_ranges): by default on NVIDIA, the one vendor it was measured on;
     // DKB_SPARSE_MIRROR_COPY=1 turns it on elsewhere, 0 off.
     const char *sparse = cfg_get("DKB_SPARSE_MIRROR_COPY");
@@ -2792,6 +2784,16 @@ static void mirror_mode(int discrete, uint32_t vendor) {
 #endif
     if (shadow_on) rt_log("mem: shadow storage: CPU-visible pools are host-visible copies of guest memory, not imports%s",
                           sh && *sh ? " (DKB_SHADOW)" : "");
+    // The differential write-back needs shadow_on, so it is decided here. By default on NVIDIA, the one vendor it was
+    // measured on; DKB_MIRROR_DIFF=1 or ab turns it on elsewhere, 0 off.
+    mirror_diff_mode = vk_mirror_on && !shadow_on ? rt_knob("MIRROR_DIFF", vendor == 0x10de ? "1" : "0") : 0;
+    mirror_diff_cur = 0;
+    if (mirror_diff_mode) pre_cache_open(), hd_open();
+    if (vk_mirror_on)
+        rt_log("mem: differential mirror write-back %s (DKB_MIRROR_DIFF=%s)",
+               shadow_on ? "off (shadow storage)" :
+               mirror_diff_mode == 2 ? "on in the B blocks" : mirror_diff_mode ? "on" : "off",
+               shadow_on ? "0" : mirror_diff_mode == 2 ? "ab" : mirror_diff_mode ? "1" : "0");
     // DKB_MIRROR_STAGED=<MiB>, <KiB>k, all or auto ("staged mirror" below). It needs the mirror, the deferred imports
     // (a pool imported at nvnMemoryPoolInitialize has paid the import already) and no shadow storage. all stages every
     // lazily imported pool (staged_min 1 byte), the small ones included; 0 is off. auto (unset) is all on Windows with
@@ -3318,7 +3320,12 @@ static PreBuf *pre_buf_acquire(VkCtx *c, VkDeviceSize min_bytes, int host, uint6
             if (res != VK_SUCCESS || !info.pMappedData) {
                 if (res == VK_SUCCESS) vmaDestroyBuffer(c->vma, pb->buf, pb->alloc);
                 free(pb);
-                rt_fatal("vk: pre-write snapshot buffer of %llu bytes failed (%d)", (unsigned long long)want, (int)res);
+                // No snapshot: the callers write the range back whole.
+                static int warned;
+                if (!warned++)
+                    rt_log("mem: pre-write snapshot buffer of %llu bytes failed (%d): those ranges are written back whole",
+                           (unsigned long long)want, (int)res);
+                return NULL;
             }
         }
         pb->host = h;
@@ -3654,6 +3661,12 @@ static int host_diff_record(VkCommandBuffer cb, PoolRec *r, uint64_t off, uint64
     plat_mutex_lock(&hd->lock);
     if (!hd->rb || hd->rb->used + total > hd->rb->bytes) hd->rb = pre_buf_acquire(c, total, 1, fence);
     PreBuf *rb = hd->rb;
+    if (!rb) {   // no buffer for the diff: write the range back whole
+        plat_mutex_unlock(&hd->lock);
+        VkBufferCopy whole = {off, off, size};
+        vkCmdCopyBuffer(cb, r->mbuf, r->buf, 1, &whole);
+        return 1;
+    }
     uint64_t aoff = rb->used;
     rb->used += size;
     uint64_t boff = need_b ? rb->used : poff;
@@ -3837,6 +3850,11 @@ static int pre_end_done;
 static uint64_t pre_sealed_next;
 static MRange *pre_wtmp, *pre_stmp;
 static int pre_nwtmp, pre_cwtmp, pre_nstmp, pre_cstmp, pre_cache_valid;
+// Ranges whose writes cannot be snapshotted (their tag is below pre_sealed_next, or no snapshot buffer could be made):
+// pre_cover_ranges puts them in the map as raw-only segments, so a later part writing the same bytes never takes a
+// snapshot that already holds this part's writes.
+static MRange *pre_wraw, *pre_sraw;
+static int pre_nwraw, pre_cwraw, pre_nsraw, pre_csraw;
 static uint32_t pre_cache_upto;
 
 static int pre_find_first_seg(const PreSeg *seg, int n, const PoolRec *r, uint64_t a) {
@@ -3885,7 +3903,7 @@ static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint
         if (!k) continue;
         for (int j = 0; j < k; j++) *bytes += mregions[j].size;
         *copies += (uint64_t)k;
-        if (to_mirror || !pre || !npre) {
+        if (!can_diff_gpu) {   // to the mirror, no snapshot, or no push descriptors for the diff: the whole range
             int dispatched = !to_mirror && c ? sparse_ranges(c, lim, k) : 0;
             if (dispatched) {
                 if (!sparse_tried) sparse = sparse_batch_create(c, n), sparse_tried = 1;
@@ -3915,7 +3933,10 @@ static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint
                 uint64_t y = pre[pk].off + pre[pk].size < hi ? pre[pk].off + pre[pk].size : hi;
                 uint64_t poff = pre[pk].poff + (lo - pre[pk].off);
                 PreBuf *pb = pre[pk].pb;
-                if (can_diff_gpu) {
+                if (!pb) {   // a raw-only segment: no snapshot, write the range back whole
+                    if (nraw == craw) grow((void **)&raw, &craw, sizeof *raw);
+                    raw[nraw++] = (VkBufferCopy){lo, lo, y - lo};
+                } else {
                     uint64_t w_lo = (lo + 3) & ~3ull, h_end = y < w_lo ? y : w_lo, w_hi = y & ~3ull;
                     if (lo < h_end) rec += host_diff_record(cb, r, lo, h_end - lo, pb, poff, fence);
                     if (w_lo < w_hi) {
@@ -3924,8 +3945,6 @@ static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint
                     }
                     uint64_t t_start = h_end > w_hi ? h_end : w_hi;
                     if (t_start < y) rec += host_diff_record(cb, r, t_start, y - t_start, pb, poff + (t_start - lo), fence);
-                } else {
-                    rec += host_diff_record(cb, r, lo, y - lo, pb, poff, fence);
                 }
                 lo = y;
                 if (lo == pre[pk].off + pre[pk].size) pk++;
@@ -6055,7 +6074,7 @@ static int staged_wb_record(VkCommandBuffer cb) {
                 uint64_t y = ps->off + ps->size < b ? ps->off + ps->size : b;
                 uint64_t poff = ps->poff + (a - ps->off);
                 if (j->n == j->cap) grow((void **)&j->w, &j->cap, sizeof *j->w);
-                j->w[j->n++] = (StRange){r, r->lo, r->storage_serial, a, y - a, j->bytes, poff + 1, ps->pb};
+                j->w[j->n++] = (StRange){r, r->lo, r->storage_serial, a, y - a, j->bytes, ps->pb ? poff + 1 : 0, ps->pb};
                 j->bytes += y - a;
                 a = y;
                 if (a == ps->off + ps->size) pk++;
@@ -7005,6 +7024,7 @@ static PreBuf *pre_alloc(VkCtx *c, PreMap *m, uint64_t off, uint64_t size, int h
     uint64_t u = m->cur ? ((m->cur->used + 3ull) & ~3ull) + (off & 3ull) : 0;
     if (!m->cur || u + size > m->cur->bytes) {
         m->cur = pre_buf_acquire(c, size + 4, host, fence);
+        if (!m->cur) return NULL;
         u = off & 3ull;
     }
     m->cur->used = u + size;
@@ -7049,7 +7069,9 @@ static void pre_seg_push(PreSeg **arr, int *n, int *cap, PreSeg s) {
 }
 
 // Covers any uncovered sub-ranges of in[0..nin) in m, allocating PreBuf slices and queueing r->mbuf -> pb->buf copies.
-static void pre_cover_ranges(VkCtx *c, PreMap *m, const MRange *in, int nin, int host, uint64_t fence) {
+// raw: the segments get no snapshot buffer (pb NULL), and neither do ranges whose buffer could not be made: copy_ranges
+// and staged_wb_record write those back whole.
+static void pre_cover_ranges(VkCtx *c, PreMap *m, const MRange *in, int nin, int host, uint64_t fence, int raw) {
     static MRange *mr;
     static int cmr;
     static PreSeg *out;
@@ -7069,8 +7091,8 @@ static void pre_cover_ranges(VkCtx *c, PreMap *m, const MRange *in, int nin, int
         } else if (si < m->n && m->seg[si].r == mr[mi].r && m->seg[si].off < mr[mi].off + mr[mi].size) {
             if (mr[mi].off < m->seg[si].off) {
                 uint64_t gap = m->seg[si].off - mr[mi].off, poff = 0;
-                PreBuf *pb = pre_alloc(c, m, mr[mi].off, gap, host, fence, &poff);
-                pre_pend_add(mr[mi].r, pb, mr[mi].off, poff, gap);
+                PreBuf *pb = raw ? NULL : pre_alloc(c, m, mr[mi].off, gap, host, fence, &poff);
+                if (pb) pre_pend_add(mr[mi].r, pb, mr[mi].off, poff, gap);
                 pre_seg_push(&out, &nout, &cout, (PreSeg){mr[mi].r, mr[mi].off, gap, pb, poff});
                 mr[mi].off = m->seg[si].off;
                 mr[mi].size -= gap;
@@ -7085,8 +7107,8 @@ static void pre_cover_ranges(VkCtx *c, PreMap *m, const MRange *in, int nin, int
             }
         } else {
             uint64_t poff = 0;
-            PreBuf *pb = pre_alloc(c, m, mr[mi].off, mr[mi].size, host, fence, &poff);
-            pre_pend_add(mr[mi].r, pb, mr[mi].off, poff, mr[mi].size);
+            PreBuf *pb = raw ? NULL : pre_alloc(c, m, mr[mi].off, mr[mi].size, host, fence, &poff);
+            if (pb) pre_pend_add(mr[mi].r, pb, mr[mi].off, poff, mr[mi].size);
             pre_seg_push(&out, &nout, &cout, (PreSeg){mr[mi].r, mr[mi].off, mr[mi].size, pb, poff});
             mi++;
         }
@@ -7117,7 +7139,7 @@ static void pre_refresh_batch(PreMap *m, const MRange *up, int nup) {
         for (int k = si; k < m->n && m->seg[k].r == r && m->seg[k].off < hi; k++) {
             uint64_t x = m->seg[k].off > lo ? m->seg[k].off : lo;
             uint64_t y = m->seg[k].off + m->seg[k].size < hi ? m->seg[k].off + m->seg[k].size : hi;
-            if (x < y) pre_pend_add(r, m->seg[k].pb, x, m->seg[k].poff + (x - m->seg[k].off), y - x);
+            if (x < y && m->seg[k].pb) pre_pend_add(r, m->seg[k].pb, x, m->seg[k].poff + (x - m->seg[k].off), y - x);
         }
     }
 }
@@ -7286,6 +7308,13 @@ static void pre_scan_staged_range(PoolRec *r, uint64_t off, uint64_t size, MRang
     }
 }
 
+// A write of an already-submitted part: its range joins the raw-only list unless the map covers it.
+static void pre_raw_add(MRange **a, int *n, int *cap, const PreMap *m, PoolRec *r, uint64_t off, uint64_t size) {
+    uint64_t lim = r->import_hi - r->import_lo, lo = off, hi = off + size;
+    if (hi > lim) hi = lim;
+    if (lo < hi && !pre_map_covers(m, r, lo, hi)) range_add(a, n, cap, r, lo, hi - lo);
+}
+
 static int pre_need_scan(void) {
     return pre_walk_writes != pre_seen_walk_writes ||
            __atomic_load_n(&pre_worker_seq, __ATOMIC_ACQUIRE) != pre_seen_worker_seq || pre_has_deferred;
@@ -7294,6 +7323,7 @@ static int pre_need_scan(void) {
 static void pre_collect_uncovered(uint32_t upto, MRange **wtmp, int *nwtmp, int *cwtmp, MRange **stmp, int *nstmp,
                                   int *cstmp) {
     *nwtmp = 0, *nstmp = 0;
+    pre_nwraw = pre_nsraw = 0;
     int deferred = 0;
     uint32_t seen_walk = pre_walk_writes;
     uint32_t seen_work = __atomic_load_n(&pre_worker_seq, __ATOMIC_ACQUIRE);
@@ -7302,7 +7332,10 @@ static void pre_collect_uncovered(uint32_t upto, MRange **wtmp, int *nwtmp, int 
     for (int i = wbl_scan; i < nwbl; i++) {
         if (wbl[i].tag > upto) { deferred = 1; w_adv = 0; continue; }
         if (w_adv) wbl_scan = i + 1;
-        if ((uint64_t)wbl[i].tag < pre_sealed_next) continue;   // already submitted: fall back to raw write-back
+        if ((uint64_t)wbl[i].tag < pre_sealed_next) {   // already submitted: raw write-back, kept out of later snapshots
+            pre_raw_add(&pre_wraw, &pre_nwraw, &pre_cwraw, &wpre_map, wbl[i].r, wbl[i].off, wbl[i].size);
+            continue;
+        }
         uint64_t lim = wbl[i].r->import_hi - wbl[i].r->import_lo, a = wbl[i].off, b = a + wbl[i].size;
         if (b > lim) b = lim;
         if (a < b && !pre_map_covers(&wpre_map, wbl[i].r, a, b))
@@ -7312,7 +7345,10 @@ static void pre_collect_uncovered(uint32_t upto, MRange **wtmp, int *nwtmp, int 
     for (int i = stw_scan; i < nstw; i++) {
         if (stw[i].tag > upto) { deferred = 1; s_adv = 0; continue; }
         if (s_adv) stw_scan = i + 1;
-        if ((uint64_t)stw[i].tag < pre_sealed_next) continue;
+        if ((uint64_t)stw[i].tag < pre_sealed_next) {
+            pre_scan_staged_range(stw[i].r, stw[i].off, stw[i].size, &pre_sraw, &pre_nsraw, &pre_csraw);
+            continue;
+        }
         pre_scan_staged_range(stw[i].r, stw[i].off, stw[i].size, stmp, nstmp, cstmp);
     }
     mirror_unlock(locked);
@@ -7324,7 +7360,10 @@ static void pre_collect_uncovered(uint32_t upto, MRange **wtmp, int *nwtmp, int 
         for (int i = w->scan_a; i < w->n; i++) {
             if (w->a[i].tag > upto) { w_def = deferred = 1; a_adv = 0; continue; }
             if (a_adv) w->scan_a = i + 1;
-            if ((uint64_t)w->a[i].tag < pre_sealed_next) continue;
+            if ((uint64_t)w->a[i].tag < pre_sealed_next) {
+                pre_raw_add(&pre_wraw, &pre_nwraw, &pre_cwraw, &wpre_map, w->a[i].r, w->a[i].off, w->a[i].size);
+                continue;
+            }
             uint64_t lim = w->a[i].r->import_hi - w->a[i].r->import_lo, a = w->a[i].off, b = a + w->a[i].size;
             if (b > lim) b = lim;
             if (a < b && !pre_map_covers(&wpre_map, w->a[i].r, a, b))
@@ -7333,7 +7372,10 @@ static void pre_collect_uncovered(uint32_t upto, MRange **wtmp, int *nwtmp, int 
         for (int i = w->scan_s; i < w->ns; i++) {
             if (w->s[i].tag > upto) { w_def = deferred = 1; ss_adv = 0; continue; }
             if (ss_adv) w->scan_s = i + 1;
-            if ((uint64_t)w->s[i].tag < pre_sealed_next) continue;
+            if ((uint64_t)w->s[i].tag < pre_sealed_next) {
+                pre_scan_staged_range(w->s[i].r, w->s[i].off, w->s[i].size, &pre_sraw, &pre_nsraw, &pre_csraw);
+                continue;
+            }
             pre_scan_staged_range(w->s[i].r, w->s[i].off, w->s[i].size, stmp, nstmp, cstmp);
         }
         if (!w_def) w->has_new = 0;
@@ -7350,11 +7392,14 @@ static void pre_prepare_part(uint32_t upto, uint64_t fence) {
     } else if (pre_need_scan()) {
         pre_collect_uncovered(upto, &pre_wtmp, &pre_nwtmp, &pre_cwtmp, &pre_stmp, &pre_nstmp, &pre_cstmp);
     } else {
-        pre_nwtmp = pre_nstmp = 0;
+        pre_nwtmp = pre_nstmp = pre_nwraw = pre_nsraw = 0;
     }
     VkCtx *c = vk_ctx();
-    if (pre_nwtmp) pre_cover_ranges(c, &wpre_map, pre_wtmp, pre_nwtmp, !mirror_ops_init(c), fence);
-    if (pre_nstmp) pre_cover_ranges(c, &spre_map, pre_stmp, pre_nstmp, 1, fence);
+    // The raw-only segments first: where they overlap a range to snapshot, the overlap stays raw.
+    if (pre_nwraw) pre_cover_ranges(c, &wpre_map, pre_wraw, pre_nwraw, 0, fence, 1), pre_nwraw = 0;
+    if (pre_nsraw) pre_cover_ranges(c, &spre_map, pre_sraw, pre_nsraw, 1, fence, 1), pre_nsraw = 0;
+    if (pre_nwtmp) pre_cover_ranges(c, &wpre_map, pre_wtmp, pre_nwtmp, !mirror_ops_init(c), fence, 0);
+    if (pre_nstmp) pre_cover_ranges(c, &spre_map, pre_stmp, pre_nstmp, 1, fence, 0);
 }
 
 static void pre_reserve_end(uint64_t fence) {
@@ -7364,22 +7409,32 @@ static void pre_reserve_end(uint64_t fence) {
     VkCtx *c = vk_ctx();
     if (nwbl) {
         int nwtmp = 0;
+        pre_nwraw = 0;
         for (int i = 0; i < nwbl; i++) {
-            if ((uint64_t)wbl[i].tag < pre_sealed_next) continue;   // already submitted: fall back to raw write-back
+            if ((uint64_t)wbl[i].tag < pre_sealed_next) {   // already submitted: raw write-back, kept out of snapshots
+                pre_raw_add(&pre_wraw, &pre_nwraw, &pre_cwraw, &wpre_map, wbl[i].r, wbl[i].off, wbl[i].size);
+                continue;
+            }
             uint64_t lim = wbl[i].r->import_hi - wbl[i].r->import_lo, a = wbl[i].off, b = a + wbl[i].size;
             if (b > lim) b = lim;
             if (a < b && !pre_map_covers(&wpre_map, wbl[i].r, a, b))
                 range_add(&wtmp, &nwtmp, &cwtmp, wbl[i].r, a, b - a);
         }
-        if (nwtmp) pre_cover_ranges(c, &wpre_map, wtmp, nwtmp, !mirror_ops_init(c), fence);
+        if (pre_nwraw) pre_cover_ranges(c, &wpre_map, pre_wraw, pre_nwraw, 0, fence, 1), pre_nwraw = 0;
+        if (nwtmp) pre_cover_ranges(c, &wpre_map, wtmp, nwtmp, !mirror_ops_init(c), fence, 0);
     }
     if (nstw) {
         int nstmp = 0;
+        pre_nsraw = 0;
         for (int i = 0; i < nstw; i++) {
-            if ((uint64_t)stw[i].tag < pre_sealed_next) continue;   // already submitted: fall back to raw write-back
+            if ((uint64_t)stw[i].tag < pre_sealed_next) {   // already submitted: raw write-back, kept out of snapshots
+                pre_scan_staged_range(stw[i].r, stw[i].off, stw[i].size, &pre_sraw, &pre_nsraw, &pre_csraw);
+                continue;
+            }
             pre_scan_staged_range(stw[i].r, stw[i].off, stw[i].size, &stmp, &nstmp, &cstmp);
         }
-        if (nstmp) pre_cover_ranges(c, &spre_map, stmp, nstmp, 1, fence);
+        if (pre_nsraw) pre_cover_ranges(c, &spre_map, pre_sraw, pre_nsraw, 1, fence, 1), pre_nsraw = 0;
+        if (nstmp) pre_cover_ranges(c, &spre_map, stmp, nstmp, 1, fence, 0);
     }
     pre_end_done = 1;
 }
@@ -7481,7 +7536,7 @@ int vk_mem_mirror_pending_for(uint32_t upto) {
     pre_collect_uncovered(upto, &pre_wtmp, &pre_nwtmp, &pre_cwtmp, &pre_stmp, &pre_nstmp, &pre_cstmp);
     pre_cache_upto = upto;
     pre_cache_valid = 1;
-    return pre_nwtmp || pre_nstmp;
+    return pre_nwtmp || pre_nstmp || pre_nwraw || pre_nsraw;   // raw-only segments are added in the prologue too
 }
 
 void vk_mem_mirror_part_done(uint32_t upto) {

@@ -34,6 +34,8 @@ static int checks, failures;
 
 unsigned rt_trace;
 void rt_log(const char *fmt, ...) { (void)fmt; }
+int rt_knob(const char *name, const char *def) { (void)name; return def && !strcmp(def, "1"); }   // st_sort_job: MEM_FAST
+int rt_ab(void) { return 0; }
 _Noreturn void rt_fatal(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -167,6 +169,18 @@ static void reset_pre_state(void) {
     wb_tag = 0;
     for (int i = 0; i < nalloc_pbs; i++) free(alloc_pbs[i].backing);
     nalloc_pbs = 0;
+    pre_nwraw = pre_nsraw = 0;
+}
+
+// Whether [lo, hi) of r lies in raw-only segments (no snapshot buffer), and none of its bytes in a snapshot segment.
+static int pre_raw_only(const PreMap *m, const PoolRec *r, uint64_t lo, uint64_t hi) {
+    int raw = 0;
+    for (int i = 0; i < m->n; i++) {
+        if (m->seg[i].r != r || m->seg[i].off >= hi || m->seg[i].off + m->seg[i].size <= lo) continue;
+        if (m->seg[i].pb) return 0;
+        raw = 1;
+    }
+    return raw && pre_map_covers(m, r, lo, hi);
 }
 
 static uint32_t xorshift32(uint32_t *state) {
@@ -307,7 +321,7 @@ static void test_pre_map_and_telescoping(void) {
     // 2. Multi-part coverage + upload refresh into already-covered range.
     reset_pre_state();
     MRange p1 = {&pool, 0x1000, 0x2000, 0};
-    pre_cover_ranges(&fake_vk_ctx, &wpre_map, &p1, 1, 1, 10);
+    pre_cover_ranges(&fake_vk_ctx, &wpre_map, &p1, 1, 1, 10, 0);
     CHECK(wpre_map.n == 1 && npre_pend == 1);
     uint64_t base_poff = wpre_map.seg[0].poff;
     PreBuf *base_pb = wpre_map.seg[0].pb;
@@ -319,7 +333,7 @@ static void test_pre_map_and_telescoping(void) {
     CHECK(npre_pend == 1);
     CHECK(pre_pend[0].off == 0x1400 && pre_pend[0].poff == base_poff + 0x400 && pre_pend[0].size == 0x800);
     MRange p2 = {&pool, 0x1800, 0x2000, 0};
-    pre_cover_ranges(&fake_vk_ctx, &wpre_map, &p2, 1, 1, 10);
+    pre_cover_ranges(&fake_vk_ctx, &wpre_map, &p2, 1, 1, 10, 0);
     // Only the newly uncovered tail [0x3000, 0x3800) is allocated; [0x1000, 0x3000) keeps base_pb/base_poff.
     CHECK(pre_map_covers(&wpre_map, &pool, 0x1000, 0x3800));
     CHECK(wpre_map.seg[0].off == 0x1000 && wpre_map.seg[0].pb == base_pb && wpre_map.seg[0].poff == base_poff);
@@ -450,17 +464,40 @@ static void test_pre_map_and_telescoping(void) {
     vk_mem_mirror_part_done(h2_tag);
     CHECK(pre_map_covers(&wpre_map, &pool, 0x5000, 0x6000));
     CHECK(!pre_map_covers(&wpre_map, &pool, 0x7000, 0x8000));
-    CHECK(!pre_map_covers(&wpre_map, &pool, 0x9000, 0xa000));
+    CHECK(pre_raw_only(&wpre_map, &pool, 0x9000, 0xa000));   // a raw-only segment: no snapshot
     CHECK(pre_sealed_next == 3);
     npre_pend = 0;
     // Submission end (pre_reserve_end): snapshots tag 3 [0x7000, 0x8000), STILL refuses already-submitted tag 0 [0x9000, 0xa000)
     // so [0x9000, 0xa000) falls back to a full raw write-back with no snapshot.
     pre_reserve_end(13);
     CHECK(pre_map_covers(&wpre_map, &pool, 0x7000, 0x8000));
-    CHECK(!pre_map_covers(&wpre_map, &pool, 0x9000, 0xa000));
+    CHECK(pre_raw_only(&wpre_map, &pool, 0x9000, 0xa000));
     CHECK(vk_mem_mirror_pending_for(UINT32_MAX) > 0);
     vk_mem_mirror_part_done(UINT32_MAX);
     CHECK(pre_end_done == 0 && wpre_map.n == 0);
+
+    // 5a. A skipped range (tag below pre_sealed_next) stays raw even where a later provable write overlaps it: the
+    //     overlap [0x9800, 0xa000) must not get a snapshot (it would hold the earlier part's bytes already), and the rest
+    //     of the later write, [0xa000, 0xa800), is snapshotted as usual.
+    reset_pre_state();
+    pre_sealed_next = 1;
+    wbl[nwbl++] = (MRange){&pool, 0x9000, 0x1000, 0};   // tag 0: already submitted
+    wbl[nwbl++] = (MRange){&pool, 0x9800, 0x1000, 1};   // tag 1: provable, overlaps the skipped one
+    pre_walk_writes += 2;
+    CHECK(vk_mem_mirror_pending_for(UINT32_MAX) == 1);
+    pre_prepare_part(UINT32_MAX, 15);
+    CHECK(pre_raw_only(&wpre_map, &pool, 0x9000, 0xa000));
+    CHECK(pre_map_covers(&wpre_map, &pool, 0x9000, 0xa800) && !pre_raw_only(&wpre_map, &pool, 0xa000, 0xa800));
+    CHECK(npre_pend == 1 && pre_pend[0].off == 0xa000 && pre_pend[0].size == 0x800);
+    npre_pend = 0;
+    // The raw segment alone: nothing to snapshot, but the part still adds it.
+    reset_pre_state();
+    pre_sealed_next = 1;
+    wbl[nwbl++] = (MRange){&pool, 0xb000, 0x1000, 0};
+    pre_walk_writes++;
+    CHECK(vk_mem_mirror_pending_for(UINT32_MAX) == 1);
+    pre_prepare_part(UINT32_MAX, 16);
+    CHECK(pre_raw_only(&wpre_map, &pool, 0xb000, 0xc000) && npre_pend == 0);
 
     // 5b. Two held parts simultaneously in flight (H1 tag 0, H2 tag 1) + cheap DKB_MIRROR_DIFF=0 bypass.
     reset_pre_state();
@@ -493,7 +530,7 @@ static void test_pre_map_and_telescoping(void) {
     //    vk_mem_mirror_pending_for returns 0 and vk_mem_mirror_part_done resets wpre_map, spre_map, and pre_end_done.
     reset_pre_state();
     MRange r_early = {&pool, 0x1000, 0x1000, 0};
-    pre_cover_ranges(&fake_vk_ctx, &wpre_map, &r_early, 1, 1, 20);
+    pre_cover_ranges(&fake_vk_ctx, &wpre_map, &r_early, 1, 1, 20, 0);
     npre_pend = 0;
     pre_end_done = 1;
     CHECK(wpre_map.n == 1 && wpre_map.cur != NULL);

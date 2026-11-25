@@ -46,6 +46,7 @@ static int par_collecting(void) { return 0; }
 static uint64_t par_end_op[OP_COUNT_ + 1];
 void vk_exec_barrier(VkExec *ex) { ex->recorded++; }
 void vk_mem_mirror_begin(void) {}
+uint32_t vk_mem_wb_tag(uint32_t tag) { return tag; }
 int vk_mem_mirror_end(VkCommandBuffer cb,uint64_t f) { (void)cb;(void)f;return 0; }
 void vk_usnap_begin(const uint64_t *h,int n,uint64_t f) { (void)h;(void)n;(void)f; }
 void vk_usnap_end(uint64_t f) { (void)f; }
