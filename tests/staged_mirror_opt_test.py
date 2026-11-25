@@ -71,6 +71,7 @@ def main():
         statement(src, 'static uint32_t *own_chunk'),
         line(src, '#define CPU_WRITTEN_WORDS '),
         statement(src, 'static uint64_t *cpu_written_chunk'),
+        statement(src, 'static int freeze_lazy'),
     ])
 
     code = '\n'.join([
@@ -85,6 +86,7 @@ def main():
         definition(src, 'static int ww_stamp('),
         definition(src, 'static uint32_t *gen_slot('),
         definition(src, 'static void stamp_page('),
+        definition(src, 'static void stamp_page_gpu_only('),
         definition(src, 'static void stamp_range('),
         definition(src, 'void vk_guest_written('),
         definition(src, 'void vk_gpu_written_into('),

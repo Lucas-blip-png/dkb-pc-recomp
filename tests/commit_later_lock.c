@@ -129,6 +129,7 @@ int plat_mem_reserve(uint64_t addr, uint64_t n, int watch) {
 }
 
 void plat_mem_fault_hook(int (*fn)(uint64_t)) { (void)fn; }
+void plat_mem_lazy_commit_hook(void (*fn)(uint64_t, uint64_t, int)) { (void)fn; }
 void plat_mem_probe_hooks(int (*f)(uint64_t, int, uint64_t), int (*m)(uint64_t, uint64_t),
                           void (*r)(uint64_t, uint64_t, uintptr_t)) {
     (void)f; (void)m; (void)r;

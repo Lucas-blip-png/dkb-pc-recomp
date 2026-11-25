@@ -239,6 +239,9 @@ int plat_mem_access_hook(int (*fn)(uint64_t addr));
 // A write that faulted on a read-only page at addr goes to fn first; fn returns 1 when it made the page writable and
 // the write should run again, 0 to let the fault go on (to the crash handler). One hook per process.
 void plat_mem_fault_hook(int (*fn)(uint64_t addr));
+// Windows only: called before (post == 0) and after (post == 1) fault_veh or lazy_fill commits a lazy-heap range
+// [addr, addr + size), so memory.c can thaw any frozen FRZ_HOLES region before new read-write pages appear inside it.
+void plat_mem_lazy_commit_hook(void (*fn)(uint64_t addr, uint64_t size, int post));
 // Windows only: a read or write that faults on a reserved page inside [base, base + size) commits the chunk around
 // it (64 KiB by default; plat_mem_lazy_chunk changes it) and retries (the guest heap with DKB_HEAP_LAZY). Lock-free
 // in the handler; plat_mem_lazy_faults counts them.

@@ -1462,6 +1462,7 @@ static int ww_stamp(uint64_t lo, uint64_t hi, uint32_t g, int who) {
 // reads, which thaw their buffer first (fs_host.c, romfs.c), and every user-mode write faults and thaws.
 #define FREEZE_PER_SUB 32
 static int freeze_idle;                       // 0: off
+static int freeze_lazy = 1;                   // DKB_FRZ_LAZY: also freeze GPU-only staged mirror regions
 static uint32_t ww_ep = 1;                    // gen_lock: the submission being recorded (vk_mem_mirror_begin)
 static uint32_t reg_last[RT_ADDRESS_LIMIT >> REG_SHIFT];    // gen_lock: ww_ep of the region's last stamp
 static uint32_t reg_tried[RT_ADDRESS_LIMIT >> REG_SHIFT];   // gen_lock: ww_ep of its last freeze candidacy
@@ -1487,6 +1488,16 @@ static void stamp_page(uint64_t a, uint32_t g) {
     *s = g;
     reg_max[a >> REG_SHIFT] = g;
     reg_last[a >> REG_SHIFT] = ww_ep;
+}
+
+// Like stamp_page, for GPU writes into a staged VRAM mirror (r->sfeed): guest memory itself was not written by the CPU
+// (GPU-owned pages stay in VRAM and any non-owned copy-back in staged_wb_done is seen by the write watch), so leave
+// reg_last alone and let CPU-idle regions of GPU-written pools freeze.
+static void stamp_page_gpu_only(uint64_t a, uint32_t g) {
+    uint32_t *s = gen_slot(a, 1);
+    if (!s) return;
+    *s = g;
+    reg_max[a >> REG_SHIFT] = g;
 }
 
 static void stamp_range(uint64_t lo, uint64_t hi, uint32_t g) {
@@ -1999,8 +2010,11 @@ static void written_batch(const VkGpuWrite *w, int n) {
                 if (!own_chunk[ci] && !(own_chunk[ci] = calloc(GEN_PER_CHUNK, sizeof(uint32_t))))
                     rt_fatal("vk: out of memory for page generations");
                 uint32_t *o = &own_chunk[ci][(a >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)], prior = *s;
-                stamp_page(a, g);
-                if (!r->sfeed) cpu_written_set_page(a);
+                if (r->sfeed && freeze_lazy) stamp_page_gpu_only(a, g);
+                else {
+                    stamp_page(a, g);
+                    if (!r->sfeed) cpu_written_set_page(a);
+                }
                 *o = prior <= mgen || prior == *o ? g : 0;
             }
         }
@@ -2402,8 +2416,11 @@ void vk_gpu_written_into(uint64_t addr, uint64_t size, VkBuffer buf) {
         if (!own_chunk[ci] && !(own_chunk[ci] = calloc(GEN_PER_CHUNK, sizeof(uint32_t))))
             rt_fatal("vk: out of memory for page generations");
         uint32_t *o = &own_chunk[ci][(a >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)], prior = *s;
-        stamp_page(a, g);
-        if (!r->sfeed) cpu_written_set_page(a);
+        if (r->sfeed && freeze_lazy) stamp_page_gpu_only(a, g);
+        else {
+            stamp_page(a, g);
+            if (!r->sfeed) cpu_written_set_page(a);
+        }
         *o = prior <= mgen || prior == *o ? g : 0;
     }
     plat_mutex_unlock(&gen_lock);
@@ -2697,6 +2714,7 @@ static void mirror_mode(int discrete, uint32_t vendor) {
     const char *fi = cfg_get("DKB_FREEZE_IDLE");
     freeze_idle = fi && *fi ? atoi(fi) : 60;
     if (freeze_idle < 0) freeze_idle = 0;
+    freeze_lazy = cfg_bool("DKB_FRZ_LAZY");
     const char *sh = cfg_get("DKB_SHADOW");
 #if defined(_WIN32) || defined(__APPLE__)
     shadow_on = sh && *sh && strcmp(sh, "0");

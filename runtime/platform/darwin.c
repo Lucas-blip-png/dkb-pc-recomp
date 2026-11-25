@@ -1051,6 +1051,8 @@ void plat_mem_fault_hook(int (*fn)(uint64_t addr)) {
     fault_install();
 }
 
+void plat_mem_lazy_commit_hook(void (*fn)(uint64_t addr, uint64_t size, int post)) { (void)fn; }
+
 const char *plat_crash_dump(void) { return NULL; }
 
 void plat_crash_hook(void (*fn)(const PlatCrash *c)) {
