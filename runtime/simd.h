@@ -20,7 +20,10 @@
 
 typedef __uint128_t u128;
 #define SI static inline __attribute__((always_inline))
-#define SN static __attribute__((noinline))
+// FP slow/NaN helpers take FPCR by value, touch no caller memory, and restore MXCSR before returning, so marking them
+// cold + const lets the compiler hoist c->fpcr loads, keep c->v[] live in XMM registers across FP ops, and move slow
+// call setup out of hot loops.
+#define SN static __attribute__((noinline, cold, const))
 #define SIMD_CAT2(a, b) a##_##b
 #define SIMD_CAT(a, b) SIMD_CAT2(a, b)
 
@@ -44,8 +47,13 @@ typedef u128 __attribute__((aligned(1), may_alias)) u128u;
 #define VS16(n) (*(sa16 *)&c->v[n])
 #define VS32(n) (*(sa32 *)&c->v[n])
 #define VS64(n) (*(sa64 *)&c->v[n])
-#define VSF32(n) (*(saf32 *)&c->v[n])
-#define VSF64(n) (*(saf64 *)&c->v[n])
+// Reading scalar lane 0 through c->v[n] (the same u128 type written by LD32/LD64 and FP_SETS/FP_SETD) lets the
+// compiler forward recently loaded or computed values directly in registers instead of reloading c->v[n] through a
+// different-width pointer (which stalls x86 store-to-load forwarding).
+SI float simd_vsf32(u128 v) { uint32_t u = (uint32_t)v; float f; memcpy(&f, &u, sizeof f); return f; }
+SI double simd_vsf64(u128 v) { uint64_t u = (uint64_t)v; double d; memcpy(&d, &u, sizeof d); return d; }
+#define VSF32(n) simd_vsf32(c->v[n])
+#define VSF64(n) simd_vsf64(c->v[n])
 #define VHI64(n) (((sa64 *)&c->v[n])[1])
 #define LD128(a) (*(const u128u *)(uintptr_t)(a))
 #define ST128(a, v) (*(u128u *)(uintptr_t)(a) = (u128)(v))
@@ -221,6 +229,7 @@ SI int simd_fe_mode(uint64_t fpcr) {
 SI unsigned simd_rm_enter(uint64_t fpcr) { (void)fpcr; return 0; }
 SI void simd_rm_rz(void) {}
 SI void simd_rm_leave(unsigned old) { (void)old; }
+SI int simd_directed_fpcr(uint64_t fpcr) { (void)fpcr; return 0; }
 SI int simd_directed(const Cpu *c) { (void)c; return 0; }
 #else
 // MXCSR rounding control (bits 13-14) without fesetround's x87 + SSE double write; ldmxcsr only on change.
@@ -244,7 +253,8 @@ SI void simd_rm_leave(unsigned old) {
 
 // The thread's MXCSR mirrors the guest FPCR.FZ with RC = nearest whenever guest code runs (cpu.h rt_fpcr_sync), so
 // plain host FP gives the ARM result unless FPCR.RMode asks for directed rounding, which the slow paths handle.
-SI int simd_directed(const Cpu *c) { return __builtin_expect((c->fpcr & FPCR_RM) != 0, 0); }
+SI int simd_directed_fpcr(uint64_t fpcr) { return __builtin_expect((fpcr & FPCR_RM) != 0, 0); }
+SI int simd_directed(const Cpu *c) { return simd_directed_fpcr(c->fpcr); }
 #endif
 
 #define F s
@@ -299,9 +309,9 @@ SI double simd_s2d(Cpu *c, float x) {
     }
     return (double)fv_s(u);
 }
-SN float simd_d2s_slow(Cpu *c, double x) {
+SN float simd_d2s_slow(uint64_t fpcr, double x) {
 #pragma STDC FENV_ACCESS ON
-    unsigned old = simd_rm_enter(c->fpcr);
+    unsigned old = simd_rm_enter(fpcr);
     volatile double vx = x;
     volatile float r = (float)vx;
     simd_rm_leave(old);
@@ -316,7 +326,7 @@ SI float simd_d2s(Cpu *c, double x) {
     x = fv_d(u);
     // FZ: tiny before rounding (host FTZ would keep a result rounded up to the smallest normal)
     if ((c->fpcr & FPCR_FZ) && __builtin_fabs(x) < 0x1p-126 && x != 0) return fv_s((uint32_t)(u >> 63) << 31);
-    if (__builtin_expect(c->fpcr & FPCR_RM, 0)) return simd_d2s_slow(c, x);
+    if (__builtin_expect(c->fpcr & FPCR_RM, 0)) return simd_d2s_slow(c->fpcr, x);
     return (float)x;
 }
 // round to odd (FCVTXN)
