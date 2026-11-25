@@ -841,20 +841,30 @@ static int lazy_commit_retry(uint64_t x, size_t n) {
 // before our VirtualAlloc makes it writable. memory.c freeze_locked refuses a region with a reserved hole in the lazy
 // heap, which closes it for holes that exist at the freeze; the gap left is this narrow window, and the handler takes
 // no lock on purpose.
+static void (*lazy_commit_hook)(uint64_t addr, uint64_t size, int post);
+
+void plat_mem_lazy_commit_hook(void (*fn)(uint64_t addr, uint64_t size, int post)) {
+    __atomic_store_n(&lazy_commit_hook, fn, __ATOMIC_RELEASE);
+}
+
 static int lazy_commit_mbi(uint64_t addr, uint64_t lo, uint64_t hi, const MEMORY_BASIC_INFORMATION *mbi) {
     uint64_t chunk = mbi ? __atomic_load_n(&lazy_chunk_sz, __ATOMIC_ACQUIRE) : 0x10000ull;
     uint64_t a = addr & ~(chunk - 1), e = a + chunk;
     if (a < lo) a = lo;
     if (e > hi) e = hi;
     if (a >= e) return 0;
+    void (*lch)(uint64_t, uint64_t, int) = __atomic_load_n(&lazy_commit_hook, __ATOMIC_ACQUIRE);
     if (mbi && mbi->State == MEM_RESERVE) {
         uint64_t r_lo = (uint64_t)(uintptr_t)mbi->BaseAddress, r_hi = r_lo + mbi->RegionSize;
         if (r_lo <= a && r_hi >= e) {
+            if (lch) lch(a, e - a, 0);
             if (!lazy_commit_retry(a, (size_t)(e - a))) return 0;
             plat_mem_lazy_mark(a, e);
+            if (lch) lch(a, e - a, 1);
             return 1;
         }
     }
+    int committed = 0;
     for (uint64_t x = a, y; x < e; x = y) {
         MEMORY_BASIC_INFORMATION q;
         if (!vm_query(x, &q, PLAT_VM_LAZY)) return 0;
@@ -862,9 +872,12 @@ static int lazy_commit_mbi(uint64_t addr, uint64_t lo, uint64_t hi, const MEMORY
         if (y > e) y = e;
         if (q.State == MEM_COMMIT) continue;
         if (q.State != MEM_RESERVE) return 0;
+        if (!committed && lch) lch(a, e - a, 0);
         if (!lazy_commit_retry(x, (size_t)(y - x))) return 0;
+        committed = 1;
     }
     plat_mem_lazy_mark(a, e);
+    if (committed && lch) lch(a, e - a, 1);
     return 1;
 }
 

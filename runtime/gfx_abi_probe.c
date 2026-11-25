@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#include "cfg.h"
 #include "gfx.h"
 #include "platform/platform.h"
 
@@ -186,13 +187,26 @@ static void check_guards(void) {
     for (uint64_t p = r4 + 0x10000; p < r4 + 0x13000; p += 0x1000) (void)*(volatile uint8_t *)(uintptr_t)p;
     CHECK(fetches == 4, "reads of the owned run: %d fetches in all (want 4)", fetches);
 
-    // A region with an owned page is not frozen; once the page is fetched, it is.
+    // A region with a settled owned page freezes as FRZ_HOLES under DKB_FRZ_LAZY=1 (leaving the owned page
+    // PAGE_NOACCESS and other pages read-only); reading the owned page fetches it and thaws the region.
     CHECK(mem_guard_own(r2 + 0x3000) == 1, "guard of a page in an open region");
-    CHECK(mem_freeze(r2) == 0 && !mem_frozen(r2), "a region with an owned page was frozen");
-    (void)*(volatile uint8_t *)(uintptr_t)(r2 + 0x3000);
-    CHECK(fetches == 5 && mem_freeze(r2) == 1, "after the fetch the region does not freeze (%d fetches)", fetches);
-    CHECK(prot_of(r2) == PLAT_PROT_READ && prot_of(r2 + 0x3000) == PLAT_PROT_READ, "the frozen region is not read-only");
-    printf("guards: a region with an owned page is refused by the freeze, and freezes once the page is fetched\n");
+    if (cfg_bool("DKB_FRZ_LAZY")) {
+        CHECK(mem_freeze(r2) == 1 && mem_frozen(r2), "a region with a settled owned page did not freeze");
+        CHECK(prot_of(r2) == PLAT_PROT_READ && prot_of(r2 + 0x3000) == PLAT_PROT_NONE,
+              "freezing a region with an owned page altered its protections");
+        (void)*(volatile uint8_t *)(uintptr_t)(r2 + 0x3000);
+        CHECK(fetches == 5 && !mem_frozen(r2), "reading the owned page in a frozen region did not fetch and thaw (%d fetches)", fetches);
+        CHECK(prot_of(r2) == PLAT_PROT_RW && prot_of(r2 + 0x3000) == PLAT_PROT_RW, "the thawed region is not read-write");
+        CHECK(mem_freeze(r2) == 1, "after the fetch the region does not freeze");
+        CHECK(prot_of(r2) == PLAT_PROT_READ && prot_of(r2 + 0x3000) == PLAT_PROT_READ, "the refrozen region is not read-only");
+        printf("guards: a region with a settled owned page freezes keeping it PAGE_NOACCESS, and reading it fetches and thaws\n");
+    } else {
+        CHECK(mem_freeze(r2) == 0 && !mem_frozen(r2), "a region with an owned page was frozen");
+        (void)*(volatile uint8_t *)(uintptr_t)(r2 + 0x3000);
+        CHECK(fetches == 5 && mem_freeze(r2) == 1, "after the fetch the region does not freeze (%d fetches)", fetches);
+        CHECK(prot_of(r2) == PLAT_PROT_READ && prot_of(r2 + 0x3000) == PLAT_PROT_READ, "the frozen region is not read-only");
+        printf("guards: a region with an owned page is refused by the freeze, and freezes once the page is fetched\n");
+    }
 
     // A write into a page owned in a frozen region: the fetch thaws the region first, so the write lands and the
     // write watch reports it (vk_memory.c skips frozen regions in its queries).
@@ -211,8 +225,69 @@ static void check_guards(void) {
 
     for (uint64_t a = heap; a < heap + 0x1000000; a += 0x1000)
         if (mem_guard_state(a)) CHECK(0, "page +%#llx is still guarded", (unsigned long long)(a - heap));
+
+    // Coalesced mem_probe_copy across unguarded + guarded + unguarded pages keeps the guarded page PAGE_NOACCESS.
+    uint64_t rc = heap + 0x800000;
+    for (uint64_t i = 0; i < 0x3000; i++) *(volatile uint8_t *)(uintptr_t)(rc + i) = (uint8_t)((i * 37u + 11u) & 0xffu);
+    CHECK(mem_guard_own(rc + 0x1000) == 1, "guard middle page for mem_probe_copy");
+    uint8_t cpy[0x3000];
+    mem_probe_copy(cpy, rc, sizeof cpy);
+    CHECK(prot_of(rc + 0x1000) == PLAT_PROT_NONE && mem_guard_state(rc + 0x1000) == 1,
+          "mem_probe_copy left guarded page open");
+    int cpy_ok = 1;
+    for (size_t i = 0; i < sizeof cpy; i++)
+        if (cpy[i] != (uint8_t)((i * 37u + 11u) & 0xffu)) { cpy_ok = 0; break; }
+    CHECK(cpy_ok, "mem_probe_copy mismatch across unguarded/guarded boundary");
+    int cl = 0;
+    CHECK(mem_guard_drop(rc + 0x1000, 0x1000, &cl) == 1 && !cl, "drop guarded page after mem_probe_copy");
+
     mem_guard_hook(NULL);
     CHECK(mem_set_heap_size(0, &heap) == 0, "SetHeapSize 0");
+
+    // Lazy-heap regions with reserved holes (DKB_HEAP_LAZY=1, DKB_FRZ_LAZY=1): partial regions freeze as FRZ_HOLES and
+    // all-reserved regions freeze as FRZ_EMPTY without committing any holes; a write into a reserved hole commits it
+    // and thaws the region so the write watch reports it, and mem_touch on a hole thaws it before committing.
+    if (cfg_bool("DKB_HEAP_LAZY") && cfg_bool("DKB_FRZ_LAZY")) {
+        CHECK(mem_set_heap_size(0x1800000, &heap) == 0, "SetHeapSize 24 MiB for lazy-hole freeze");
+        uint64_t rl1 = heap + 0x1200000, rl2 = heap + 0x1400000, rl3 = heap + 0x1600000;
+        *(volatile uint8_t *)(uintptr_t)(rl1 + 0x1000) = 0x33;
+        *(volatile uint8_t *)(uintptr_t)(rl2 + 0x1000) = 0x44;
+        mem_written_pages(rl1, 0x600000, pages, 8);
+        CHECK(prot_of(rl1 + 0x100000) == PLAT_MEM_RESERVED, "lazy hole in rl1 not reserved before freeze");
+        CHECK(mem_freeze(rl1) == 1 && mem_frozen(rl1), "freeze of lazy-heap region with reserved hole");
+        CHECK(prot_of(rl1 + 0x1000) == PLAT_PROT_READ, "committed page in frozen lazy region is not read-only");
+        CHECK(prot_of(rl1 + 0x100000) == PLAT_MEM_RESERVED, "freeze committed lazy hole");
+        *(volatile uint8_t *)(uintptr_t)(rl1 + 0x100000) = 0x77;
+        CHECK(!mem_frozen(rl1) && *(volatile uint8_t *)(uintptr_t)(rl1 + 0x100000) == 0x77,
+              "write into lazy hole inside frozen region did not thaw it");
+        CHECK(prot_of(rl1 + 0x1000) == PLAT_PROT_RW, "previously frozen committed page stayed read-only after hole fault");
+        uint64_t wn = mem_written_pages(rl1, 0x200000, pages, 8);
+        int wseen = 0;
+        for (uint64_t i = 0; i < wn && i < 8; i++) wseen |= pages[i] == rl1 + 0x100000;
+        CHECK(wseen, "write into lazy hole inside frozen region was not reported by write watch");
+
+        CHECK(prot_of(rl2 + 0x100000) == PLAT_MEM_RESERVED, "lazy hole in rl2 not reserved before freeze");
+        CHECK(mem_freeze(rl2) == 1 && mem_frozen(rl2), "freeze of second lazy-heap region with reserved hole");
+        mem_touch(rl2 + 0x100000, 0x10000);
+        CHECK(!mem_frozen(rl2), "mem_touch of lazy hole inside frozen region did not thaw it");
+        CHECK(prot_of(rl2 + 0x1000) == PLAT_PROT_RW && prot_of(rl2 + 0x100000) == PLAT_PROT_RW,
+              "mem_touch left frozen region half read-only");
+
+        CHECK(prot_of(rl3) == PLAT_MEM_RESERVED && prot_of(rl3 + 0x100000) == PLAT_MEM_RESERVED,
+              "all-reserved region rl3 not reserved before freeze");
+        CHECK(mem_freeze(rl3) == 1 && mem_frozen(rl3), "freeze of all-reserved lazy-heap region");
+        CHECK(prot_of(rl3 + 0x80000) == PLAT_MEM_RESERVED, "freeze committed page in all-reserved region");
+        *(volatile uint8_t *)(uintptr_t)(rl3 + 0x80000) = 0x88;
+        CHECK(!mem_frozen(rl3) && *(volatile uint8_t *)(uintptr_t)(rl3 + 0x80000) == 0x88,
+              "write into all-reserved frozen region did not thaw it");
+        wn = mem_written_pages(rl3, 0x200000, pages, 8);
+        wseen = 0;
+        for (uint64_t i = 0; i < wn && i < 8; i++) wseen |= pages[i] == rl3 + 0x80000;
+        CHECK(wseen, "write into all-reserved frozen region was not reported by write watch");
+
+        CHECK(mem_set_heap_size(0, &heap) == 0, "SetHeapSize 0 after lazy-hole freeze");
+        printf("guards: lazy-heap regions with reserved holes (partial and all-reserved) freeze without committing and thaw on fault or mem_touch\n");
+    }
 }
 #endif
 
