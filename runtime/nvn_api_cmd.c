@@ -101,8 +101,22 @@ typedef union {
 } ubo_inline_list;
 _Static_assert(offsetof(nvn_range_list, n) == 0 && offsetof(nvn_range_list, r) == offsetof(ubo_inline_list, inl.r),
                "inline uniform list matches nvn_range_list layout");
-typedef struct { uint64_t magic, bytes, made_at, used_at, deferred, block; uint32_t refs; uint16_t flags, depth;
-                 nvn_range_list *ubo; def_off_list *def_list; ubo_inline_list ubo_inl; } copy_prefix;
+typedef struct copy_prefix copy_prefix;
+typedef struct rec_track rec_track;
+struct copy_prefix {
+    uint64_t magic, bytes, made_at, used_at, deferred, block;
+    uint32_t refs;
+    uint16_t flags, depth;
+    nvn_range_list *ubo;
+    def_off_list *def_list;
+    uint32_t ncallees, pad_;
+    union {
+        rec_track *track;             // REC_MAGIC: incremental per-recording metadata and callee/UBO tracker
+        copy_prefix **callees;        // COPY_MAGIC with COPY_CALLEES and ncallees > 4: heap array
+        copy_prefix *callee_inl[4];   // COPY_MAGIC with COPY_CALLEES and ncallees <= 4: inline storage
+    } u;
+    ubo_inline_list ubo_inl;
+};
 _Static_assert(sizeof(copy_prefix) % 8 == 0, "records stay 8-byte aligned");
 
 // used_at only moves forward: a thread that read nsubmits earlier must not lower the value of a later submission (a
@@ -112,11 +126,30 @@ static inline void used_at_max(copy_prefix *pf, uint64_t v) {
     while (cur < v && !__atomic_compare_exchange_n(&pf->used_at, &cur, v, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
 }
 _Static_assert(OP_COUNT_ <= 64, "recording scan bitmask fits in uint64_t");
-#define COPY_CALLS 1u   // copy_prefix.flags (see "recording copies" below)
+#define COPY_CALLS 1u     // copy_prefix.flags (see "recording copies" below)
 #define COPY_WAITS 2u
+#define COPY_CALLEES 4u   // copy's OP_CALL targets are stored in ncallees / u.callee_inl / u.callees
+static inline copy_prefix *const *copy_callees(const copy_prefix *pf) {
+    return pf->ncallees <= 4 ? pf->u.callee_inl : pf->u.callees;
+}
 static void put_hdr(uint8_t *p, uint32_t op, uint32_t size) {
     op_hdr h = {op, size};
     memcpy(p, &h, sizeof h);
+}
+
+// DKB_CMD_TRACK_FAST (default 1): track uniform bindings, OP_CALL callees, waits, call depth and deferred records
+// incrementally at record time so EndRecording (take_recording) and copy_free / drop_recording_calls avoid walking
+// every op record in the finished buffer. Read directly from the environment so standalone recorder tests that only
+// stub cfg_bool("DKB_CALL_REF") keep working.
+static int cmd_track_fast(void) {
+    static int on = -1;
+    int v = __atomic_load_n(&on, __ATOMIC_RELAXED);
+    if (v < 0) {
+        const char *e = getenv("DKB_CMD_TRACK_FAST");
+        v = !(e && e[0] == '0' && e[1] == '\0');
+        __atomic_store_n(&on, v, __ATOMIC_RELAXED);
+    }
+    return v;
 }
 
 // The recording buffer is a copy block (copy_block below) with the copy's prefix in front, so EndRecording can hand
@@ -154,7 +187,14 @@ static void cmd_reserve(cmd_t *o, size_t need) {
     if (!cap) cap = 48 << 10;
     while (used + need + OP_RESERVE > cap) cap *= 2;
     size_t room;
+    rec_track *tr = NULL;
+    if (o->seg) {
+        copy_prefix *old_pf = (copy_prefix *)o->seg - 1;
+        tr = old_pf->u.track;
+        old_pf->u.track = NULL;
+    }
     uint8_t *b = rec_buffer(cap, &room);
+    ((copy_prefix *)b - 1)->u.track = tr;
     if (used) memcpy(b, o->seg, used);
     rec_buffer_free(o->seg);
     o->seg = b;
@@ -345,11 +385,15 @@ static void copy_block_free_many(copy_prefix **pfs, size_t n) {
 // the cmd_t's seg_tok (its own address) writes into it or frees it; another one takes a block of its own (or copies and leaves the
 // shared one alone). Safe rather than fatal: a twin that records on is a game quirk we can serve, and the owner's
 // buffer, or the copy handed over from it, stays intact. Once handed over, the buffer belongs to the copy list: the command buffer takes a new seg.
+static void rec_track_free(rec_track *tr);
+
 static uint8_t *rec_buffer(size_t cap, size_t *room) {
     copy_prefix *b = copy_block(sizeof *b + cap);
     b->magic = REC_MAGIC;
     b->ubo = NULL;
     b->def_list = NULL;
+    b->ncallees = 0;
+    b->u.track = NULL;
     *room = (size_t)b->block - sizeof *b;
     return (uint8_t *)(b + 1);
 }
@@ -359,8 +403,12 @@ static int rec_owned(const cmd_t *o) { return SEG_OWNED(o); }
 
 static void rec_buffer_free(uint8_t *seg) {
     if (!seg) return;
-    ((copy_prefix *)seg - 1)->magic = 0;   // a stale REC_MAGIC must not look live
-    copy_block_free((copy_prefix *)seg - 1);
+    copy_prefix *pf = (copy_prefix *)seg - 1;
+    rec_track *tr = pf->u.track;
+    pf->u.track = NULL;
+    pf->magic = 0;   // a stale REC_MAGIC must not look live
+    rec_track_free(tr);
+    copy_block_free(pf);
 }
 typedef struct { uintptr_t lo, hi; uint8_t *copy; } cmd_copy;
 typedef struct { cmd_copy *v; uint32_t n, cap; } copy_bucket;
@@ -388,10 +436,175 @@ static nvn_range_list ubo_empty;
 static uint64_t ubo_live;   // lists held by copies, live or released and waiting (zombies); atomic
 
 #define UBO_ALIGN 256u
+_Static_assert(UBO_ALIGN == 256u, "rlo >> 8 matches rlo / UBO_ALIGN");
 #define UBO_MAX_RANGE (64u << 10)
 #define UBO_RNG_C4 1ull   // low bit of lo (0 after UBO_ALIGN): matches vk_usnap.c RNG_C4 for VS/FS c4 bindings
 #define UBO_SEEN_BITS 8
 #define UBO_SEEN_MIN 16
+
+static inline int ubo_lists_cached(void) {
+    static int lists = -1;   // nvn_ubo_lists_on, read once; any recording thread may store it first (same value)
+    int on = __atomic_load_n(&lists, __ATOMIC_RELAXED);
+    if (on < 0) on = nvn_ubo_lists_on() != 0, __atomic_store_n(&lists, on, __ATOMIC_RELAXED);
+    return on;
+}
+
+// Incremental per-recording tracker attached to a live REC_MAGIC buffer when DKB_CMD_TRACK_FAST is on. Moves with the
+// command buffer across cmd_reserve reallocations and RECORDING_HANDOVER so its scratch arrays and generation-tagged
+// L1 UBO dedup cache are reused across recordings with zero per-recording allocations or 4 KiB memset clears.
+struct rec_track {
+    nvn_range *ubos;
+    size_t nubos, cubos;
+    copy_prefix **callees;
+    uint32_t ncallees, cap_callees;
+    const copy_prefix *last_cp;
+    uint16_t flags, depth;
+    uint8_t valid, ubo_ok, deferred, seen_on;
+    uint32_t gen;
+    uint32_t seen_gen[1u << UBO_SEEN_BITS];
+    nvn_range seen[1u << UBO_SEEN_BITS];
+};
+
+static rec_track *rec_track_new(void) {
+    rec_track *tr = calloc(1, sizeof *tr);
+    if (!tr) rt_fatal("nvn: out of memory (recording tracker)");
+    return tr;
+}
+
+static void rec_track_free(rec_track *tr) {
+    if (!tr) return;
+    free(tr->ubos);
+    free(tr->callees);
+    free(tr);
+}
+
+static void rec_track_begin(cmd_t *o) {
+    if (!cmd_track_fast() || !rec_owned(o)) return;
+    copy_prefix *pf = (copy_prefix *)o->seg - 1;
+    rec_track *tr = pf->u.track;
+    if (!tr) tr = pf->u.track = rec_track_new();
+    tr->nubos = 0;
+    tr->ncallees = 0;
+    tr->last_cp = NULL;
+    tr->flags = 0;
+    tr->depth = 0;
+    tr->valid = 1;
+    tr->ubo_ok = (uint8_t)ubo_lists_cached();
+    tr->deferred = 0;
+    tr->seen_on = 0;
+}
+
+static inline rec_track *rec_track_of(const cmd_t *o) {
+    if (!cmd_track_fast() || !o->recording || !rec_owned(o)) return NULL;
+    rec_track *tr = ((const copy_prefix *)o->seg - 1)->u.track;
+    return (tr && tr->valid) ? tr : NULL;
+}
+
+static inline void track_ubo_add(rec_track *tr, nvn_range r) {
+    uint64_t rlo = r.lo & ~UBO_RNG_C4;
+    if (tr->nubos) {
+        nvn_range *prev = &tr->ubos[tr->nubos - 1];
+        if ((prev->lo & ~UBO_RNG_C4) == rlo && prev->hi == r.hi) {
+            if ((prev->lo & UBO_RNG_C4) || !(r.lo & UBO_RNG_C4)) return;
+            prev->lo |= UBO_RNG_C4;
+            if (tr->seen_on) {
+                uint32_t idx = (uint32_t)(((rlo >> 8) * 0x9E3779B97F4A7C15ull) >> (64 - UBO_SEEN_BITS));
+                if (tr->seen_gen[idx] == tr->gen && (tr->seen[idx].lo & ~UBO_RNG_C4) == rlo && tr->seen[idx].hi == r.hi)
+                    tr->seen[idx].lo |= UBO_RNG_C4;
+            }
+            return;
+        }
+    }
+    if (tr->seen_on) {
+        uint32_t idx = (uint32_t)(((rlo >> 8) * 0x9E3779B97F4A7C15ull) >> (64 - UBO_SEEN_BITS));
+        if (tr->seen_gen[idx] == tr->gen && (tr->seen[idx].lo & ~UBO_RNG_C4) == rlo && tr->seen[idx].hi == r.hi) {
+            if ((tr->seen[idx].lo & UBO_RNG_C4) || !(r.lo & UBO_RNG_C4)) return;
+            tr->seen[idx].lo |= UBO_RNG_C4;
+        } else {
+            tr->seen_gen[idx] = tr->gen;
+            tr->seen[idx] = r;
+        }
+    } else if (tr->nubos >= UBO_SEEN_MIN) {
+        if (!++tr->gen) {
+            memset(tr->seen_gen, 0, sizeof tr->seen_gen);
+            tr->gen = 1;
+        }
+        uint32_t g = tr->gen;
+        for (size_t i = 0; i < tr->nubos; i++) {
+            nvn_range e = tr->ubos[i];
+            uint64_t elo = e.lo & ~UBO_RNG_C4;
+            uint32_t eidx = (uint32_t)(((elo >> 8) * 0x9E3779B97F4A7C15ull) >> (64 - UBO_SEEN_BITS));
+            if (tr->seen_gen[eidx] == g && (tr->seen[eidx].lo & ~UBO_RNG_C4) == elo && tr->seen[eidx].hi == e.hi)
+                tr->seen[eidx].lo |= e.lo & UBO_RNG_C4;
+            else {
+                tr->seen_gen[eidx] = g;
+                tr->seen[eidx] = e;
+            }
+        }
+        tr->seen_on = 1;
+        uint32_t idx = (uint32_t)(((rlo >> 8) * 0x9E3779B97F4A7C15ull) >> (64 - UBO_SEEN_BITS));
+        if (tr->seen_gen[idx] == g && (tr->seen[idx].lo & ~UBO_RNG_C4) == rlo && tr->seen[idx].hi == r.hi) {
+            if ((tr->seen[idx].lo & UBO_RNG_C4) || !(r.lo & UBO_RNG_C4)) return;
+            tr->seen[idx].lo |= UBO_RNG_C4;
+        } else {
+            tr->seen_gen[idx] = g;
+            tr->seen[idx] = r;
+        }
+    }
+    if (tr->nubos == tr->cubos) {
+        size_t c = tr->cubos ? tr->cubos * 2 : 128;
+        nvn_range *q = realloc(tr->ubos, c * sizeof *q);
+        if (!q) rt_fatal("nvn: out of memory (uniform bindings of a recording)");
+        tr->ubos = q;
+        tr->cubos = c;
+    }
+    tr->ubos[tr->nubos++] = r;
+}
+
+static inline void track_ubo_bind(rec_track *tr, int stage, int index, uint64_t addr, uint64_t size) {
+    if (!tr->ubo_ok || !addr || !size) return;
+    uint64_t sz = size < UBO_MAX_RANGE ? size : UBO_MAX_RANGE;
+    uint64_t c4 = (index == 1 && (stage == NVN_SHADER_STAGE_VERTEX || stage == NVN_SHADER_STAGE_FRAGMENT) && size <= 256)
+                      ? UBO_RNG_C4
+                      : 0;
+    track_ubo_add(tr, (nvn_range){(addr & ~(uint64_t)(UBO_ALIGN - 1)) | c4, addr + sz});
+}
+
+static inline void track_callee_add(rec_track *tr, copy_prefix *cp) {
+    if (tr->ncallees == tr->cap_callees) {
+        uint32_t c = tr->cap_callees ? tr->cap_callees * 2 : 16;
+        copy_prefix **v = realloc(tr->callees, c * sizeof *v);
+        if (!v) rt_fatal("nvn: out of memory (recording callees)");
+        tr->callees = v;
+        tr->cap_callees = c;
+    }
+    tr->callees[tr->ncallees++] = cp;
+}
+
+static void track_callees_append(rec_track *tr, copy_prefix *const *cs, uint32_t n) {
+    if (!n) return;
+    if (tr->ncallees + n > tr->cap_callees) {
+        uint32_t c = tr->cap_callees ? tr->cap_callees * 2 : 16;
+        while (c < tr->ncallees + n) c *= 2;
+        copy_prefix **v = realloc(tr->callees, c * sizeof *v);
+        if (!v) rt_fatal("nvn: out of memory (recording callees)");
+        tr->callees = v;
+        tr->cap_callees = c;
+    }
+    memcpy(tr->callees + tr->ncallees, cs, n * sizeof *cs);
+    tr->ncallees += n;
+}
+
+static inline void track_compose_ubo(rec_track *tr, const copy_prefix *cp) {
+    if (!tr->ubo_ok || cp == tr->last_cp) return;
+    tr->last_cp = cp;
+    const nvn_range_list *cl = cp->ubo;
+    if (!cl) {
+        tr->ubo_ok = 0;
+        return;
+    }
+    for (uint64_t j = 0; j < cl->n; j++) track_ubo_add(tr, cl->r[j]);
+}
 
 // Appends normalized range r to the recording thread's scratch buffer. Small leaf recordings stay under UBO_SEEN_MIN
 // without zeroing the 4 KiB seen cache; once UBO_SEEN_MIN ranges accumulate, seen is initialized lazily from them.
@@ -625,10 +838,21 @@ static void calls_adjust(const uint8_t *p, const uint8_t *end, int delta) {
     }
 }
 
+static void copy_calls_adjust(const copy_prefix *pf, int delta) {
+    if (pf->flags & COPY_CALLEES) {
+        copy_prefix *const *cs = copy_callees(pf);
+        for (uint32_t i = 0; i < pf->ncallees; i++)
+            __atomic_add_fetch(&cs[i]->refs, (uint32_t)delta, __ATOMIC_RELAXED);
+    } else {
+        calls_adjust((const uint8_t *)(pf + 1), (const uint8_t *)(pf + 1) + pf->bytes, delta);
+    }
+}
+
 // A released copy or a clone, with its uniform list (copy_lock held; no OP_CALL record names pf any more). A recording
 // buffer has no list: rec_buffer_free.
 static void copy_free(copy_prefix *pf) {
-    if (pf->flags & COPY_CALLS) calls_adjust((const uint8_t *)(pf + 1), (const uint8_t *)(pf + 1) + pf->bytes, -1);
+    if (pf->flags & COPY_CALLS) copy_calls_adjust(pf, -1);
+    if ((pf->flags & COPY_CALLEES) && pf->ncallees > 4) free(pf->u.callees);
     free(pf->def_list);
     ubo_list_free(pf);
     copy_block_free(pf);
@@ -666,6 +890,7 @@ static void flush_deferred_frees(uint32_t npf, uint32_t nptr) {
     uint64_t heap_ubo = 0;
     for (uint32_t i = 0; i < npf; i++) {
         copy_prefix *pf = tl_free_pf[i];
+        if ((pf->flags & COPY_CALLEES) && pf->ncallees > 4) free(pf->u.callees);
         free(pf->def_list);
         nvn_range_list *l = pf->ubo;
         if (l && l != &ubo_empty && l != &pf->ubo_inl.hdr) {
@@ -704,7 +929,7 @@ static void zombie_sweep_defer(uint64_t replayed, uint32_t *npf) {   // copy_loc
                 zombies[i] = zombies[--nzombies];
                 if (pf->flags & COPY_CALLS) {
                     again = 1;
-                    calls_adjust((const uint8_t *)(pf + 1), (const uint8_t *)(pf + 1) + pf->bytes, -1);
+                    copy_calls_adjust(pf, -1);
                 }
                 defer_pf(pf, npf);
             } else {
@@ -718,8 +943,19 @@ static void zombie_sweep_defer(uint64_t replayed, uint32_t *npf) {   // copy_loc
 // they stay taken (counted).
 static void drop_recording_calls(cmd_t *o) {
     if (!call_ref() || !o->recording || !o->seg) return;
-    if (rec_owned(o)) calls_adjust(o->seg, o->cur, -1);
-    else __atomic_add_fetch(&n_ref_leaks, 1, __ATOMIC_RELAXED);
+    if (rec_owned(o)) {
+        rec_track *tr = ((copy_prefix *)o->seg - 1)->u.track;
+        if (tr && tr->valid) {
+            for (uint32_t i = 0; i < tr->ncallees; i++)
+                __atomic_sub_fetch(&tr->callees[i]->refs, 1, __ATOMIC_RELAXED);
+            tr->ncallees = 0;
+            tr->valid = 0;
+        } else {
+            calls_adjust(o->seg, o->cur, -1);
+        }
+    } else {
+        __atomic_add_fetch(&n_ref_leaks, 1, __ATOMIC_RELAXED);
+    }
 }
 
 // For the tests: a copy's count and depth (its prefix is read as is, so a released copy must still be a zombie), and
@@ -793,12 +1029,14 @@ static __attribute__((noinline)) void def_offs_push(uint32_t off, uint32_t *ndef
 }
 
 static __attribute__((noinline)) uint8_t *take_recording_slow(cmd_t *o, int on) {
+    const uint8_t *p = o->seg;
+    size_t n = (size_t)(o->cur - o->seg);
+    int owned = rec_owned(o);
+    rec_track *tr = owned ? ((copy_prefix *)o->seg - 1)->u.track : NULL;
     int ubo_ok = on, seen_on = 0;
     size_t nubo = 0;
     const copy_prefix *last_cp = NULL;
     nvn_range seen[1 << UBO_SEEN_BITS];
-    const uint8_t *p = o->seg;
-    size_t n = (size_t)(o->cur - o->seg);
     int calls = 0, deferred = 0, depth = 0, waits = 0;
     for (size_t at = 0;;) {   // the records stay checked: a corrupt one stops here, not in the replay
         op_hdr h;
@@ -851,29 +1089,74 @@ static __attribute__((noinline)) uint8_t *take_recording_slow(cmd_t *o, int on) 
     copy_prefix *pf;
     // Hand the buffer over only when it is the block a copy would get anyway (else a 40 KiB recording could pin the
     // 8 MiB the buffer grew to) and this object owns it. The next buffer is sized to the same class.
-    if (n >= RECORDING_HANDOVER && rec_owned(o) &&
+    if (n >= RECORDING_HANDOVER && owned &&
         blk_class(sizeof *pf + n) == blk_class((size_t)((copy_prefix *)o->seg - 1)->block)) {
         pf = (copy_prefix *)o->seg - 1;
+        rec_track *saved_tr = pf->u.track;
+        pf->u.track = NULL;
         size_t room;
         o->seg = o->cur = rec_buffer((size_t)pf->block - sizeof *pf, &room);
         o->end = o->seg + room;
+        ((copy_prefix *)o->seg - 1)->u.track = saved_tr;
     } else {
         pf = copy_block(sizeof *pf + n);
         memcpy(pf + 1, p, n);
     }
+    if (tr) tr->valid = 0;
     uint64_t block = pf->block;
     // With DKB_CALL_REF the deferred records are known from here on (inline_recording needs it before any submit).
     *pf = (copy_prefix){COPY_MAGIC, n, 0, 0, call_ref() ? (uint64_t)(deferred ? 2 : 1) : 0, block, 0,
                         (uint16_t)((calls ? COPY_CALLS : 0) | (waits ? COPY_WAITS : 0)), (uint16_t)depth, NULL, NULL,
-                        {{0}}};
+                        0, 0, {NULL}, {{0}}};
     if (ubo_ok) ubo_list_set(pf, tl_ubo_buf, nubo);
     return (uint8_t *)(pf + 1);
 }
 
 static uint8_t *take_recording(cmd_t *o) {
-    static int lists = -1;   // nvn_ubo_lists_on, read once; any recording thread may store it first (same value)
-    int on = __atomic_load_n(&lists, __ATOMIC_RELAXED);
-    if (on < 0) on = nvn_ubo_lists_on() != 0, __atomic_store_n(&lists, on, __ATOMIC_RELAXED);
+    const uint8_t *p = o->seg;
+    size_t n = (size_t)(o->cur - o->seg);
+    int owned = rec_owned(o);
+    rec_track *tr = owned ? ((copy_prefix *)o->seg - 1)->u.track : NULL;
+    if (cmd_track_fast() && tr && tr->valid) {
+        if (n < 16 || (n & 7))
+            rt_fatal("nvn: corrupt recording at %p (size %zu)", (const void *)p, n);
+        op_hdr first, last;
+        memcpy(&first, p, sizeof first);
+        memcpy(&last, p + n - sizeof last, sizeof last);
+        if (first.op != OP_BEGIN || first.size != 8 || last.op != OP_END || last.size != 8)
+            rt_fatal("nvn: corrupt recording boundaries at %p (first %u/%u last %u/%u)", (const void *)p,
+                     first.op, first.size, last.op, last.size);
+        copy_prefix *pf;
+        if (n >= RECORDING_HANDOVER &&
+            blk_class(sizeof *pf + n) == blk_class((size_t)((copy_prefix *)o->seg - 1)->block)) {
+            pf = (copy_prefix *)o->seg - 1;
+            pf->u.track = NULL;
+            size_t room;
+            o->seg = o->cur = rec_buffer((size_t)pf->block - sizeof *pf, &room);
+            o->end = o->seg + room;
+            ((copy_prefix *)o->seg - 1)->u.track = tr;
+        } else {
+            pf = copy_block(sizeof *pf + n);
+            memcpy(pf + 1, p, n);
+        }
+        uint64_t block = pf->block;
+        uint32_t nc = tr->ncallees;
+        *pf = (copy_prefix){COPY_MAGIC, n, 0, 0, call_ref() ? (uint64_t)(tr->deferred ? 2 : 1) : 0, block, 0,
+                            (uint16_t)((tr->flags & (COPY_CALLS | COPY_WAITS)) | COPY_CALLEES), tr->depth, NULL, NULL,
+                            nc, 0, {NULL}, {{0}}};
+        if (nc <= 4) {
+            if (nc) memcpy(pf->u.callee_inl, tr->callees, nc * sizeof *pf->u.callee_inl);
+        } else {
+            copy_prefix **v = malloc(nc * sizeof *v);
+            if (!v) rt_fatal("nvn: out of memory (recording callees)");
+            memcpy(v, tr->callees, nc * sizeof *v);
+            pf->u.callees = v;
+        }
+        if (tr->ubo_ok) ubo_list_set_fast(pf, tr->ubos, tr->nubos, 0);
+        tr->valid = 0;
+        return (uint8_t *)(pf + 1);
+    }
+    int on = ubo_lists_cached();
     if (!cmd_rec_fast()) return take_recording_slow(o, on);
     const int cref = call_ref();
     int ubo_ok = on, single_callee = 0;
@@ -884,8 +1167,6 @@ static uint8_t *take_recording(cmd_t *o) {
     const copy_prefix *last_cp = NULL;
     nvn_range *ubo_buf = tl_ubo_buf;
     size_t ubo_cap = tl_ubo_cap;
-    const uint8_t *p = o->seg;
-    size_t n = (size_t)(o->cur - o->seg);
     int calls = 0, deferred = 0, depth = 0, waits = 0;
     if (__builtin_expect(n < 8, 0))
         rt_fatal("nvn: corrupt recording at %p (empty)", (const void *)p);
@@ -992,16 +1273,20 @@ scan_done:
     tl_ubo_buf = ubo_buf;
     tl_ubo_cap = ubo_cap;
     copy_prefix *pf;
-    if (n >= RECORDING_HANDOVER && rec_owned(o) &&
+    if (n >= RECORDING_HANDOVER && owned &&
         blk_class(sizeof *pf + n) == blk_class((size_t)((copy_prefix *)o->seg - 1)->block)) {
         pf = (copy_prefix *)o->seg - 1;
+        rec_track *saved_tr = pf->u.track;
+        pf->u.track = NULL;
         size_t room;
         o->seg = o->cur = rec_buffer((size_t)pf->block - sizeof *pf, &room);
         o->end = o->seg + room;
+        ((copy_prefix *)o->seg - 1)->u.track = saved_tr;
     } else {
         pf = copy_block(sizeof *pf + n);
         memcpy(pf + 1, p, n);
     }
+    if (tr) tr->valid = 0;
     uint64_t block = pf->block;
     def_off_list *dl = NULL;
     if (ndef && def_ok) {
@@ -1012,7 +1297,7 @@ scan_done:
     }
     *pf = (copy_prefix){COPY_MAGIC, n, 0, 0, cref ? (uint64_t)(deferred ? 2 : 1) : 0, block, 0,
                         (uint16_t)((calls ? COPY_CALLS : 0) | (waits ? COPY_WAITS : 0)), (uint16_t)depth, NULL, dl,
-                        {{0}}};
+                        0, 0, {NULL}, {{0}}};
     if (ubo_ok) ubo_list_set_fast(pf, ubo_buf, nubo, single_callee);
     return (uint8_t *)(pf + 1);
 }
@@ -1067,8 +1352,7 @@ static void release_copies(uintptr_t lo, uintptr_t hi) {
                 if (pf->used_at > replayed || __atomic_load_n(&pf->refs, __ATOMIC_RELAXED)) {
                     zombie_add(pf);   // still read
                 } else {
-                    if (pf->flags & COPY_CALLS)
-                        calls_adjust((const uint8_t *)(pf + 1), (const uint8_t *)(pf + 1) + pf->bytes, -1);
+                    if (pf->flags & COPY_CALLS) copy_calls_adjust(pf, -1);
                     defer_pf(pf, &npf);
                 }
                 b->v[i] = b->v[--b->n];
@@ -1204,6 +1488,7 @@ NVN_API(nvnCommandBufferBeginRecording) {
     put_hdr(cmd_alloc(o, 8), OP_BEGIN, 8);
     o->hw_used -= 8;   // BEGIN and END have no hardware equivalent
     o->hw_start = o->hw_used;
+    rec_track_begin(o);
     nvn_mode_trace(NVN_MODE_BEGIN, (uintptr_t)o, 0, 0, 0);
     if (!o->game_size) memory_event(c, o, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY, MIN_COMMAND_SIZE);
 }
@@ -1254,6 +1539,14 @@ static void inline_recording(cmd_t *o, uint64_t handle, const char *what) {
             ((p_jump *)rec(o, OP_CALL, sizeof(p_jump)))->target = handle;
             o->hw_used += (size_t)bytes - 16 - (8 + sizeof(p_jump));   // the game sees the usage a copy would have taken
             o->last_rec = 0;
+            rec_track *tr = rec_track_of(o);
+            if (tr) {
+                tr->flags |= (uint16_t)(COPY_CALLS | (pf->flags & COPY_WAITS));
+                uint16_t d = (uint16_t)(pf->depth + 1);
+                if (d > tr->depth) tr->depth = d;
+                track_callee_add(tr, pf);
+                track_compose_ubo(tr, pf);
+            }
             if ((__atomic_add_fetch(&n_call_refs, 1, __ATOMIC_RELAXED) & 0xfffff) == 0)
                 rt_log("nvn: DKB_CALL_REF: %llu calls referenced, %llu copied (deferred records), %llu copied (nested %d "
                        "deep), %llu abandoned recordings kept their counts, %u released copies still named or read",
@@ -1270,7 +1563,28 @@ static void inline_recording(cmd_t *o, uint64_t handle, const char *what) {
             size_t body = (size_t)bytes - 16;
             cmd_reserve(o, body);
             memcpy(o->cur, (const uint8_t *)(uintptr_t)handle + 8, body);
-            if ((pf->flags & COPY_CALLS) && o->recording) calls_adjust(o->cur, o->cur + body, +1);
+            rec_track *tr = rec_track_of(o);
+            if ((pf->flags & COPY_CALLS) && o->recording) {
+                if (pf->flags & COPY_CALLEES) {
+                    copy_prefix *const *cs = copy_callees(pf);
+                    for (uint32_t i = 0; i < pf->ncallees; i++)
+                        __atomic_add_fetch(&cs[i]->refs, 1, __ATOMIC_RELAXED);
+                    if (tr) {
+                        tr->flags |= COPY_CALLS;
+                        if (pf->depth > tr->depth) tr->depth = pf->depth;
+                        track_callees_append(tr, cs, pf->ncallees);
+                    }
+                } else {
+                    calls_adjust(o->cur, o->cur + body, +1);
+                    if (tr) tr->valid = 0, tr = NULL;
+                }
+            }
+            if (tr) {
+                tr->flags |= (uint16_t)(pf->flags & COPY_WAITS);
+                if (pf->deferred == 2) tr->deferred = 1;
+                else if (pf->deferred == 0) tr->valid = 0;
+                if (tr->valid) track_compose_ubo(tr, pf);
+            }
             o->cur += body;
             o->cmd_used += body;
             o->hw_used += body;
@@ -1284,6 +1598,12 @@ static void inline_recording(cmd_t *o, uint64_t handle, const char *what) {
     size_t body = (size_t)bytes - 16;
     cmd_reserve(o, body);
     memcpy(o->cur, (const uint8_t *)(uintptr_t)handle + 8, body);
+    rec_track *tr = rec_track_of(o);
+    if (tr) {
+        const copy_prefix *pf = (const copy_prefix *)(uintptr_t)handle - 1;
+        tr->flags |= (uint16_t)(pf->flags & COPY_WAITS);
+        track_compose_ubo(tr, pf);
+    }
     o->cur += body;
     o->cmd_used += body;
     o->hw_used += body;
@@ -1294,6 +1614,7 @@ static _Thread_local uint32_t tl_call_refs;
 static void call_commands_fast(cmd_t *o, const uint64_t *h, int n, const char *what) {
     int i = 0;
     uint32_t refs_added = 0;
+    rec_track *tr = rec_track_of(o);
     while (i < n) {
         int chunk = n - i;
         if (chunk > 64) chunk = 64;
@@ -1326,6 +1647,13 @@ static void call_commands_fast(cmd_t *o, const uint64_t *h, int n, const char *w
                 o->cmd_used += 16;
                 o->hw_used += (size_t)bytes - 16;
                 o->last_rec = 0;
+                if (tr) {
+                    tr->flags |= (uint16_t)(COPY_CALLS | (pf->flags & COPY_WAITS));
+                    uint16_t d = (uint16_t)(pf->depth + 1);
+                    if (d > tr->depth) tr->depth = d;
+                    track_callee_add(tr, pf);
+                    track_compose_ubo(tr, pf);
+                }
                 refs_added++;
             } else {
                 __atomic_add_fetch(shallow ? &n_call_inlined : &n_call_deep, 1, __ATOMIC_RELAXED);
@@ -1333,7 +1661,27 @@ static void call_commands_fast(cmd_t *o, const uint64_t *h, int n, const char *w
                     size_t body = (size_t)bytes - 16;
                     cmd_reserve(o, body);
                     memcpy(o->cur, (const uint8_t *)(uintptr_t)handle + 8, body);
-                    if ((pf->flags & COPY_CALLS) && o->recording) calls_adjust(o->cur, o->cur + body, +1);
+                    if ((pf->flags & COPY_CALLS) && o->recording) {
+                        if (pf->flags & COPY_CALLEES) {
+                            copy_prefix *const *cs = copy_callees(pf);
+                            for (uint32_t j = 0; j < pf->ncallees; j++)
+                                __atomic_add_fetch(&cs[j]->refs, 1, __ATOMIC_RELAXED);
+                            if (tr) {
+                                tr->flags |= COPY_CALLS;
+                                if (pf->depth > tr->depth) tr->depth = pf->depth;
+                                track_callees_append(tr, cs, pf->ncallees);
+                            }
+                        } else {
+                            calls_adjust(o->cur, o->cur + body, +1);
+                            if (tr) tr->valid = 0, tr = NULL;
+                        }
+                    }
+                    if (tr) {
+                        tr->flags |= (uint16_t)(pf->flags & COPY_WAITS);
+                        if (pf->deferred == 2) tr->deferred = 1;
+                        else if (pf->deferred == 0) tr->valid = 0, tr = NULL;
+                        if (tr) track_compose_ubo(tr, pf);
+                    }
                     o->cur += body;
                     o->cmd_used += body;
                     o->hw_used += body;
@@ -1593,12 +1941,22 @@ static void bind_buffers(const Cpu *c, uint32_t op) {   // (cmd, stage, first, n
     for (int i = 0; i < n; i++) {
         *REC(o, op, p_bind_buf) = (p_bind_buf){st, first + i, rg[i].address, rg[i].size};
         hw_fix(o, 20);
+        if (op == OP_BIND_UBO) {
+            rec_track *tr = rec_track_of(o);
+            if (tr) track_ubo_bind(tr, st, first + i, rg[i].address, rg[i].size);
+        }
     }
 }
 static void bind_buffer(const Cpu *c, uint32_t op) {    // (cmd, stage, index, NVNbufferAddress address, size_t size)
     cmd_t *o = cmd_of(c);
-    *REC(o, op, p_bind_buf) = (p_bind_buf){(int)arg_x(c, 1), (int)arg_x(c, 2), arg_x(c, 3), arg_x(c, 4)};
+    int st = (int)arg_x(c, 1), idx = (int)arg_x(c, 2);
+    uint64_t addr = arg_x(c, 3), sz = arg_x(c, 4);
+    *REC(o, op, p_bind_buf) = (p_bind_buf){st, idx, addr, sz};
     hw_fix(o, 20);
+    if (op == OP_BIND_UBO) {
+        rec_track *tr = rec_track_of(o);
+        if (tr) track_ubo_bind(tr, st, idx, addr, sz);
+    }
 }
 NVN_API(nvnCommandBufferBindUniformBuffer) { bind_buffer(c, OP_BIND_UBO); }
 NVN_API(nvnCommandBufferBindUniformBuffers) { bind_buffers(c, OP_BIND_UBO); }
@@ -1629,6 +1987,10 @@ static void push_constants(const Cpu *c, int compute, int deferred) {
     r->compute = compute, r->table = table, r->offset = offset, r->bytes = (int32_t)(n * 4);
     r->src = deferred ? arg_x(c, 4) : 0;
     if (!deferred) memcpy(r->w, arg_p(c, 4), n * 4);
+    else if (r->src) {
+        rec_track *tr = rec_track_of(o);
+        if (tr) tr->deferred = 1;
+    }
     hw_fix(o, 4 * ((size_t)n + 2));   // method header, selector or macro parameter, n words
 }
 NVN_API(nvnCommandBufferPushGraphicsConstants) { push_constants(c, 0, 0); }
@@ -1647,6 +2009,10 @@ static void bind_handles(cmd_t *o, uint32_t op, int st, int first, int n, const 
     r->n = n;
     r->src = deferred ? (uint64_t)(uintptr_t)h : 0;
     memcpy(r->h, h, 8 * (size_t)n);
+    if (r->src) {
+        rec_track *tr = rec_track_of(o);
+        if (tr) tr->deferred = 1;
+    }
     hw_fix(o, hw_bytes ? hw_bytes : 16 + 4 * (size_t)n);   // macro 7 + method 0x1a2c + CB_POS + one word per binding
 }
 static void bind_handle_array(const Cpu *c, uint32_t op, int deferred, int wide) {   // (cmd, stage, first, n, handles)
@@ -1847,6 +2213,8 @@ NVN_API(nvnCommandBufferSetBlendColor) { memcpy(REC(cmd_of(c), OP_BLEND_COLOR, p
 NVN_API(nvnCommandBufferWaitSync) {
     cmd_t *o = cmd_of(c);
     REC(o, OP_WAIT_SYNC, p_wait_sync)->sync = arg_p(c, 1);
+    rec_track *tr = rec_track_of(o);
+    if (tr) tr->flags |= COPY_WAITS;
     hw_fix(o, 0);   // the SDK records a CPU control entry here; GPU wait commands are emitted at submit
 }
 // Commands without an effect on this replay (hle_nvn.c g_nops). WaitEvent still relies on in-order replay; shader
@@ -2070,7 +2438,21 @@ void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
             cl->block = block;
             cl->magic = 0;   // not a live handle: the game never sees it
             cl->refs = 0;
-            if (cl->flags & COPY_CALLS) calls_adjust((const uint8_t *)(cl + 1), (const uint8_t *)(cl + 1) + cl->bytes, +1);
+            if (cl->flags & COPY_CALLEES) {
+                if (cl->ncallees > 4) {
+                    copy_prefix **v = malloc(cl->ncallees * sizeof *v);
+                    if (!v) rt_fatal("nvn: out of memory (clone callees)");
+                    memcpy(v, pf->u.callees, cl->ncallees * sizeof *v);
+                    cl->u.callees = v;
+                }
+                if (cl->flags & COPY_CALLS) {
+                    copy_prefix *const *cs = copy_callees(cl);
+                    for (uint32_t j = 0; j < cl->ncallees; j++)
+                        __atomic_add_fetch(&cs[j]->refs, 1, __ATOMIC_RELAXED);
+                }
+            } else if (cl->flags & COPY_CALLS) {
+                calls_adjust((const uint8_t *)(cl + 1), (const uint8_t *)(cl + 1) + cl->bytes, +1);
+            }
             cl->ubo = NULL;   // the list stays the original's: the replay walks the clone's records
             cl->def_list = NULL;
             cl->used_at = now;
@@ -2078,7 +2460,7 @@ void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
             out[i] = (uintptr_t)(cl + 1);
             __atomic_fetch_add(&n_clones, 1, __ATOMIC_RELAXED);
         } else {
-            pf->used_at = now;
+            used_at_max(pf, now);
         }
     }
     plat_mutex_unlock(&copy_lock);

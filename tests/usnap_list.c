@@ -597,6 +597,84 @@ static void c4_flag_cases(void) {
     CALL(nvnCommandBufferFinalize, UP(&cmd));
 }
 
+// Incremental callee tracking (DKB_CMD_TRACK_FAST): inline (<=4) and heap (>4) callee arrays, inlining a deferred copy
+// that itself holds OP_CALL records, async cloning a copy with >4 callees, and abandoning recordings via BeginRecording
+// or Finalize must maintain exact callee refcounts and matching UBO lists.
+static void callee_track_cases(void) {
+    NVNcommandBuffer leaf_cmd = {0}, cmd = {0}, other = {0};
+    _Alignas(16) uint8_t leaf_ctl[0x2000], ctl[0x4000], ctl2[0x1000];
+    uint32_t src[4] = {10, 20, 30, 40};
+    begin(&leaf_cmd, leaf_ctl, sizeof leaf_ctl);
+    begin(&cmd, ctl, sizeof ctl);
+    begin(&other, ctl2, sizeof ctl2);
+    replayed = nvn_submit_count();
+
+    uint64_t leaves[6];
+    Bind leaf_b[6];
+    for (int i = 0; i < 6; i++) {
+        leaf_b[i] = (Bind){0x90000000ull + (uint64_t)i * 0x2000, 0x100, i == 0};
+        CALL(nvnCommandBufferBeginRecording, UP(&leaf_cmd));
+        bind_all(&leaf_cmd, &leaf_b[i], 1);
+        leaves[i] = CALL(nvnCommandBufferEndRecording, UP(&leaf_cmd));
+    }
+
+    // 1. Copy with 6 callees (>4, heap callees array) + deferred push so it is both inlined and clonable.
+    CALL(nvnCommandBufferBeginRecording, UP(&cmd));
+    CALL(nvnCommandBufferCallCommands, UP(&cmd), 6, UP(leaves));
+    CALL(nvnCommandBufferPushGraphicsConstantsDeferred, UP(&cmd), 0, 0, 16, UP(src));
+    uint64_t h_def = CALL(nvnCommandBufferEndRecording, UP(&cmd));
+    if (nvn_call_ref_on()) {
+        CHECK(nvn_copy_refs(leaves[0]) == 1 && nvn_copy_refs(leaves[5]) == 1,
+              "recording with 6 callees takes 1 ref per callee");
+    }
+
+    // 2. Caller that inlines h_def (deferred -> body copied in, callees appended to caller's tracker).
+    CALL(nvnCommandBufferBeginRecording, UP(&cmd));
+    CALL(nvnCommandBufferCallCommands, UP(&cmd), 1, UP(&h_def));
+    uint64_t h_inl = CALL(nvnCommandBufferEndRecording, UP(&cmd));
+    if (nvn_call_ref_on()) {
+        CHECK(nvn_copy_refs(leaves[0]) == 2 && nvn_copy_refs(leaves[5]) == 2,
+              "inlining a deferred copy with 6 callees increments each callee ref");
+    }
+    U.fast = 1;
+    U.list_bad = 0;
+    list_check(&h_inl, 1);
+    CHECK(U.list_bad == 0, "list_check agrees after inlining a deferred copy with callees");
+
+    // 3. Async clone of h_def (heap callees): clone duplicates callees array and increments refs, then sweeps cleanly.
+    uint64_t s1, s2;
+    nvn_submit_prepare_async(&h_def, &s1, 1);
+    nvn_submit_prepare_async(&h_def, &s2, 1);
+    CHECK(s1 == h_def && s2 != h_def, "second async submit of deferred copy with >4 callees clones it");
+    if (nvn_call_ref_on()) {
+        CHECK(nvn_copy_refs(leaves[0]) == 3 && nvn_copy_refs(leaves[5]) == 3,
+              "async clone of copy with >4 callees increments callee refs");
+    }
+
+    // 4. Abandon recording via BeginRecording and via Finalize: both must release tracked callee refs.
+    CALL(nvnCommandBufferBeginRecording, UP(&other));
+    CALL(nvnCommandBufferCallCommands, UP(&other), 6, UP(leaves));
+    if (nvn_call_ref_on()) CHECK(nvn_copy_refs(leaves[0]) == 4, "active recording holds callee ref before abandon");
+    CALL(nvnCommandBufferBeginRecording, UP(&other));   // abandons previous recording
+    if (nvn_call_ref_on()) CHECK(nvn_copy_refs(leaves[0]) == 3, "BeginRecording while recording drops tracked callee refs");
+    CALL(nvnCommandBufferCallCommands, UP(&other), 2, UP(leaves));
+    if (nvn_call_ref_on()) CHECK(nvn_copy_refs(leaves[0]) == 4, "inline callee count (<=4) tracked before Finalize");
+    CALL(nvnCommandBufferFinalize, UP(&other));   // abandons recording on Finalize
+    if (nvn_call_ref_on()) CHECK(nvn_copy_refs(leaves[0]) == 3, "Finalize while recording drops tracked callee refs");
+
+    // Release callers + leaves and sweep: every ref and zombie must drain to 0.
+    replayed = nvn_submit_count();
+    CALL(nvnCommandBufferAddControlMemory, UP(&cmd), UP(ctl), sizeof ctl);
+    if (nvn_call_ref_on()) {
+        CHECK(nvn_copy_refs(leaves[0]) == 0 && nvn_copy_refs(leaves[5]) == 0,
+              "releasing callers and sweeping async clone returns all callee refs to 0");
+    }
+    CALL(nvnCommandBufferAddControlMemory, UP(&leaf_cmd), UP(leaf_ctl), sizeof leaf_ctl);
+    CHECK(nvn_copy_zombies() == 0, "all copies and clones freed with zero zombies left");
+    CALL(nvnCommandBufferFinalize, UP(&cmd));
+    CALL(nvnCommandBufferFinalize, UP(&leaf_cmd));
+}
+
 int main(void) {
     fixed_list();
     recorded_lists();
@@ -606,6 +684,7 @@ int main(void) {
     async_lists();
     radix_and_span_cases();
     c4_flag_cases();
+    callee_track_cases();
     failures += union_cases();
     printf("usnap lists (DKB_CALL_REF %d): %d checks, %d failures\n", nvn_call_ref_on(), checks, failures);
     return failures != 0;
