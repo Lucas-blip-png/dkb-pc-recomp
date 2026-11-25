@@ -37,7 +37,7 @@ static unsigned checks, failures;
 #define CHECK(c,message) do { checks++; if (!(c)) { failures++; fprintf(stderr,"FAIL: %s\n",message); } } while (0)
 void rt_fatal(const char *fmt,...) { (void)fmt; abort(); }
 static int ab;   // every switch is "ab": on while this is 1
-int rt_knob(const char *name,const char *def) { (void)def; return !strcmp(name,"DRAW_FAST") ? 0 : 2; }   // DRAW_FAST off: its in-place c0 update assumes the real bank layout, which the stand-in c0_fill below lacks
+int rt_knob(const char *name,const char *def) { (void)name; (void)def; return 2; }
 int rt_ab(void) { return ab; }
 // Scratch in host memory: one 4 KiB block per copy, its index as the offset, so equal ranges mean the same copy.
 static uint8_t scratch_mem[1024][4096];
@@ -51,11 +51,19 @@ static uint8_t *scratch(VkExec *ex,uint64_t size,VkBuffer *buf,VkDeviceSize *off
 static const uint8_t *copy_at(VkDescriptorBufferInfo bi) { return scratch_mem[bi.offset/4096]; }
 static unsigned fills;
 @CTX@
+// Layout-true graphics stand-in matching gfx_c0.c gfx_c0_fill (16-byte storage entries at 0x110/0x510/0x410 and
+// base_instance at 0x644) so DKB_DRAW_FAST's in-place c0 update is exercised too.
 static void c0_fill(DrawCtx *dc,uint8_t bank[VK_C0_BYTES],int stage,const p_bind_buf ssbo[16],const p_bind_buf ubo[16],
                     const uint32_t dim[3],uint32_t base_instance) {
     (void)dc; (void)ubo; (void)dim;
     memset(bank,0,VK_C0_BYTES);
-    memcpy(bank,&ssbo[0].addr,8), memcpy(bank+8,&base_instance,4), bank[12]=(uint8_t)stage;
+    int base=stage==NVN_STAGE_VS ? 0x110 : stage==NVN_STAGE_FS ? 0x510 : 0x410;
+    for (int r=0; r<16; r++) {
+        uint64_t a=ssbo[r].addr;
+        uint32_t n=(uint32_t)ssbo[r].size;
+        memcpy(bank+base+16*r,&a,8), memcpy(bank+base+16*r+8,&n,4);
+    }
+    memcpy(bank+0x644,&base_instance,4);
     fills++;
 }
 static DrawCtx ctx;   // the replay thread's: c0_lay NULL (NVN 1), the bank memo B, c0_binst, ssbo_serial
@@ -73,28 +81,36 @@ static DrawCtx ctx;   // the replay thread's: c0_lay NULL (NVN 1), the bank memo
     registered = function(texture, 'static void descriptor_registered(')
     tests = r'''
 static void c0_cases(VkExec *ex) {
-    p_bind_buf x={.addr=0x10000,.size=0x100}, y={.addr=0x20000,.size=0x100};
+    p_bind_buf x={.addr=0x10000,.size=0x100}, y={.addr=0x20000,.size=0x200};
     ex->ssbo[NVN_STAGE_VS][0]=x, ctx.ssbo_serial[NVN_STAGE_VS]++, ctx.c0_binst=0;
-    memset(ctx.B.c0_valid,0,sizeof ctx.B.c0_valid);
     for (int on=0; on<2; on++) {
+        memset(ctx.B.c0_valid,0,sizeof ctx.B.c0_valid);
         ab=on, fills=0;
         VkDescriptorBufferInfo a=c0_info(ex,NVN_STAGE_VS), b=c0_info(ex,NVN_STAGE_VS);
         CHECK(fills==1 && a.offset==b.offset,"c0: unchanged inputs keep the bank");
         uint64_t got;
-        memcpy(&got,copy_at(b),8);
-        CHECK(got==ex->ssbo[NVN_STAGE_VS][0].addr,"c0: the bank was filled from the bound storage table");
-        ex->ssbo[NVN_STAGE_VS][0]=on ? x : y, ctx.ssbo_serial[NVN_STAGE_VS]++;
+        uint32_t gsz;
+        memcpy(&got,copy_at(b)+0x110,8), memcpy(&gsz,copy_at(b)+0x118,4);
+        CHECK(got==ex->ssbo[NVN_STAGE_VS][0].addr && gsz==ex->ssbo[NVN_STAGE_VS][0].size,
+              "c0: the bank was filled from the bound storage table");
+        ex->ssbo[NVN_STAGE_VS][0]=y, ctx.ssbo_serial[NVN_STAGE_VS]++;
         VkDescriptorBufferInfo c=c0_info(ex,NVN_STAGE_VS);
-        memcpy(&got,copy_at(c),8);
-        CHECK(got==ex->ssbo[NVN_STAGE_VS][0].addr,"c0: a storage bind gives a bank of the new table");
+        memcpy(&got,copy_at(c)+0x110,8), memcpy(&gsz,copy_at(c)+0x118,4);
+        CHECK(got==y.addr && gsz==y.size && c.offset!=b.offset,"c0: a storage bind gives a bank of the new table");
+        if (on) CHECK(fills==1,"c0 on (DRAW_FAST): storage bind updates bank in place without c0_fill");
+        // Re-binding identical storage bytes must not allocate a fresh bank even when ssbo_serial advances.
+        ctx.ssbo_serial[NVN_STAGE_VS]++;
+        VkDescriptorBufferInfo c2=c0_info(ex,NVN_STAGE_VS);
+        CHECK(c2.offset==c.offset,"c0: identical re-bind reuses the bank");
         ctx.c0_binst=7;
         VkDescriptorBufferInfo d=c0_info(ex,NVN_STAGE_VS);
         uint32_t bi;
-        memcpy(&bi,copy_at(d)+8,4);
+        memcpy(&bi,copy_at(d)+0x644,4);
         CHECK(bi==7 && d.offset!=c.offset,"c0: a new base instance gives a new bank");
-        ctx.c0_binst=0;
+        if (on) CHECK(fills==1,"c0 on (DRAW_FAST): base_instance updates bank in place without c0_fill");
+        ex->ssbo[NVN_STAGE_VS][0]=x, ctx.ssbo_serial[NVN_STAGE_VS]++, ctx.c0_binst=0;
     }
-    // On, then a bind and a call with the switch off, then a bind back and on: the serial moved, so the compare runs.
+    // On, then a bind and a call with the switch off, then a bind back and on: the serial moved, so the update runs.
     ab=1;
     ex->ssbo[NVN_STAGE_VS][0]=x, ctx.ssbo_serial[NVN_STAGE_VS]++;
     c0_info(ex,NVN_STAGE_VS);
@@ -104,7 +120,7 @@ static void c0_cases(VkExec *ex) {
     ab=1;
     ex->ssbo[NVN_STAGE_VS][0]=x, ctx.ssbo_serial[NVN_STAGE_VS]++;
     uint64_t got;
-    memcpy(&got,copy_at(c0_info(ex,NVN_STAGE_VS)),8);
+    memcpy(&got,copy_at(c0_info(ex,NVN_STAGE_VS))+0x110,8);
     CHECK(got==x.addr,"c0: a flip between binds never answers with the other table's bank");
     // On: an unchanged serial skips both the fill and the compare.
     fills=0;
@@ -113,7 +129,7 @@ static void c0_cases(VkExec *ex) {
     // Off: the compare alone decides, also for a table written without a bind op (none exists, but the old path held).
     ab=0, fills=0;
     ex->ssbo[NVN_STAGE_VS][0]=y;
-    memcpy(&got,copy_at(c0_info(ex,NVN_STAGE_VS)),8);
+    memcpy(&got,copy_at(c0_info(ex,NVN_STAGE_VS))+0x110,8);
     CHECK(fills==1 && got==y.addr,"c0 off: the inputs are compared on every ask");
 }
 

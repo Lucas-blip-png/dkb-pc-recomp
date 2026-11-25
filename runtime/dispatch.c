@@ -220,9 +220,13 @@ __attribute__((noinline, noreturn, cold)) static void dispatch_fail(Cpu *c) {
                    rt_guest_name(c->x[30], lr, sizeof lr));
 }
 
+void rt_dispatch_set_hostfn_slots(uint64_t slots) {
+    __atomic_store_n(&D.hostfn_slots, slots, __ATOMIC_RELEASE);
+}
+
 void rt_dispatch_set_hostfn(GuestFn entry, uint64_t slots) {
     D.hostfn_entry = entry;
-    __atomic_store_n(&D.hostfn_slots, slots, __ATOMIC_RELEASE);
+    rt_dispatch_set_hostfn_slots(slots);
 }
 
 // Host functions, and the fatal error. A separate tail call keeps the fast path below free of a stack frame.

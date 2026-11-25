@@ -513,7 +513,9 @@ static void test_st_sort_job_radix(void) {
     enum { MAX_P = 80 };
     static PoolRec pools[MAX_P];
     memset(pools, 0, sizeof pools);
-    for (int i = 0; i < MAX_P; i++) pools[i].lo = 0x100000000ull + (uint64_t)i * 0x10000000ull, pools[i].storage_serial = (uint64_t)(i + 1);
+    // Reverse pools[i].lo relative to &pools[i] so pointer order and guest address order disagree.
+    for (int i = 0; i < MAX_P; i++)
+        pools[i].lo = 0x100000000ull + (uint64_t)(MAX_P - 1 - i) * 0x10000000ull, pools[i].storage_serial = (uint64_t)(i + 1);
     static StRange *ref_buf;
     static size_t ref_cap;
     const int counts[] = {0, 1, 17, 32, 33, 500, 4000};

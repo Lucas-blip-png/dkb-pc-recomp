@@ -267,7 +267,9 @@ static int freeze_locked(uint64_t r, int *why) {
     for (uint64_t x = a, y; x < end; x = y) {
         int st = plat_mem_state(x, end, &y);
         if (st == PLAT_PROT_RW) {
-            if (n == 256) return *why = FRZ_NO_STATE, 0;
+            // Cap fragmented PRB_OWN regions at 32 runs so freeze/thaw does not run hundreds of VirtualProtect calls
+            // under frz_lock.
+            if (n == 256 || (held && n == 32)) return *why = FRZ_NO_STATE, 0;
             run[n][0] = x, run[n][1] = y, n++;
         } else if (st == PLAT_PROT_NONE) {
             if (!frz_lazy || !held || !prb_all_own(x, y)) return *why = FRZ_NO_STATE, 0;
@@ -1120,10 +1122,12 @@ static int touch_range(uint64_t a, uint64_t n, int must) {
 
 // ---- lazy-heap commits in the background (mem_commit_later)
 // A staged pool (vk_memory.c, DKB_MIRROR_STAGED) is never imported, so the pages of it the CPU never touched stay
-// reserved, where an imported pool's import commits them all (mem_touch). freeze_locked never freezes a 2 MiB region
-// with a lazy-heap hole (fault_veh may commit it at any moment), so the regions over such a pool are write-watch queried
-// every frame: with DKB_MIRROR_STAGED=all on the Hilltop Layer of Surf Hills (3.2.0) about 300 MiB were frozen instead
-// of about 730, and the queries covered 630 MiB a frame instead of 220. This thread commits those holes, as the import
+// reserved, where an imported pool's import commits them all (mem_touch). With DKB_FRZ_LAZY=0, freeze_locked never
+// freezes a 2 MiB region with a lazy-heap hole (fault_veh may commit it at any moment), so the regions over such a pool
+// are write-watch queried every frame: with DKB_MIRROR_STAGED=all on the Hilltop Layer of Surf Hills (3.2.0) about
+// 300 MiB were frozen instead of about 730, and the queries covered 630 MiB a frame instead of 220. With DKB_FRZ_LAZY=1
+// (default), freeze_locked freezes such regions as FRZ_HOLES, and committing their untouched holes in the background
+// still lets them graduate to FRZ_WHOLE (single-call thaw). This thread commits those holes, as the import
 // would have, CL_DELAY_MS after the pool's first use and CL_SLICE bytes at a time, so the frame that first uses the
 // pools (the point of the staged mirror is that its first use costs no import) and the replay's queries meanwhile wait
 // at most for one slice's frz_lock (touch_query). A commit leaves the page's bytes zero, as the fault handler's would,
