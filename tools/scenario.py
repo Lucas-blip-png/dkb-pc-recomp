@@ -318,9 +318,13 @@ def run_env(s, env_extra, out, base):
     """The environment of one run: base, the scenario's [env], then env_extra (--env and the variant). {run} in a value
     is the run's folder, so repeated runs do not overwrite each other's outputs (DKB_DUMP_DIR={run}/dump). perf is
     always traced, because the perf verdict needs it; other DKB_TRACE categories asked for are added to it. Runs are
-    muted (DKB_VOLUME=0) unless the caller's environment, the scenario or --env sets a volume."""
+    muted (DKB_VOLUME=0) unless the caller's environment, the scenario or --env sets a volume, and pipelines are built as
+    in a player's game (DKB_SHOT_ASYNC=1)."""
     env = dict(base)
     env.setdefault('DKB_VOLUME', '0')
+    # --shot alone builds pipelines on the drawing thread (runtime/boot.c boot_main), which a player never does: keep the
+    # background builds and the boot prebuild so the timings are the player's. DKB_SHOT_ASYNC=0 turns that off.
+    env.setdefault('DKB_SHOT_ASYNC', '1')
     env['DKB_INPUT_SCRIPT'] = str(ROOT / s['input'])
     env.update({k: str(v) for k, v in s['env'].items()})
     env.update({k: str(v) for k, v in env_extra.items()})

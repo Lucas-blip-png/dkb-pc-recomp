@@ -414,7 +414,10 @@ static void boot_main(void *arg) {
     // prepares the shaders and pipelines beside it
     gfx_backend()->splash(GFX_SPLASH_START);
     check_npdm();
-    if (!rt_config()->shot) gfx_backend()->boot_async();   // a --shot image must not depend on build timing
+    // A --shot image must not depend on build timing, so --shot builds pipelines on the drawing thread; DKB_SHOT_ASYNC=1
+    // keeps the background builds and the prebuild a player has, for runs that time the game (tools/scenario.py).
+    const char *shot_async = cfg_get("DKB_SHOT_ASYNC");
+    if (!rt_config()->shot || (shot_async && !strcmp(shot_async, "1"))) gfx_backend()->boot_async();
     // Shaders and pipelines recorded in earlier runs are made ready while the modules load; the guest waits for them.
     PlatThread *warm = plat_thread_new(prewarm_main, NULL, "prewarm");
     ldr_load(rt_config()->exefs);
