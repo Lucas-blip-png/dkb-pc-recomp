@@ -93,7 +93,56 @@ static void one(uint64_t a, uint64_t b) {
     }
 }
 
+#if !defined(__aarch64__)
+static void check_fcmp(void) {
+    static const uint32_t f32[] = {
+        0xff800000u, 0xff7fffffu, 0xbf800000u, 0x80800000u, 0x80000001u, 0x80000000u,
+        0x00000000u, 0x00000001u, 0x00800000u, 0x3f800000u, 0x7f7fffffu, 0x7f800000u,
+        0x7fc00001u, 0x7f800001u, 0xffc00001u,
+    };
+    static const uint64_t f64[] = {
+        0xfff0000000000000ull, 0xffefffffffffffffull, 0xbff0000000000000ull, 0x8010000000000000ull,
+        0x8000000000000001ull, 0x8000000000000000ull, 0x0000000000000000ull, 0x0000000000000001ull,
+        0x0010000000000000ull, 0x3ff0000000000000ull, 0x7fefffffffffffffull, 0x7ff0000000000000ull,
+        0x7ff8000000000001ull, 0x7ff0000000000001ull, 0xfff8000000000001ull,
+    };
+    for (int fz = 0; fz < 2; fz++) {
+        Cpu c = {.fpcr = fz ? FPCR_FZ : 0};
+        rt_fpcr_sync(&c);
+        for (size_t i = 0; i < sizeof f32 / sizeof *f32; i++) {
+            for (size_t j = 0; j < sizeof f32 / sizeof *f32; j++) {
+                float a = fv_s(f32[i]), b = fv_s(f32[j]);
+                c.nzcv = cmp_s(&c, a, b);
+                Flags f = {0};
+                ffcmp_s(&f, &c, a, b);
+                for (int cc = 0; cc < 14; cc++)
+                    if (!fc_fcmp_s(&f, cc) != !cond(&c, cc))
+                        bad("fcmp_s", cc, f32[i], f32[j], fc_fcmp_s(&f, cc), cond(&c, cc));
+                if (fnz_fcmp_s(&f) != c.nzcv) bad("fcmp_s packed", fz, f32[i], f32[j], fnz_fcmp_s(&f), c.nzcv);
+            }
+        }
+        for (size_t i = 0; i < sizeof f64 / sizeof *f64; i++) {
+            for (size_t j = 0; j < sizeof f64 / sizeof *f64; j++) {
+                double a = fv_d(f64[i]), b = fv_d(f64[j]);
+                c.nzcv = cmp_d(&c, a, b);
+                Flags f = {0};
+                ffcmp_d(&f, &c, a, b);
+                for (int cc = 0; cc < 14; cc++)
+                    if (!fc_fcmp_d(&f, cc) != !cond(&c, cc))
+                        bad("fcmp_d", cc, f64[i], f64[j], fc_fcmp_d(&f, cc), cond(&c, cc));
+                if (fnz_fcmp_d(&f) != c.nzcv) bad("fcmp_d packed", fz, f64[i], f64[j], fnz_fcmp_d(&f), c.nzcv);
+            }
+        }
+    }
+    Cpu reset = {0};
+    rt_fpcr_sync(&reset);
+}
+#endif
+
 int main(void) {
+#if !defined(__aarch64__)
+    check_fcmp();
+#endif
     long n = 0;
     for (size_t i = 0; i < NEDGE; i++)
         for (size_t j = 0; j < NEDGE; j++, n++) one(EDGE[i], EDGE[j]);

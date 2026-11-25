@@ -298,7 +298,7 @@ ADC_IMPL(32, )
 // and its branch become one host compare. F.nz holds the packed form for definitions only known packed (CCMP, FCMP,
 // MSR, ADCS) and for readers that several kinds of definition reach. Every helper is always inlined with a constant
 // condition, so F stays in registers and only the condition's own arithmetic remains.
-typedef struct { uint64_t a, b, nz; } Flags;
+typedef struct { uint64_t a, b, nz; float fa, fb; double da, db; } Flags;
 enum { CC_EQ, CC_NE, CC_CS, CC_CC, CC_MI, CC_PL, CC_VS, CC_VC, CC_HI, CC_LS, CC_GE, CC_LT, CC_GT, CC_LE };
 #define CPU_FL static inline __attribute__((always_inline))
 

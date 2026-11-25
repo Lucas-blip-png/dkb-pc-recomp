@@ -309,7 +309,10 @@ class Emitter:
             else:
                 effects.append(flags.effect(ins.cond if k == 'bcond' else ins.code or ''))
         effects.append((False, None))
-        return flags.plan(effects, succ, calls, exits)
+        # Functions that execute MSR FPCR (rt_fpcr_sync) may change MXCSR.DAZ between FCMP and its consumer; keep
+        # packed FCMP flags in those rare functions.
+        lazy_fcmp = not any(ins.code and 'rt_fpcr_sync' in ins.code for ins in insns)
+        return flags.plan(effects, succ, calls, exits, lazy_fcmp=lazy_fcmp)
 
     def patched_effect(self, ins, a):
         """Flag effect of a patched site: both alternatives must have the same one, in at most one word each."""

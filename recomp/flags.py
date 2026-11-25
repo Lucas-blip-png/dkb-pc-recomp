@@ -19,6 +19,7 @@ functions (asserts) that the compiler placed before another branch's target. Pla
 import re
 
 KIND_DEF = re.compile(r'\b(subs|adds|logic)(32|64)\(c, ')
+FCMP_DEF = re.compile(r'^c->nzcv = cmp_([sd])\(c, ')
 CARRY_DEF = re.compile(r'\b(adcs|sbcs)(32|64)\(c, ')
 CARRY_USE = re.compile(r'\b(adc|sbc)(32|64)\(c, ')
 COND = re.compile(r'COND_([A-Z]{2})\(c\)')
@@ -36,6 +37,9 @@ class FlagError(Exception):
 def effect(code):
     """(reads flags, kind of the flags written or None) of one instruction's C."""
     reads = bool(COND.search(code) or CARRY_USE.search(code) or CARRY_DEF.search(code) or NZ_USE in code)
+    m = FCMP_DEF.match(code)
+    if m:
+        return reads, 'fcmp_' + m.group(1)
     if NZ_DEF in code or CARRY_DEF.search(code):
         return reads, 'nz'
     defs = KIND_DEF.findall(code)
@@ -51,7 +55,7 @@ class Plan:
     """Per instruction: the kind its flag reads use, whether its flag definition also writes F.nz, and what it writes
     to c->nzcv before it leaves for another function."""
 
-    def __init__(self, n):
+    def __init__(self, n, lazy_fcmp=True):
         self.reader = [None] * n
         self.pack = [False] * n
         self.exit = [None] * n      # kind of the flags to publish in c->nzcv at a tail exit, or None
@@ -59,6 +63,7 @@ class Plan:
         self.entry_read = False     # they reach a read, not only an exit
         self.after_call = 0         # reads that can see flags a callee left (see the module docstring)
         self.used = False
+        self.lazy_fcmp = lazy_fcmp
 
     def decl(self):
         """Declaration of F at the top of the function."""
@@ -78,10 +83,14 @@ class Plan:
             code = CARRY_DEF.sub(lambda m: f'{m.group(1)}{m.group(2)}f(&F, fc_{rk}(&F, CC_CS), ', code)
             code = CARRY_USE.sub(lambda m: f'{m.group(1)}{m.group(2)}f(fc_{rk}(&F, CC_CS), ', code)
             code = code.replace(NZ_USE, f'(fnz_{rk}(&F))')
-        if dk == 'nz':
+        if dk == 'nz' or (dk in ('fcmp_s', 'fcmp_d') and not self.lazy_fcmp):
             code = code.replace(NZ_DEF, 'F.nz = ')
             code = re.sub(r'\(void\)(subs|adds)(32|64)\(c, ', lambda m: f'F.nz = nz_{KIND_NAME[m.group(1)]}{m.group(2)}(',
                           code)
+        elif dk in ('fcmp_s', 'fcmp_d'):
+            code = FCMP_DEF.sub(lambda m: f'ffcmp_{m.group(1)}(&F, c, ', code)
+            if self.pack[i]:
+                code += f' F.nz = fnz_{dk}(&F);'
         elif dk:
             code = KIND_DEF.sub(lambda m: f'f{KIND_NAME[m.group(1)]}{m.group(2)}(&F, ', code)
             if self.pack[i]:
@@ -91,7 +100,7 @@ class Plan:
         return code
 
 
-def plan(effects, succ, calls, exits):
+def plan(effects, succ, calls, exits, lazy_fcmp=True):
     """effects[i]: (reads, kind or None); succ[i]: successor indices inside the function; calls: indices of calls,
     whose callee may leave any flags; exits: indices that can leave for another function other than by a call or a
     return (a tail branch, falling into the next function, a br through rt_dispatch).
@@ -100,8 +109,10 @@ def plan(effects, succ, calls, exits):
     before it then falls or branches into it with live flags. So a tail exit publishes the flags in c->nzcv, and a
     function whose reads can see its entry flags starts F.nz from c->nzcv. Calls and returns publish nothing: AAPCS64
     code neither passes flags to a callee nor reads a callee's, so a call's flags count as no definition."""
+    if not lazy_fcmp:
+        effects = [(r, 'nz' if k in ('fcmp_s', 'fcmp_d') else k) for r, k in effects]
     n = len(effects)
-    p = Plan(n)
+    p = Plan(n, lazy_fcmp=lazy_fcmp)
     if not any(r or k for r, k in effects):
         return p
     p.used = True
