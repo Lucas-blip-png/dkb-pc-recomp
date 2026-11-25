@@ -661,6 +661,7 @@ static void resolve_rt(VkExec *ex) {
     ex->pass_ncolor = (uint32_t)n;
     ex->pass_samples = samples ? samples : 1;
     ex->pipe.samples = (uint8_t)ex->pass_samples;
+    ex->pipe_serial++;
 }
 
 // The attachment view of a target. A registered texture's view lives as long as its image (vk_exec_target_view); any
@@ -1329,12 +1330,12 @@ static int state_op(VkExec *ex, uint32_t op, const void *a) {
         memcpy(ex->blend_color, ((const p_blend_color *)a)->rgba, sizeof ex->blend_color);
         ex->dirty |= VK_EXEC_DIRTY_BLEND_CONST;
         break;
-    case OP_DEPTH_CLAMP: ex->pipe.depth_clamp = ((const p_flag *)a)->value != 0; break;
-    case OP_RASTER_DISCARD: ex->pipe.raster_discard = ((const p_flag *)a)->value != 0; break;
+    case OP_DEPTH_CLAMP: ex->pipe.depth_clamp = ((const p_flag *)a)->value != 0; ex->pipe_serial++; break;
+    case OP_RASTER_DISCARD: ex->pipe.raster_discard = ((const p_flag *)a)->value != 0; ex->pipe_serial++; break;
     case OP_PRIM_RESTART: ex->prim_restart = *(const p_prim_restart *)a; break;
     case OP_COPY_STRIDE: ex->copy_stride = ((const p_copy_stride *)a)->stride; break;
-    case OP_SET_TEX_POOL: ex->tex_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++; break;
-    case OP_SET_SAMP_POOL: ex->samp_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++; break;
+    case OP_SET_TEX_POOL: ex->tex_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++, ex->fs_tex_serial++; break;
+    case OP_SET_SAMP_POOL: ex->samp_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++, ex->fs_tex_serial++; break;
     default: return 0;
     }
     return 1;
@@ -1836,12 +1837,14 @@ static const op_hdr *par_join(VkExec *ex, const op_hdr *h) {
     // The replay state after the part is the helper's: everything from the render targets to the bindings. The command
     // buffer is new, the targets are resolved again, and no memo of this thread's translator knows the state.
     uint32_t tex_serial = (ex->tex_serial > p->H.tex_serial ? ex->tex_serial : p->H.tex_serial) + 1;
+    uint32_t fs_tex_serial = (ex->fs_tex_serial > p->H.fs_tex_serial ? ex->fs_tex_serial : p->H.fs_tex_serial) + 1;
+    uint32_t pipe_serial = (ex->pipe_serial > p->H.pipe_serial ? ex->pipe_serial : p->H.pipe_serial) + 1;
     uint32_t pass_serial = (ex->pass_serial > p->H.pass_serial ? ex->pass_serial : p->H.pass_serial) + 1;
     memcpy((char *)ex + offsetof(VkExec, rt), (const char *)&p->H + offsetof(VkExec, rt),
            offsetof(VkExec, views) - offsetof(VkExec, rt));
     ex->in_pass = 0, ex->dirty = VK_EXEC_DIRTY_ALL, ex->rt_resolved = 0;
     ex->nfbl = 0, ex->fbl_mask = 0, ex->fb_dirty = 0, ex->fb_fs = NULL;
-    ex->tex_serial = tex_serial, ex->pass_serial = pass_serial;
+    ex->tex_serial = tex_serial, ex->fs_tex_serial = fs_tex_serial, ex->pipe_serial = pipe_serial, ex->pass_serial = pass_serial;
     vk_exec_draw_rebase(ex);
     split_draws = 0;
     part_start = ex->recorded;
@@ -2514,7 +2517,7 @@ static void par_record(int i, ParPool *pp, VkExec *w, struct DrawCtx *dc) {
     w->fb_dirty = 0x1ff;
     w->views = NULL, w->nviews = 0, w->cap_views = 0;   // the slice's own; merged into the primary's after
     w->barrier_at = w->cs_tail = w->cs_barrier_at = -1, w->game_barrier = 0;
-    w->fb_fs = NULL, w->fb_serial = w->fb_pass = w->fb_sampled = 0, w->tex_serial = 0;
+    w->fb_fs = NULL, w->fb_serial = w->fb_pass = w->fb_sampled = 0, w->tex_serial = 0, w->fs_tex_serial = 0, w->pipe_serial = 0;
     vk_exec_draw_rebase(w);   // the context's memos and bindings were made from another slice's copy of the state
     vk_exec_draw_slice_view(dc, PC.supd[i]);
     vk_usnap_view(par_usd[PC.supd[i]] + 1);   // the drops made before the pass began
@@ -2709,7 +2712,7 @@ static void par_flush(VkExec *ex) {
     }
     if (!PC.on) return;
     PC.on = 0;
-    ex->tex_serial++;
+    ex->tex_serial++, ex->fs_tex_serial++, ex->pipe_serial++;
     vk_exec_draw_binds_dirty(ex);
     par_passes++, par_slices += (uint64_t)PC.nslices, par_sliced_draws += (uint64_t)PC.draws;
     uint64_t t1 = kern_now_ns();
@@ -3099,6 +3102,7 @@ static void la_set_rt(VkExec *s, const p_set_rt *r) {
     s->pipe.depth_fmt = r->depth ? r->depth->d.format : 0;
     if (r->depth && !samples) samples = r->depth->d.samples;
     s->pipe.samples = (uint8_t)(samples > 1 ? samples : 1);
+    s->pipe_serial++;
     s->rt = *r, s->rt_resolved = 0;
 }
 

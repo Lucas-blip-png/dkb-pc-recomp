@@ -118,7 +118,7 @@ typedef struct VkExec {
                                          // or the last in-pass barrier
     const void *fb_fs;                   // feedback_scan's memo: fragment shader, texture bind serial, pass serial
     uint32_t fb_serial, fb_pass, fb_sampled;
-    uint32_t tex_serial, pass_serial;    // bumped by every texture or image bind and pass begin
+    uint32_t tex_serial, fs_tex_serial, pipe_serial, pass_serial;    // bumped by texture/image, FS texture, pipe state, and pass begin
     // The draw context of the thread recording into this VkExec (vk_exec_draw.c DrawCtx): the replay thread's for X,
     // helper k's for its part's copy. Last, so the part copies and compares of vk_exec.c (par_join, par_same) skip it.
     struct DrawCtx *draw;
