@@ -2531,8 +2531,6 @@ static void par_rec_note(int worker, int i, uint64_t ns) {   // DKB_TRACE=perf: 
     }
 }
 
-static int par_collect_fast_on(void);
-
 static void par_record(int i, ParPool *pp, VkExec *w, struct DrawCtx *dc) {
     VkCommandBuffer cb = par_secondary(pp);
     const ParPassSnap *ps = &par_pass[PC.supd[i]];
@@ -2557,10 +2555,9 @@ static void par_record(int i, ParPool *pp, VkExec *w, struct DrawCtx *dc) {
     vk_mem_count_quiet(1), vk_usnap_quiet(1);
     uint32_t tag = vk_mem_wb_tag(PC.stag[i]);
     int merge = vk_exec_draw_merge_on();   // DKB_DRAW_MERGE: runs of draws that differ only in c4 go as instances
-    const int fast = par_collect_fast_on();
     const op_hdr **const ops = PC.ops;
     for (int k = PC.start[i], end = PC.end[i]; k < end; k++) {
-        if (fast && k + 4 < end) __builtin_prefetch(ops[k + 4], 0, 0);
+        if (k + 4 < end) __builtin_prefetch(ops[k + 4], 0, 0);
         int draws, used = merge && ops[k]->op == OP_DRAW_IDX ? vk_exec_draw_merge(w, ops + k, end - k, &draws) : 0;
         if (used) k += used - 1;   // the collection counted the run's draws (par_take)
         else par_op(w, ops[k]->op, nvn_op_payload(ops[k]));
@@ -3196,12 +3193,6 @@ static int par_collect_walk_on(void) {
     return RT_KNOB_ON(mode);
 }
 
-static int par_collect_fast_on(void) {
-    static int mode = -1;
-    if (mode < 0) mode = rt_knob("PAR_COLLECT_FAST", "1");
-    return RT_KNOB_ON(mode);
-}
-
 static inline void apply_vattr_inline(uint32_t dst[16], const p_bind_vattr *b) {
     if (b->first == 0 && b->n == 16) {
         memcpy(dst, b->st, sizeof(uint32_t) * 16u);
@@ -3220,10 +3211,14 @@ static inline void apply_vstream_inline(vs_st dst[16], const p_bind_vstream *b) 
     }
 }
 
-// Fast collection loop (DKB_PAR_COLLECT_FAST, default 1): fuses hot bind ops directly into one switch, keeps collection
-// counters in registers, defers full-replacement OP_BIND_VATTR/OP_BIND_VSTREAM by pointer until slice boundary or exit,
-// avoids variable-length memcpy calls for common counts, and prefetches sibling OP_CALL targets 6 ops ahead.
-static const op_hdr *par_collect_walk_fast(VkExec *ex, const op_hdr *h, int d0, int *resumed) {
+// Iterative single-switch collection loop while PC.on && !P.next (DKB_PAR_COLLECT_WALK, default 1): handles OP_BEGIN,
+// OP_JUMP and OP_CALL in-loop using a local return stack instead of recursing walk() on every call, fuses hot bind ops
+// directly into one switch, keeps collection counters in registers, defers full-replacement OP_BIND_VATTR/OP_BIND_VSTREAM
+// by pointer until slice boundary or exit, avoids variable-length memcpy calls for common counts, and prefetches
+// sibling OP_CALL targets 6 ops ahead. Returns the op at which collection stopped (at d0: *resumed = 0, PC.on == 1 if
+// OP_END else flushed; when stopped mid-OP_CALL with depth > d0: flushes, unwinds remaining callee ops via walk(), and
+// returns the next op at d0 with *resumed = 1).
+static const op_hdr *par_collect_walk(VkExec *ex, const op_hdr *h, int d0, int *resumed) {
     int depth = d0, nops = PC.nops;
     int slice_draws = PC.slice_draws, slice_size = PC.slice_size, draws = PC.draws;
     uint8_t dlss_done = PC.dlss_done;
@@ -3522,119 +3517,6 @@ stop:
     return h;
 }
 
-// Iterative single-switch collection loop while PC.on && !P.next: handles OP_BEGIN, OP_JUMP and OP_CALL in-loop using a
-// local return stack instead of recursing walk() on every call, fusing par_take and par_bind_op into one switch.
-// Returns the op at which collection stopped (at d0: *resumed = 0, PC.on == 1 if OP_END else flushed; when stopped
-// mid-OP_CALL with depth > d0: flushes, unwinds remaining callee ops via walk(), and returns the next op at d0 with
-// *resumed = 1).
-static const op_hdr *par_collect_walk(VkExec *ex, const op_hdr *h, int d0, int *resumed) {
-    int depth = d0, nops = PC.nops;
-    const op_hdr *ret[CALL_DEPTH];
-    for (;;) {
-        if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_)
-            rt_fatal("vk: corrupt command record at %p: op %u size %u", (const void *)h, h->op, h->size);
-        const void *a = nvn_op_payload(h);
-        switch (h->op) {
-        case OP_BEGIN:
-            h = nvn_op_next(h);
-            continue;
-        case OP_JUMP:
-            h = (const op_hdr *)(uintptr_t)((const p_jump *)a)->target;
-            continue;
-        case OP_CALL:
-            if (depth >= CALL_DEPTH) rt_fatal("vk: command buffer calls nested deeper than %d", CALL_DEPTH);
-            ret[depth++] = nvn_op_next(h);
-            h = nvn_op_first(((const p_jump *)a)->target);
-            continue;
-        case OP_END:
-            if (depth > d0) {
-                h = ret[--depth];
-                continue;
-            }
-            PC.nops = nops;
-            if (ex == &X) walk_at = h, walk_depth = d0;
-            *resumed = 0;
-            return h;
-        case OP_SET_RT:
-            if (nops < PAR_MAX_OPS && !vk_dump_armed && !memcmp(&ex->rt, a, sizeof ex->rt)) {
-                h = nvn_op_next(h);
-                continue;
-            }
-            goto stop;
-        case OP_WAIT_SYNC:
-            if (nops < PAR_MAX_OPS && !vk_dump_armed) {
-                h = nvn_op_next(h);
-                continue;
-            }
-            goto stop;
-        case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_STENCIL: case OP_POLY_OFFSET:
-        case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD: case OP_PRIM_RESTART:
-        case OP_COPY_STRIDE: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL:
-            if (nops == PAR_MAX_OPS || vk_dump_armed) goto stop;
-            state_op(ex, h->op, a);
-            PC.ops[nops++] = h;
-            h = nvn_op_next(h);
-            continue;
-        case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
-        case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST:
-            if (nops == PAR_MAX_OPS || vk_dump_armed) goto stop;
-            if (PC.inline_binds) par_bind_op(ex, h->op, a);
-            else vk_exec_op_draw(ex, h->op, a);
-            PC.ops[nops++] = h;
-            h = nvn_op_next(h);
-            continue;
-        case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IDX_IND:
-            if (nops == PAR_MAX_OPS || vk_dump_armed || (h->op == OP_DRAW_IDX_IND && !par_indirect())) goto stop;
-            if (PC.slice_draws >= PC.slice_size && PC.nslices < PAR_MAX_SLICES) {
-                PC.nops = nops;
-                if (PC.nslices > PC.s0) par_publish();
-                int i = PC.nslices++;
-                par_snap_take(&PC.snap[i], ex);
-                PC.start[i] = nops;
-                PC.soq[i] = (uint8_t)PC.oq, PC.soqf[i] = PC.oq_flags, PC.supd[i] = (uint8_t)PC.upd;
-                PC.snote[i] = (uint8_t)vk_sync_noting();
-                PC.stag[i] = wb_tag_walk;
-                pss0[i] = (uint16_t)PC.s0;
-                __atomic_store_n(&pdone[i], 0, __ATOMIC_RELAXED);
-                PC.slice_draws = 0;
-                PC.slice_size = par_size();
-            }
-            PC.slice_draws++, PC.draws++;
-            vk_exec_frame.draws_seen++;
-            draws_total++, pass_draws++;
-            if (!PC.dlss_done && ex->depth.image && vk_temporal_wanted())
-                PC.dlss_done = (uint8_t)vk_dlss_scene_draw(ex);
-            PC.ops[nops++] = h;
-            h = nvn_op_next(h);
-            continue;
-        default:
-            goto stop;
-        }
-    }
-stop:
-    PC.nops = nops;
-    par_end_op[h->op]++;
-    par_flush(ex);
-    if (depth == d0) {
-        if (ex == &X) walk_at = h, walk_depth = d0;
-        *resumed = 0;
-        return h;
-    }
-    if (ex == &X) {
-        for (int k = d0; k < depth; k++) walk_ret[k] = ret[k];
-        walk_at = h, walk_depth = depth;
-    }
-    par_skip_start = 1;
-    while (depth > d0) {
-        walk(ex, h, depth);
-        if (pd_n) par_settle_ready(ex);
-        if (split_draws >= split_n) maybe_split(ex);
-        h = ret[--depth];
-    }
-    *resumed = 1;
-    return h;
-}
-
 static void walk(VkExec *ex, const op_hdr *h, int depth) {
     for (;;) {
         while (h == P.next && !depth) h = par_step(ex, h);
@@ -3646,7 +3528,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         par_skip_start = 0;
         if (PC.on && !P.next && par_collect_walk_on() && h->op != OP_END) {
             int res = 0;
-            h = par_collect_fast_on() ? par_collect_walk_fast(ex, h, depth, &res) : par_collect_walk(ex, h, depth, &res);
+            h = par_collect_walk(ex, h, depth, &res);
             if (res) continue;
             a = nvn_op_payload(h);
         } else if (h->op != OP_END && h->op != OP_BEGIN && h->op != OP_JUMP && h->op != OP_CALL) {
@@ -3661,7 +3543,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             } else if (!skip_par && par_run_op(h->op) == 2 && par_start(ex)) {
                 if (!P.next && par_collect_walk_on()) {
                     int res = 0;
-                    h = par_collect_fast_on() ? par_collect_walk_fast(ex, h, depth, &res) : par_collect_walk(ex, h, depth, &res);
+                    h = par_collect_walk(ex, h, depth, &res);
                     if (res) continue;
                     a = nvn_op_payload(h);
                 } else if (par_take(ex, h, a)) {

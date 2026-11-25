@@ -1228,7 +1228,7 @@ def main():
         extract_function(vk_exec_src, 'static int par_take('),
         extract_function(vk_exec_src, 'static inline void apply_vattr_inline('),
         extract_function(vk_exec_src, 'static inline void apply_vstream_inline('),
-        extract_function(vk_exec_src, 'static const op_hdr *par_collect_walk_fast(').replace('par_collect_walk_fast', 'par_collect_walk'),
+        extract_function(vk_exec_src, 'static const op_hdr *par_collect_walk('),
     ]
     vk_dlss_part = extract_function(vk_dlss_src, 'int vk_dlss_scene_draw(')
 
