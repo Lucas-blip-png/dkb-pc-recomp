@@ -18,6 +18,10 @@
 // with DKB_REPLAY_ASYNC. DKB_UBO_SNAPSHOT=0 binds live memory as before; =ab alternates (DKB_AB).
 // DKB_USNAP_FAST=0 runs collect, sort, and drop as they were; by default each step takes a shortcut (repeated ranges
 // skipped, fewer radix passes, repeated GPU writes merged), and its comment says why the result is the same.
+// DKB_USNAP_OPT=1 (off by default for now, "ab" alternates per submission) adds a second set of shortcuts: the radix
+// sort of new GPU writes in 8-bit digits and, in wr_prune, in packed 8-byte keys merged straight from U.wr, the walk of
+// the sorted write list in step with the sorted ranges, wr_local merging a write into the thread's last one, and
+// AVX2 streaming stores into the arena. Each comment says why the result is the same.
 // DKB_USNAP_LIST=1 (on by default; "0" turns it off, "ab" alternates per submission) takes each recording's ranges
 // from a merged list built at EndRecording (nvn_api_cmd.c take_recording, nvn_ubo_list_build below, composing callee
 // lists across OP_CALL) instead of walking every op here; DKB_USNAP_LIST_CHECK=1 also walks the full op tree and logs
@@ -730,8 +734,10 @@ static void usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
     static int fast_mode;   // stored +1: 0 is "not read yet"
     if (!fast_mode) fast_mode = rt_knob("USNAP_FAST", "1") + 1;
     U.fast = RT_KNOB_ON(fast_mode - 1);
+    // DKB_USNAP_OPT is off by default for now: it stays off until the Steam Deck regression of 0.5.2 (#524) is bisected
+    // and these shortcuts are cleared or fixed. 1 or ab turns them on to test.
     static int opt_mode;    // stored +1: 0 is "not read yet" (DKB_USNAP_OPT)
-    if (!opt_mode) opt_mode = rt_knob("USNAP_OPT", "1") + 1;
+    if (!opt_mode) opt_mode = rt_knob("USNAP_OPT", "0") + 1;
     U.opt = RT_KNOB_ON(opt_mode - 1);
     static int local_mode;   // the same for DKB_USNAP_DROP_LOCAL
     if (!local_mode) local_mode = rt_knob("USNAP_DROP_LOCAL", "1") + 1;
@@ -769,24 +775,16 @@ static void usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
     int want_cpu = __atomic_load_n(&cpu_reads, __ATOMIC_RELAXED);
     U.nreg = 0;
     uint64_t total = 0, cpu_total = 0;
-    uint64_t memo_lo = 0, memo_hi = 0;
-    int memo_ok = 0, wr_cur = 0;
+    int wr_cur = 0;
     for (int i = 0; i < U.ncol;) {
         uint64_t lo = U.col[i].lo & ~RNG_C4, hi = U.col[i].hi, c4 = U.col[i].lo & RNG_C4;
         for (i++; i < U.ncol && (U.col[i].lo & ~RNG_C4) <= hi; i++) {
             c4 |= U.col[i].lo & RNG_C4;
             if (U.col[i].hi > hi) hi = U.col[i].hi;
         }
-        int ok = 0;
-        if (U.opt && memo_ok && lo >= memo_lo && hi <= memo_hi) {
-            ok = 1;
-        } else {
-            VkMemSpan sp;
-            ok = vk_mem_resolve(lo, hi - lo, &sp) && !sp.alloc && sp.pool && sp.avail >= hi - lo &&
-                 (sp.cls == VK_MCLS_HOST_CACHED || sp.cls == VK_MCLS_HOST_UNC);
-            if (U.opt && ok) memo_lo = lo, memo_hi = lo + sp.avail, memo_ok = 1;
-        }
-        if (!ok) {
+        VkMemSpan sp;
+        if (!vk_mem_resolve(lo, hi - lo, &sp) || sp.alloc || !sp.pool || sp.avail < hi - lo ||
+            (sp.cls != VK_MCLS_HOST_CACHED && sp.cls != VK_MCLS_HOST_UNC)) {
             U.refused++;
             continue;
         }
@@ -977,6 +975,10 @@ static void wr_local(uint64_t addr, uint64_t n, uint64_t fence) {
     plat_mutex_lock(&w->lock);
     w->added++;
     Wrote *last = w->n ? &w->a[w->n - 1] : NULL;   // as drop coalesces the tail of U.wr
+    // The two DKB_USNAP_OPT rules below leave wr_prune the same list as separate entries: it merges every pair that overlaps or touches
+    // into one range with the newer fence and drops a write once its fence is done. A write inside the last one with no
+    // newer fence adds nothing to that union, and one done earlier is dropped as a whole either way. Two with one fence
+    // that overlap or touch merge into their union, which they would become, and finish together.
     if (U.fast && last && last->lo == addr && last->hi == hi) {
         if (fence > last->fence) last->fence = fence;
         w->coalesced++;
