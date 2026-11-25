@@ -367,13 +367,34 @@ void plat_cond_broadcast(PlatCond *c) { WakeAllConditionVariable((PCONDITION_VAR
 
 // ---- files
 
+#define WPATH 2048
+
+// UTF-8 to UTF-16 for the W file functions. Without the \\?\ prefix they stop at MAX_PATH (260 characters for a file,
+// 248 for a directory) unless the system enables long paths, so a deep romfs_dir made the game report its files missing
+// (#526). A path of 248 characters or more is made absolute and normalised (GetFullPathNameW: '/' to '\', '.' and '..'
+// resolved, which the prefix would otherwise skip) and gets \\?\ (\\?\UNC\ for \\server\share). Short paths and paths
+// that already carry \\?\ or \\.\ are left as they are. Returns the wide characters written with the terminator, 0 on
+// failure (w[0] = 0), also when the long form does not fit cap.
 static int widen(const char *s, wchar_t *w, int cap) {
     int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, w, cap);
-    if (!n) w[0] = 0;
-    return n;
+    if (!n) {
+        w[0] = 0;
+        return 0;
+    }
+    if (n - 1 < 248 || (w[0] == L'\\' && w[1] == L'\\' && (w[2] == L'?' || w[2] == L'.') && w[3] == L'\\')) return n;
+    wchar_t full[WPATH];
+    DWORD len = GetFullPathNameW(w, WPATH, full, NULL);
+    int unc = len > 2 && full[0] == L'\\' && full[1] == L'\\';
+    const wchar_t *pre = unc ? L"\\\\?\\UNC\\" : L"\\\\?\\";
+    int plen = (int)wcslen(pre), skip = unc ? 2 : 0;
+    if (!len || len >= WPATH || (int)len - skip + plen + 1 > cap) {
+        w[0] = 0;
+        return 0;
+    }
+    memcpy(w, pre, plen * sizeof *w);
+    memcpy(w + plen, full + skip, ((size_t)len - skip + 1) * sizeof *w);
+    return (int)len - skip + plen + 1;
 }
-
-#define WPATH 2048
 
 int plat_file_exists(const char *path) {
     wchar_t w[WPATH];
@@ -391,7 +412,8 @@ int plat_dir_exists(const char *path) {
 
 int plat_full_path(const char *path, char *out, size_t cap) {
     wchar_t w[WPATH], full[WPATH];
-    if (!widen(path, w, WPATH)) return 0;
+    // Not widen: the result is a plain path for logs and environment variables, never a \\?\ one.
+    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, w, WPATH)) return 0;
     DWORD n = GetFullPathNameW(w, WPATH, full, NULL);
     if (!n || n >= WPATH) return 0;
     return WideCharToMultiByte(CP_UTF8, 0, full, -1, out, (int)cap, NULL, NULL) != 0;

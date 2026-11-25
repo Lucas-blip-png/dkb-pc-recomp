@@ -487,6 +487,12 @@ area = "os"
 cmd = ["{python}", "tests/mods_scan_test.py", "--cc", "{cc}", "--out", "{out}"]
 
 [[test]]
+name = "long-path"
+tier = 1
+area = "os"
+cmd = ["{python}", "tests/long_path_test.py", "--cc", "{cc}", "--out", "{out}"]
+
+[[test]]
 name = "call-fallthrough"
 tier = 1
 area = "shaders"
