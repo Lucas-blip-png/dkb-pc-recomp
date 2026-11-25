@@ -2748,7 +2748,6 @@ static volatile int64_t m_flush_calls, m_flush_bytes, v_pages, v_skipped, v_mism
 
 static void sparse_cache_open(void);
 static void pre_cache_open(void);
-static void hd_open(void);
 
 static void mirror_mode(int discrete, uint32_t vendor) {
     const char *e = cfg_value("DKB_MEMORY");
@@ -2806,7 +2805,7 @@ static void mirror_mode(int discrete, uint32_t vendor) {
     // measured on; DKB_MIRROR_DIFF=1 or ab turns it on elsewhere, 0 off.
     mirror_diff_mode = vk_mirror_on && !shadow_on ? rt_knob("MIRROR_DIFF", vendor == 0x10de ? "1" : "0") : 0;
     mirror_diff_cur = 0;
-    if (mirror_diff_mode) pre_cache_open(), hd_open();
+    if (mirror_diff_mode) pre_cache_open();
     if (vk_mirror_on)
         rt_log("mem: differential mirror write-back %s (DKB_MIRROR_DIFF=%s)",
                shadow_on ? "off (shadow storage)" :
@@ -3340,9 +3339,11 @@ static PreBuf *pre_buf_acquire(VkCtx *c, VkDeviceSize min_bytes, int host, uint6
                 free(pb);
                 // No snapshot: the callers write the range back whole.
                 static int warned;
-                if (!warned++)
+                if (!warned) {
+                    warned = 1;
                     rt_log("mem: pre-write snapshot buffer of %llu bytes failed (%d): those ranges are written back whole",
                            (unsigned long long)want, (int)res);
+                }
                 return NULL;
             }
         }
@@ -3551,156 +3552,6 @@ static void mirror_ops_close(VkCtx *c) {
     memset(&mirror_ops, 0, sizeof mirror_ops);
 }
 
-// Host-side fallback for non-staged write-backs when push descriptors are unavailable or a slice has < 4-byte edges.
-typedef struct {
-    PoolRec *r;
-    uint64_t lo, serial, off, size;
-    PreBuf *after_pb, *before_pb;
-    uint64_t aoff, boff;
-} HostDiffSlice;
-
-typedef struct HostDiffJob {
-    PlatMutex lock;
-    HostDiffSlice *s;
-    int n, cap;
-    PreBuf *rb;
-    struct HostDiffJob *all_prev, *all_next;
-} HostDiffJob;
-
-#define HD_FREE_MAX 4
-static PlatMutex hd_free_lock = PLAT_MUTEX_INIT;
-static HostDiffJob *hd_free[HD_FREE_MAX];
-static int nhd_free, hd_closed;
-static HostDiffJob *hd_all;
-static HostDiffJob *hd_cur;
-
-static void hd_open(void) {
-    plat_mutex_lock(&hd_free_lock);
-    hd_closed = 0;
-    plat_mutex_unlock(&hd_free_lock);
-}
-
-static void host_diff_done(void *arg) {
-    static struct KeptRange *cw;
-    static int ccw;
-    HostDiffJob *hd = arg;
-    if (hd->n) {
-        VkCtx *c = vk_ctx();
-        PreBuf *last_a = NULL, *last_b = NULL;
-        for (int i = 0; i < hd->n; i++) {
-            if (hd->s[i].after_pb != last_a)
-                vmaInvalidateAllocation(c->vma, hd->s[i].after_pb->alloc, 0, VK_WHOLE_SIZE), last_a = hd->s[i].after_pb;
-            if (hd->s[i].before_pb != last_b)
-                vmaInvalidateAllocation(c->vma, hd->s[i].before_pb->alloc, 0, VK_WHOLE_SIZE), last_b = hd->s[i].before_pb;
-        }
-        int ncw = 0;
-        pool_lock_shared();
-        for (int i = 0; i < hd->n; i++) {
-            const HostDiffSlice *x = &hd->s[i];
-            const pidx_ent *e = pidx_find(&pool_index, x->lo, 0);
-            PoolRec *r = x->r;
-            if (!e || e->buf != (void *)r || r->storage_serial != x->serial) continue;
-            uint8_t *dst = (uint8_t *)(uintptr_t)(r->import_lo + x->off);
-            const uint8_t *after = x->after_pb->map + x->aoff, *before = x->before_pb->map + x->boff;
-            if (memcmp(after, before, (size_t)x->size) == 0) continue;
-            mem_thaw(r->import_lo + x->off, x->size);
-            if (wb_diff_copy(dst, after, before, (size_t)x->size)) {
-                uint64_t a = (r->import_lo + x->off) & ~0xfffull;
-                uint64_t b = (r->import_lo + x->off + x->size + 0xfff) & ~0xfffull;
-                if (ncw && a >= cw[ncw - 1].lo && a <= cw[ncw - 1].hi) {
-                    if (b > cw[ncw - 1].hi) cw[ncw - 1].hi = b;
-                } else {
-                    if (ncw == ccw) grow((void **)&cw, &ccw, sizeof *cw);
-                    cw[ncw++] = (struct KeptRange){a, b};
-                }
-            }
-        }
-        plat_mutex_unlock_shared(&pool_lock);
-        for (int i = 0; i < ncw; i++) cpu_written_mark_range(cw[i].lo, cw[i].hi - cw[i].lo);
-    }
-    hd->n = 0;
-    hd->rb = NULL;
-    plat_mutex_lock(&hd_free_lock);
-    if (!hd_closed && nhd_free < HD_FREE_MAX) {
-        hd_free[nhd_free++] = hd;
-        hd = NULL;
-    } else {
-        if (hd->all_prev) hd->all_prev->all_next = hd->all_next;
-        else if (hd_all == hd) hd_all = hd->all_next;
-        if (hd->all_next) hd->all_next->all_prev = hd->all_prev;
-    }
-    plat_mutex_unlock(&hd_free_lock);
-    if (hd) free(hd->s), free(hd);
-}
-
-static void hd_begin(uint64_t fence) {
-    HostDiffJob *hd = NULL;
-    plat_mutex_lock(&hd_free_lock);
-    if (nhd_free) hd = hd_free[--nhd_free];
-    plat_mutex_unlock(&hd_free_lock);
-    if (!hd) {
-        hd = calloc(1, sizeof *hd);
-        if (!hd) rt_fatal("vk: out of memory");
-        plat_mutex_lock(&hd_free_lock);
-        hd->all_next = hd_all;
-        if (hd_all) hd_all->all_prev = hd;
-        hd_all = hd;
-        plat_mutex_unlock(&hd_free_lock);
-    }
-    hd->n = 0;
-    hd->rb = NULL;
-    hd_cur = hd;
-    vk_completion_add(fence, host_diff_done, hd);
-}
-
-static void hd_shutdown(void) {
-    hd_cur = NULL;
-    plat_mutex_lock(&hd_free_lock);
-    hd_closed = 1;
-    nhd_free = 0;
-    HostDiffJob *all = hd_all;
-    hd_all = NULL;
-    plat_mutex_unlock(&hd_free_lock);
-    while (all) {
-        HostDiffJob *next = all->all_next;
-        free(all->s);
-        free(all);
-        all = next;
-    }
-}
-
-static int host_diff_record(VkCommandBuffer cb, PoolRec *r, uint64_t off, uint64_t size, PreBuf *pb, uint64_t poff,
-                            uint64_t fence) {
-    HostDiffJob *hd = hd_cur;
-    if (!hd || !size) return 0;
-    VkCtx *c = vk_ctx();
-    int need_b = !pb->host;
-    VkDeviceSize total = size + (need_b ? size : 0);
-    plat_mutex_lock(&hd->lock);
-    if (!hd->rb || hd->rb->used + total > hd->rb->bytes) hd->rb = pre_buf_acquire(c, total, 1, fence);
-    PreBuf *rb = hd->rb;
-    if (!rb) {   // no buffer for the diff: write the range back whole
-        plat_mutex_unlock(&hd->lock);
-        VkBufferCopy whole = {off, off, size};
-        vkCmdCopyBuffer(cb, r->mbuf, r->buf, 1, &whole);
-        return 1;
-    }
-    uint64_t aoff = rb->used;
-    rb->used += size;
-    uint64_t boff = need_b ? rb->used : poff;
-    if (need_b) rb->used += size;
-    if (hd->n == hd->cap) grow((void **)&hd->s, &hd->cap, sizeof *hd->s);
-    hd->s[hd->n++] = (HostDiffSlice){r, r->lo, r->storage_serial, off, size, rb, need_b ? rb : pb, aoff, boff};
-    plat_mutex_unlock(&hd->lock);
-    VkBufferCopy c_after = {off, aoff, size};
-    vkCmdCopyBuffer(cb, r->mbuf, rb->buf, 1, &c_after);
-    if (need_b) {
-        VkBufferCopy c_before = {poff, boff, size};
-        vkCmdCopyBuffer(cb, pb->buf, rb->buf, 1, &c_before);
-    }
-    return 1 + need_b;
-}
-
 static uint64_t sbo_align_pow2(const VkCtx *c) {
     uint64_t a = 4, lim = c->props.limits.minStorageBufferOffsetAlignment;
     while (a < lim) a <<= 1;
@@ -3713,9 +3564,12 @@ static int diff_dispatch_slices(VkCommandBuffer cb, VkCtx *c, const PreCopy *sl,
     if (!total_wg) return 0;
     DiffBatch *batch = diff_batch_create(c, total_wg);
     if (!batch) {
-        int rec = 0;
-        for (int i = 0; i < nsl; i++)
-            rec += host_diff_record(cb, sl[i].r, sl[i].off, sl[i].size, sl[i].pb, sl[i].poff, fence);
+        int rec = 0;   // no batch: write the slices back whole, on the GPU timeline
+        for (int i = 0; i < nsl; i++) {
+            VkBufferCopy whole = {sl[i].off, sl[i].off, sl[i].size};
+            vkCmdCopyBuffer(cb, sl[i].r->mbuf, sl[i].r->buf, 1, &whole);
+            rec++;
+        }
         return rec;
     }
     const uint64_t al = sbo_align_pow2(c), max_sbo = c->props.limits.maxStorageBufferRange;
@@ -3956,13 +3810,20 @@ static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint
                     raw[nraw++] = (VkBufferCopy){lo, lo, y - lo};
                 } else {
                     uint64_t w_lo = (lo + 3) & ~3ull, h_end = y < w_lo ? y : w_lo, w_hi = y & ~3ull;
-                    if (lo < h_end) rec += host_diff_record(cb, r, lo, h_end - lo, pb, poff, fence);
+                    // Unaligned edges go through the raw GPU copy: all write-back into a pool stays GPU-ordered.
+                    if (lo < h_end) {
+                        if (nraw == craw) grow((void **)&raw, &craw, sizeof *raw);
+                        raw[nraw++] = (VkBufferCopy){lo, lo, h_end - lo};
+                    }
                     if (w_lo < w_hi) {
                         if (ndsl == cdsl) grow((void **)&dsl, &cdsl, sizeof *dsl);
                         dsl[ndsl++] = (PreCopy){r, pb, w_lo, poff + (w_lo - lo), w_hi - w_lo};
                     }
                     uint64_t t_start = h_end > w_hi ? h_end : w_hi;
-                    if (t_start < y) rec += host_diff_record(cb, r, t_start, y - t_start, pb, poff + (t_start - lo), fence);
+                    if (t_start < y) {
+                        if (nraw == craw) grow((void **)&raw, &craw, sizeof *raw);
+                        raw[nraw++] = (VkBufferCopy){t_start, t_start, y - t_start};
+                    }
                 }
                 lo = y;
                 if (lo == pre[pk].off + pre[pk].size) pk++;
@@ -7326,11 +7187,38 @@ static void pre_scan_staged_range(PoolRec *r, uint64_t off, uint64_t size, MRang
     }
 }
 
-// A write of an already-submitted part: its range joins the raw-only list unless the map covers it.
-static void pre_raw_add(MRange **a, int *n, int *cap, const PreMap *m, PoolRec *r, uint64_t off, uint64_t size) {
+// Turns the part of the map's segments inside [lo, hi) of r into raw-only segments (pb NULL), splitting at the edges: a
+// later part's snapshot already holds the bytes of an earlier part's write, so only a raw copy writes them back.
+static void pre_map_rawify(PreMap *m, const PoolRec *r, uint64_t lo, uint64_t hi) {
+    static PreSeg *out;
+    static int cout;
+    int k = pre_find_first_seg(m->seg, m->n, r, lo);
+    if (k >= m->n || m->seg[k].r != r || m->seg[k].off >= hi) return;
+    int nout = 0;
+    for (int i = 0; i < k; i++) pre_seg_push(&out, &nout, &cout, m->seg[i]);
+    int i = k;
+    for (; i < m->n && m->seg[i].r == r && m->seg[i].off < hi; i++) {
+        PreSeg s = m->seg[i];
+        uint64_t send = s.off + s.size, x = s.off > lo ? s.off : lo, y = send < hi ? send : hi;
+        if (s.off < x) pre_seg_push(&out, &nout, &cout, (PreSeg){s.r, s.off, x - s.off, s.pb, s.poff});
+        pre_seg_push(&out, &nout, &cout, (PreSeg){s.r, x, y - x, NULL, 0});
+        if (y < send) pre_seg_push(&out, &nout, &cout, (PreSeg){s.r, y, send - y, s.pb, s.poff + (y - s.off)});
+    }
+    for (; i < m->n; i++) pre_seg_push(&out, &nout, &cout, m->seg[i]);
+    PreSeg *old = m->seg;
+    int ocap = m->cap;
+    m->seg = out, m->cap = cout, m->n = nout;
+    out = old, cout = ocap;
+}
+
+// A write of an already-submitted part: the map's segments over its range turn raw-only, and the uncovered rest joins
+// the raw-only list.
+static void pre_raw_add(MRange **a, int *n, int *cap, PreMap *m, PoolRec *r, uint64_t off, uint64_t size) {
     uint64_t lim = r->import_hi - r->import_lo, lo = off, hi = off + size;
     if (hi > lim) hi = lim;
-    if (lo < hi && !pre_map_covers(m, r, lo, hi)) range_add(a, n, cap, r, lo, hi - lo);
+    if (lo >= hi) return;
+    pre_map_rawify(m, r, lo, hi);
+    if (!pre_map_covers(m, r, lo, hi)) range_add(a, n, cap, r, lo, hi - lo);
 }
 
 static int pre_need_scan(void) {
@@ -7492,8 +7380,6 @@ static void mirror_begin(void) {
         vk_completion_add(j->fence, staged_wb_done, j);
         st_cur = j;
     }
-    if (mirror_diff_cur) hd_begin(next_fence);
-    else hd_cur = NULL;
     uint32_t prev = msub;
     msub = msub + 1 ? msub + 1 : 1;
     if (st_cur) st_cur->sub = msub;
@@ -7905,7 +7791,6 @@ static void wb_shutdown(VkCtx *c) {   // vk_mem_shutdown, the device idle: the p
     plat_mutex_unlock(&WB.lock);
     mirror_ops_close(c);
     pre_cache_close(c);
-    hd_shutdown();
 }
 
 void vk_mem_mirror_wb_held(uint64_t fence, uint32_t upto, uint64_t min_bytes) {

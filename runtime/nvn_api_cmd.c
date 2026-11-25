@@ -757,7 +757,7 @@ static uint64_t copy_touch(uint64_t handle, uint64_t now, const char *what) {
     plat_mutex_lock_shared(&copy_lock);
     copy_prefix *pf = copy_find(handle);
     uint64_t bytes = 0;
-    if (pf) __atomic_store_n(&pf->used_at, now, __ATOMIC_RELAXED), bytes = pf->bytes;
+    if (pf) used_at_max(pf, now), bytes = pf->bytes;
     plat_mutex_unlock_shared(&copy_lock);
     if (!pf) rt_fatal("nvn: %s: command handle %#llx is not a live recording (released or never recorded)", what,
                       (unsigned long long)handle);
@@ -1244,7 +1244,7 @@ static void inline_recording(cmd_t *o, uint64_t handle, const char *what) {
             rt_fatal("nvn: %s: command handle %#llx is not a live recording (released or never recorded)", what,
                      (unsigned long long)handle);
         }
-        __atomic_store_n(&pf->used_at, __atomic_load_n(&nsubmits, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
+        used_at_max(pf, __atomic_load_n(&nsubmits, __ATOMIC_RELAXED));
         bytes = pf->bytes;
         const int shallow = pf->depth < CALL_REF_DEPTH;
         const int ref = pf->deferred == 1 && bytes > 16 && o->recording && shallow;

@@ -183,7 +183,7 @@ static const CfgMeta metas[] = {
     // textures and memory
     {"ASTC", "auto", "auto|gpu|native|cpu", RESTART}, {"MEMORY", "auto", "auto|import|mirror|verify", RESTART},
     {"MIRROR_BUDGET", "", NULL, RESTART},   // unset allows mirrors to use the normal device budget
-    {"MIRROR_DIFF", "1", "0|1|ab", RESTART},   // vk_memory.c: differential mirror write-back and staged upload merge
+    {"MIRROR_DIFF", "", "0|1|ab", RESTART},   // vk_memory.c: differential mirror write-back and staged upload merge; unset is on only on NVIDIA
     {"WB_LAZY", "0", "0|1", RESTART},   // vk_memory.c, the lazy write-back; Linux
     {"FRZ_LAZY", "1", "0|1", RESTART},   // memory.c: freeze idle 2 MiB regions containing lazy-heap reserved holes as FRZ_HOLES
     {"TEX_ALIAS", "1", "0|1", RESTART}, {"TEX_HASH", "1", "0|1", RESTART}, {"TEX_VRAM_PRESSURE", "90", "0..100", RESTART}, {"ASTC_BC", "0", "0|1", RESTART}, {"ASTC_BC1", "1", "0|1", RESTART}, {"ZSTD_NATIVE", "1", "0|1", RESTART}, {"ZSTD_CHECK", "0", "0|1", RESTART},

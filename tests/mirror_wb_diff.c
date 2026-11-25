@@ -18,7 +18,6 @@
 #include "vk.h"
 #include "vk_exec.h"
 #include "nvn_api.h"
-#include "nvn_pool_index.h"
 #include "gfx_spirv.h"
 #include "msort.h"
 #include "platform/platform.h"
@@ -65,13 +64,10 @@ static int staged_fault = 1;
 static int fetch_test;
 static PlatMutex st_lock = PLAT_MUTEX_INIT;
 static PlatMutex own_lock = PLAT_MUTEX_INIT;
-static PlatMutex pool_lock = PLAT_MUTEX_INIT;
-static pidx pool_index;
 static StJob *st_jobs, *st_cur;
 static MirrorAcc mrep;
 static volatile int64_t own_fb_ranges, own_fb_bytes, own_protects, own_cb_opened, own_cb_kept, st_sort_ns;
 
-static void pool_lock_shared(void) {}
 static int mirror_lock_if_shared(void) { return 0; }
 static void mirror_unlock(int locked) { (void)locked; }
 
@@ -127,9 +123,7 @@ void vkCmdCopyBuffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, uint32_t co
 }
 
 static int mock_guard_states[16];
-static int mock_thaw_calls, mock_mem_thaw_calls;
-static struct KeptRange mock_cw_marked[16];
-static int nmock_cw_marked;
+static int mock_thaw_calls;
 int mem_guard_state(uint64_t addr) {
     uint64_t pg = (addr >> 12) & 15;
     return mock_guard_states[pg];
@@ -138,10 +132,7 @@ int mem_guard_tryclaim(uint64_t addr) { (void)addr; return 0; }
 void mem_guard_clear(uint64_t addr) { (void)addr; }
 int mem_guard_own(uint64_t addr) { (void)addr; return 0; }
 void mem_thaw_keep(uint64_t addr, uint64_t size) { (void)addr; (void)size; mock_thaw_calls++; }
-void mem_thaw(uint64_t addr, uint64_t size) { (void)addr; (void)size; mock_mem_thaw_calls++; }
-static void cpu_written_mark_range(uint64_t addr, uint64_t size) {
-    if (nmock_cw_marked < 16) mock_cw_marked[nmock_cw_marked++] = (struct KeptRange){addr, addr + size};
-}
+void mem_thaw(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 VkResult vmaInvalidateAllocation(VmaAllocator allocator, VmaAllocation allocation, VkDeviceSize offset, VkDeviceSize size) {
     (void)allocator; (void)allocation; (void)offset; (void)size;
     return VK_SUCCESS;
@@ -499,6 +490,22 @@ static void test_pre_map_and_telescoping(void) {
     pre_prepare_part(UINT32_MAX, 16);
     CHECK(pre_raw_only(&wpre_map, &pool, 0xb000, 0xc000) && npre_pend == 0);
 
+    // 5a'. A late raw write (tag 0, already submitted) lands on an existing snapshot segment: the overlap turns raw-only
+    //      (the later snapshot already holds its bytes), the rest of the segment keeps its snapshot.
+    reset_pre_state();
+    pre_sealed_next = 1;
+    wbl[nwbl++] = (MRange){&pool, 0xd000, 0x2000, 1};   // tag 1: snapshotted
+    pre_walk_writes++;
+    pre_prepare_part(UINT32_MAX, 17);
+    CHECK(pre_map_covers(&wpre_map, &pool, 0xd000, 0xf000) && !pre_raw_only(&wpre_map, &pool, 0xd000, 0xf000));
+    npre_pend = 0;
+    wbl[nwbl++] = (MRange){&pool, 0xd800, 0x1000, 0};   // tag 0: noted late
+    pre_walk_writes++;
+    pre_prepare_part(UINT32_MAX, 18);
+    CHECK(pre_raw_only(&wpre_map, &pool, 0xd800, 0xe800));
+    CHECK(!pre_raw_only(&wpre_map, &pool, 0xd000, 0xd800) && !pre_raw_only(&wpre_map, &pool, 0xe800, 0xf000));
+    CHECK(pre_map_covers(&wpre_map, &pool, 0xd000, 0xf000));
+
     // 5b. Two held parts simultaneously in flight (H1 tag 0, H2 tag 1) + cheap DKB_MIRROR_DIFF=0 bypass.
     reset_pre_state();
     wb_tag = 0;
@@ -537,49 +544,6 @@ static void test_pre_map_and_telescoping(void) {
     CHECK(vk_mem_mirror_pending_for(UINT32_MAX) == 0);
     vk_mem_mirror_part_done(UINT32_MAX);
     CHECK(pre_end_done == 0 && wpre_map.n == 0 && wpre_map.cur == NULL && spre_map.n == 0 && spre_map.cur == NULL);
-
-    // 7. host_diff_done: unchanged slice skips mem_thaw; descending guest-address slices are both marked in
-    //    cpu_written_mark_range; hd_shutdown frees an uncompleted hd_cur cleanly.
-    hd_open();
-    hd_begin(21);
-    CHECK(hd_cur != NULL);
-    uint8_t *g_hi = calloc(1, 4096), *g_lo = calloc(1, 4096), *g_same = calloc(1, 4096);
-    CHECK(g_hi && g_lo && g_same);
-    uintptr_t hi_addr = ((uintptr_t)g_hi > (uintptr_t)g_lo) ? (uintptr_t)g_hi : (uintptr_t)g_lo;
-    uintptr_t lo_addr = ((uintptr_t)g_hi > (uintptr_t)g_lo) ? (uintptr_t)g_lo : (uintptr_t)g_hi;
-    PoolRec p_hi = {.kind = POOL_IMPORT, .lo = hi_addr, .size = 4096, .import_lo = hi_addr, .import_hi = hi_addr + 4096};
-    PoolRec p_lo = {.kind = POOL_IMPORT, .lo = lo_addr, .size = 4096, .import_lo = lo_addr, .import_hi = lo_addr + 4096};
-    PoolRec p_sm = {.kind = POOL_IMPORT, .lo = (uintptr_t)g_same, .size = 4096,
-                    .import_lo = (uintptr_t)g_same, .import_hi = (uintptr_t)g_same + 4096};
-    pidx_ent e1 = {.lo = p_hi.lo, .hi = p_hi.lo + 4096, .buf = &p_hi, .key = &p_hi};
-    pidx_ent e2 = {.lo = p_lo.lo, .hi = p_lo.lo + 4096, .buf = &p_lo, .key = &p_lo};
-    pidx_ent e3 = {.lo = p_sm.lo, .hi = p_sm.lo + 4096, .buf = &p_sm, .key = &p_sm};
-    CHECK(pidx_insert(&pool_index, &e1) && pidx_insert(&pool_index, &e2) && pidx_insert(&pool_index, &e3));
-    uint8_t rb_bytes[48];
-    memset(rb_bytes, 0x33, sizeof rb_bytes);
-    rb_bytes[0] = 0x44;    // p_hi after != before
-    rb_bytes[16] = 0x55;   // p_lo after != before (at lower guest VA!)
-    // rb_bytes[32..47]: after == before == 0x33 -> no mem_thaw!
-    PreBuf hpb = {.refs = 1, .host = 1, .map = rb_bytes, .bytes = sizeof rb_bytes};
-    hd_cur->s = calloc(3, sizeof *hd_cur->s);
-    hd_cur->cap = 3, hd_cur->n = 3;
-    hd_cur->s[0] = (HostDiffSlice){&p_hi, p_hi.lo, 0, 0, 8, &hpb, &hpb, 0, 8};
-    hd_cur->s[1] = (HostDiffSlice){&p_lo, p_lo.lo, 0, 0, 8, &hpb, &hpb, 16, 24};
-    hd_cur->s[2] = (HostDiffSlice){&p_sm, p_sm.lo, 0, 0, 8, &hpb, &hpb, 32, 40};
-    mock_mem_thaw_calls = 0, nmock_cw_marked = 0;
-    host_diff_done(hd_cur);
-    CHECK(mock_mem_thaw_calls == 2);
-    CHECK(nmock_cw_marked == 2);
-    if (nmock_cw_marked == 2) {
-        CHECK(mock_cw_marked[0].lo == (hi_addr & ~0xfffull));
-        CHECK(mock_cw_marked[1].lo == (lo_addr & ~0xfffull));
-    }
-    hd_begin(22);   // uncompleted job at shutdown
-    hd_shutdown();
-    CHECK(hd_cur == NULL && hd_all == NULL && nhd_free == 0);
-    free(pool_index.e), free(pool_index.maxhi);
-    pool_index = (pidx){0};
-    free(g_hi), free(g_lo), free(g_same);
 }
 
 static void test_st_w_merge_scan(void) {
