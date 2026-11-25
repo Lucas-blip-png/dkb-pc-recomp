@@ -2496,6 +2496,8 @@ static void par_rec_note(int worker, int i, uint64_t ns) {   // DKB_TRACE=perf: 
     }
 }
 
+static int par_collect_fast_on(void);
+
 static void par_record(int i, ParPool *pp, VkExec *w, struct DrawCtx *dc) {
     VkCommandBuffer cb = par_secondary(pp);
     const ParPassSnap *ps = &par_pass[PC.supd[i]];
@@ -2520,10 +2522,13 @@ static void par_record(int i, ParPool *pp, VkExec *w, struct DrawCtx *dc) {
     vk_mem_count_quiet(1), vk_usnap_quiet(1);
     uint32_t tag = vk_mem_wb_tag(PC.stag[i]);
     int merge = vk_exec_draw_merge_on();   // DKB_DRAW_MERGE: runs of draws that differ only in c4 go as instances
+    const int fast = par_collect_fast_on();
+    const op_hdr **const ops = PC.ops;
     for (int k = PC.start[i], end = PC.end[i]; k < end; k++) {
-        int draws, used = merge && PC.ops[k]->op == OP_DRAW_IDX ? vk_exec_draw_merge(w, PC.ops + k, end - k, &draws) : 0;
+        if (fast && k + 4 < end) __builtin_prefetch(ops[k + 4], 0, 0);
+        int draws, used = merge && ops[k]->op == OP_DRAW_IDX ? vk_exec_draw_merge(w, ops + k, end - k, &draws) : 0;
         if (used) k += used - 1;   // the collection counted the run's draws (par_take)
-        else par_op(w, PC.ops[k]->op, nvn_op_payload(PC.ops[k]));
+        else par_op(w, ops[k]->op, nvn_op_payload(ops[k]));
     }
     vk_mem_wb_tag(tag);
     par_slice = 0;
@@ -3155,6 +3160,332 @@ static int par_collect_walk_on(void) {
     return RT_KNOB_ON(mode);
 }
 
+static int par_collect_fast_on(void) {
+    static int mode = -1;
+    if (mode < 0) mode = rt_knob("PAR_COLLECT_FAST", "1");
+    return RT_KNOB_ON(mode);
+}
+
+static inline void apply_vattr_inline(uint32_t dst[16], const p_bind_vattr *b) {
+    if (b->first == 0 && b->n == 16) {
+        memcpy(dst, b->st, sizeof(uint32_t) * 16u);
+    } else {
+        memset(dst, 0, sizeof(uint32_t) * 16u);
+        if (b->n) memcpy(&dst[b->first], b->st, sizeof(uint32_t) * (size_t)b->n);
+    }
+}
+
+static inline void apply_vstream_inline(vs_st dst[16], const p_bind_vstream *b) {
+    if (b->first == 0 && b->n == 16) {
+        memcpy(dst, b->st, sizeof(vs_st) * 16u);
+    } else {
+        memset(dst, 0, sizeof(vs_st) * 16u);
+        if (b->n) memcpy(&dst[b->first], b->st, sizeof(vs_st) * (size_t)b->n);
+    }
+}
+
+// Fast collection loop (DKB_PAR_COLLECT_FAST, default 1): fuses hot bind ops directly into one switch, keeps collection
+// counters in registers, defers full-replacement OP_BIND_VATTR/OP_BIND_VSTREAM by pointer until slice boundary or exit,
+// avoids variable-length memcpy calls for common counts, and prefetches sibling OP_CALL targets 6 ops ahead.
+static const op_hdr *par_collect_walk_fast(VkExec *ex, const op_hdr *h, int d0, int *resumed) {
+    int depth = d0, nops = PC.nops;
+    int slice_draws = PC.slice_draws, slice_size = PC.slice_size, draws = PC.draws;
+    uint8_t dlss_done = PC.dlss_done;
+    const uint8_t inline_binds = PC.inline_binds;
+    const op_hdr **const ops = PC.ops;
+    const p_bind_vattr *last_vattr = NULL;
+    const p_bind_vstream *last_vstream = NULL;
+    const op_hdr *ret[CALL_DEPTH];
+    const op_hdr *pf[CALL_DEPTH];
+    pf[d0] = NULL;
+    for (;;) {
+        uint32_t sz = h->size, op = h->op;
+        if (__builtin_expect(sz < sizeof *h || (sz & 7) || op >= OP_COUNT_, 0))
+            rt_fatal("vk: corrupt command record at %p: op %u size %u", (const void *)h, op, sz);
+        const void *a = (const uint8_t *)h + sizeof *h;
+        switch (op) {
+        case OP_BEGIN:
+            h = (const op_hdr *)((const uint8_t *)h + sz);
+            continue;
+        case OP_JUMP:
+            pf[depth] = NULL;
+            h = (const op_hdr *)(uintptr_t)((const p_jump *)a)->target;
+            continue;
+        case OP_CALL: {
+            if (__builtin_expect(depth >= CALL_DEPTH, 0)) rt_fatal("vk: command buffer calls nested deeper than %d", CALL_DEPTH);
+            const op_hdr *next = (const op_hdr *)((const uint8_t *)h + sz);
+            // Prefetch consecutive sibling OP_CALL targets up to 6 ops ahead in this recording buffer.
+            const op_hdr *q = pf[depth];
+            if (!q || q < next) {
+                q = next;
+                for (int k = 0; k < 6 && q->op == OP_CALL && q->size >= sizeof *q + sizeof(p_jump); k++) {
+                    uint64_t t = ((const p_jump *)((const uint8_t *)q + sizeof *q))->target;
+                    if (t) __builtin_prefetch(nvn_op_first(t), 0, 0);
+                    q = (const op_hdr *)((const uint8_t *)q + q->size);
+                }
+                pf[depth] = q;
+            } else if (q->op == OP_CALL && q->size >= sizeof *q + sizeof(p_jump)) {
+                uint64_t t = ((const p_jump *)((const uint8_t *)q + sizeof *q))->target;
+                if (t) __builtin_prefetch(nvn_op_first(t), 0, 0);
+                pf[depth] = (const op_hdr *)((const uint8_t *)q + q->size);
+            }
+            ret[depth++] = next;
+            if (depth < CALL_DEPTH) pf[depth] = NULL;
+            h = nvn_op_first(((const p_jump *)a)->target);
+            continue;
+        }
+        case OP_END:
+            if (depth > d0) {
+                h = ret[--depth];
+                continue;
+            }
+            if (last_vattr) apply_vattr_inline(ex->pipe.vattr, last_vattr);
+            if (last_vstream) apply_vstream_inline(ex->pipe.vstream, last_vstream);
+            PC.nops = nops, PC.slice_draws = slice_draws, PC.slice_size = slice_size, PC.draws = draws;
+            PC.dlss_done = dlss_done;
+            if (ex == &X) walk_at = h, walk_depth = d0;
+            *resumed = 0;
+            return h;
+        case OP_SET_RT:
+            if (nops < PAR_MAX_OPS && !vk_dump_armed && !memcmp(&ex->rt, a, sizeof ex->rt)) {
+                h = (const op_hdr *)((const uint8_t *)h + sz);
+                continue;
+            }
+            goto stop;
+        case OP_WAIT_SYNC:
+            if (nops < PAR_MAX_OPS && !vk_dump_armed) {
+                h = (const op_hdr *)((const uint8_t *)h + sz);
+                continue;
+            }
+            goto stop;
+        case OP_BIND_UBO:
+            if (__builtin_expect(nops == PAR_MAX_OPS || vk_dump_armed, 0)) goto stop;
+            if (__builtin_expect(inline_binds, 1)) {
+                const p_bind_buf *b = a;
+                if (__builtin_expect((unsigned)b->stage < 6u && (unsigned)b->index < 18u, 1)) {
+                    ex->ubo[b->stage][b->index] = *b;
+                    if (b->stage < 3 && b->index + 1 > ex->ubo_hi[b->stage]) ex->ubo_hi[b->stage] = (uint8_t)(b->index + 1);
+                }
+            } else {
+                vk_exec_op_draw(ex, op, a);
+            }
+            ops[nops++] = h;
+            h = (const op_hdr *)((const uint8_t *)h + sz);
+            continue;
+        case OP_BIND_SSBO:
+            if (__builtin_expect(nops == PAR_MAX_OPS || vk_dump_armed, 0)) goto stop;
+            if (__builtin_expect(inline_binds, 1)) {
+                const p_bind_buf *b = a;
+                if (__builtin_expect((unsigned)b->stage < 6u && (unsigned)b->index < 16u, 1)) {
+                    ex->ssbo[b->stage][b->index] = *b;
+                    if (b->stage < 3 && b->index + 1 > ex->ssbo_hi[b->stage]) ex->ssbo_hi[b->stage] = (uint8_t)(b->index + 1);
+                } else {
+                    vk_exec_op_draw(ex, op, a);
+                }
+            } else {
+                vk_exec_op_draw(ex, op, a);
+            }
+            ops[nops++] = h;
+            h = (const op_hdr *)((const uint8_t *)h + sz);
+            continue;
+        case OP_BIND_TEX:
+            if (__builtin_expect(nops == PAR_MAX_OPS || vk_dump_armed, 0)) goto stop;
+            if (__builtin_expect(inline_binds, 1)) {
+                const p_bind_handles *b = a;
+                int st = b->stage, first = b->first, n = b->n;
+                if (__builtin_expect((unsigned)st < 6u && (unsigned)first <= 128u && (unsigned)n <= 32u && first + n <= 128, 1)) {
+                    uint64_t *dst = &ex->tex[st][first];
+                    const uint64_t *src = b->h;
+                    if (n == 1) dst[0] = src[0];
+                    else if (n == 2) dst[0] = src[0], dst[1] = src[1];
+                    else if (n == 3) dst[0] = src[0], dst[1] = src[1], dst[2] = src[2];
+                    else if (n == 4) dst[0] = src[0], dst[1] = src[1], dst[2] = src[2], dst[3] = src[3];
+                    else if (n > 4) memcpy(dst, src, sizeof(uint64_t) * (size_t)n);
+                    if (st < 3 && first + n > ex->tex_hi[st]) ex->tex_hi[st] = (uint8_t)(first + n);
+                } else {
+                    vk_exec_op_draw(ex, op, a);
+                }
+            } else {
+                vk_exec_op_draw(ex, op, a);
+            }
+            ops[nops++] = h;
+            h = (const op_hdr *)((const uint8_t *)h + sz);
+            continue;
+        case OP_BIND_SAMP:
+            if (__builtin_expect(nops == PAR_MAX_OPS || vk_dump_armed, 0)) goto stop;
+            if (__builtin_expect(inline_binds, 1)) {
+                const p_bind_handles *b = a;
+                int st = b->stage, first = b->first, n = b->n;
+                if (__builtin_expect((unsigned)st < 6u && (unsigned)first <= 128u && (unsigned)n <= 32u && first + n <= 128, 1)) {
+                    uint64_t *dst = &ex->samp[st][first];
+                    const uint64_t *src = b->h;
+                    if (n == 1) dst[0] = src[0];
+                    else if (n == 2) dst[0] = src[0], dst[1] = src[1];
+                    else if (n == 3) dst[0] = src[0], dst[1] = src[1], dst[2] = src[2];
+                    else if (n == 4) dst[0] = src[0], dst[1] = src[1], dst[2] = src[2], dst[3] = src[3];
+                    else if (n > 4) memcpy(dst, src, sizeof(uint64_t) * (size_t)n);
+                    if (st < 3 && first + n > ex->samp_hi[st]) ex->samp_hi[st] = (uint8_t)(first + n);
+                } else {
+                    vk_exec_op_draw(ex, op, a);
+                }
+            } else {
+                vk_exec_op_draw(ex, op, a);
+            }
+            ops[nops++] = h;
+            h = (const op_hdr *)((const uint8_t *)h + sz);
+            continue;
+        case OP_BIND_VBUF:
+            if (__builtin_expect(nops == PAR_MAX_OPS || vk_dump_armed, 0)) goto stop;
+            if (__builtin_expect(inline_binds, 1)) {
+                const p_bind_vbuf *b = a;
+                int first = b->first, n = b->n;
+                if (__builtin_expect((unsigned)first <= 16u && (unsigned)n <= 16u - (unsigned)first, 1)) {
+                    NVNbufferRange *dst = &ex->vbuf[first];
+                    const NVNbufferRange *src = b->r;
+                    if (n == 1) dst[0] = src[0];
+                    else if (n == 2) dst[0] = src[0], dst[1] = src[1];
+                    else if (n == 3) dst[0] = src[0], dst[1] = src[1], dst[2] = src[2];
+                    else if (n == 4) dst[0] = src[0], dst[1] = src[1], dst[2] = src[2], dst[3] = src[3];
+                    else if (n > 4) memcpy(dst, src, sizeof(NVNbufferRange) * (size_t)n);
+                    if (first + n > ex->vbuf_hi) ex->vbuf_hi = (uint8_t)(first + n);
+                }
+            } else {
+                vk_exec_op_draw(ex, op, a);
+            }
+            ops[nops++] = h;
+            h = (const op_hdr *)((const uint8_t *)h + sz);
+            continue;
+        case OP_BIND_PROGRAM:
+            if (__builtin_expect(nops == PAR_MAX_OPS || vk_dump_armed, 0)) goto stop;
+            if (__builtin_expect(inline_binds, 1)) {
+                const p_bind_program *b = a;
+                ex->prog = b->prog, ex->prog_stages = b->stages;
+            } else {
+                vk_exec_op_draw(ex, op, a);
+            }
+            ops[nops++] = h;
+            h = (const op_hdr *)((const uint8_t *)h + sz);
+            continue;
+        case OP_BIND_STATE:
+            if (__builtin_expect(nops == PAR_MAX_OPS || vk_dump_armed, 0)) goto stop;
+            if (__builtin_expect(inline_binds, 1)) {
+                const p_bind_state *b = a;
+                blend_st bs;
+                switch (b->kind) {
+                case 0:
+                    memcpy(&bs, b->bytes, sizeof bs);
+                    if (bs.target < 8) ex->pipe.blend[bs.target] = bs;
+                    break;
+                case 1: memcpy(&ex->pipe.color, b->bytes, sizeof ex->pipe.color); break;
+                case 2: memcpy(&ex->pipe.chmask, b->bytes, sizeof ex->pipe.chmask); break;
+                case 3: memcpy(&ex->pipe.ms, b->bytes, sizeof ex->pipe.ms); break;
+                case 4: memcpy(&ex->pipe.poly, b->bytes, sizeof ex->pipe.poly); break;
+                case 5: memcpy(&ex->pipe.ds, b->bytes, sizeof ex->pipe.ds); break;
+                case 6: memcpy(&ex->point_size, b->bytes, sizeof ex->point_size); break;
+                case 7: memcpy(&ex->pipe.alpha_ref, b->bytes, sizeof ex->pipe.alpha_ref); break;
+                }
+            } else {
+                vk_exec_op_draw(ex, op, a);
+            }
+            ops[nops++] = h;
+            h = (const op_hdr *)((const uint8_t *)h + sz);
+            continue;
+        case OP_BIND_VATTR:
+            if (__builtin_expect(nops == PAR_MAX_OPS || vk_dump_armed, 0)) goto stop;
+            if (__builtin_expect(inline_binds, 1)) {
+                const p_bind_vattr *b = a;
+                if (__builtin_expect((unsigned)b->first <= 16u && (unsigned)b->n <= 16u - (unsigned)b->first, 1))
+                    last_vattr = b;
+            } else {
+                vk_exec_op_draw(ex, op, a);
+            }
+            ops[nops++] = h;
+            h = (const op_hdr *)((const uint8_t *)h + sz);
+            continue;
+        case OP_BIND_VSTREAM:
+            if (__builtin_expect(nops == PAR_MAX_OPS || vk_dump_armed, 0)) goto stop;
+            if (__builtin_expect(inline_binds, 1)) {
+                const p_bind_vstream *b = a;
+                if (__builtin_expect((unsigned)b->first <= 16u && (unsigned)b->n <= 16u - (unsigned)b->first, 1))
+                    last_vstream = b;
+            } else {
+                vk_exec_op_draw(ex, op, a);
+            }
+            ops[nops++] = h;
+            h = (const op_hdr *)((const uint8_t *)h + sz);
+            continue;
+        case OP_BIND_IMG: case OP_PUSH_CONST:
+            if (__builtin_expect(nops == PAR_MAX_OPS || vk_dump_armed, 0)) goto stop;
+            if (__builtin_expect(inline_binds, 1)) par_bind_op(ex, op, a);
+            else vk_exec_op_draw(ex, op, a);
+            ops[nops++] = h;
+            h = (const op_hdr *)((const uint8_t *)h + sz);
+            continue;
+        case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_STENCIL: case OP_POLY_OFFSET:
+        case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD: case OP_PRIM_RESTART:
+        case OP_COPY_STRIDE: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL:
+            if (__builtin_expect(nops == PAR_MAX_OPS || vk_dump_armed, 0)) goto stop;
+            state_op(ex, op, a);
+            ops[nops++] = h;
+            h = (const op_hdr *)((const uint8_t *)h + sz);
+            continue;
+        case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IDX_IND:
+            if (__builtin_expect(nops == PAR_MAX_OPS || vk_dump_armed || (op == OP_DRAW_IDX_IND && !par_indirect()), 0)) goto stop;
+            if (__builtin_expect(slice_draws >= slice_size && PC.nslices < PAR_MAX_SLICES, 0)) {
+                if (last_vattr) apply_vattr_inline(ex->pipe.vattr, last_vattr), last_vattr = NULL;
+                if (last_vstream) apply_vstream_inline(ex->pipe.vstream, last_vstream), last_vstream = NULL;
+                PC.nops = nops, PC.draws = draws;
+                if (PC.nslices > PC.s0) par_publish();
+                int i = PC.nslices++;
+                par_snap_take(&PC.snap[i], ex);
+                PC.start[i] = nops;
+                PC.soq[i] = (uint8_t)PC.oq, PC.soqf[i] = PC.oq_flags, PC.supd[i] = (uint8_t)PC.upd;
+                PC.snote[i] = (uint8_t)vk_sync_noting();
+                PC.stag[i] = wb_tag_walk;
+                pss0[i] = (uint16_t)PC.s0;
+                __atomic_store_n(&pdone[i], 0, __ATOMIC_RELAXED);
+                slice_draws = 0;
+                slice_size = par_size();
+            }
+            slice_draws++, draws++;
+            vk_exec_frame.draws_seen++;
+            draws_total++, pass_draws++;
+            if (__builtin_expect(!dlss_done && ex->depth.image && vk_temporal_wanted(), 0))
+                dlss_done = (uint8_t)vk_dlss_scene_draw(ex);
+            ops[nops++] = h;
+            h = (const op_hdr *)((const uint8_t *)h + sz);
+            continue;
+        default:
+            goto stop;
+        }
+    }
+stop:
+    if (last_vattr) apply_vattr_inline(ex->pipe.vattr, last_vattr);
+    if (last_vstream) apply_vstream_inline(ex->pipe.vstream, last_vstream);
+    PC.nops = nops, PC.slice_draws = slice_draws, PC.slice_size = slice_size, PC.draws = draws;
+    PC.dlss_done = dlss_done;
+    par_end_op[h->op]++;
+    par_flush(ex);
+    if (depth == d0) {
+        if (ex == &X) walk_at = h, walk_depth = d0;
+        *resumed = 0;
+        return h;
+    }
+    if (ex == &X) {
+        for (int k = d0; k < depth; k++) walk_ret[k] = ret[k];
+        walk_at = h, walk_depth = depth;
+    }
+    par_skip_start = 1;
+    while (depth > d0) {
+        walk(ex, h, depth);
+        if (pd_n) par_settle_ready(ex);
+        if (split_draws >= split_n) maybe_split(ex);
+        h = ret[--depth];
+    }
+    *resumed = 1;
+    return h;
+}
+
 // Iterative single-switch collection loop while PC.on && !P.next: handles OP_BEGIN, OP_JUMP and OP_CALL in-loop using a
 // local return stack instead of recursing walk() on every call, fusing par_take and par_bind_op into one switch.
 // Returns the op at which collection stopped (at d0: *resumed = 0, PC.on == 1 if OP_END else flushed; when stopped
@@ -3279,7 +3610,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         par_skip_start = 0;
         if (PC.on && !P.next && par_collect_walk_on() && h->op != OP_END) {
             int res = 0;
-            h = par_collect_walk(ex, h, depth, &res);
+            h = par_collect_fast_on() ? par_collect_walk_fast(ex, h, depth, &res) : par_collect_walk(ex, h, depth, &res);
             if (res) continue;
             a = nvn_op_payload(h);
         } else if (h->op != OP_END && h->op != OP_BEGIN && h->op != OP_JUMP && h->op != OP_CALL) {
@@ -3294,7 +3625,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             } else if (!skip_par && par_run_op(h->op) == 2 && par_start(ex)) {
                 if (!P.next && par_collect_walk_on()) {
                     int res = 0;
-                    h = par_collect_walk(ex, h, depth, &res);
+                    h = par_collect_fast_on() ? par_collect_walk_fast(ex, h, depth, &res) : par_collect_walk(ex, h, depth, &res);
                     if (res) continue;
                     a = nvn_op_payload(h);
                 } else if (par_take(ex, h, a)) {
