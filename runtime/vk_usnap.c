@@ -437,7 +437,9 @@ static void wr_prune(void) {
     for (int i = 0; i < old; i++)
         if (U.wr[i].fence > done) U.wr[nold++] = U.wr[i];   // stays sorted
     int m = 0;
-    if (sorted_end >= 256 && sorted_end < nnew) {
+    static int reset_mode;   // rt_knob + 1; 0: not read yet. DKB_RESET_FAST also gates the sorted-prefix merge.
+    if (!reset_mode) reset_mode = rt_knob("RESET_FAST", "1") + 1;
+    if (RT_KNOB_ON(reset_mode - 1) && sorted_end >= 256 && sorted_end < nnew) {
         // Indirect resets append thousands of already-sorted ranges ahead of the threads' lists: sort only the unsorted
         // tail and merge all three sorted streams in one pass.
         sort_new_writes(fresh + sorted_end, nnew - sorted_end, &tmp, &ctmp);

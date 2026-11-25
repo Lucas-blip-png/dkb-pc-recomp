@@ -58,6 +58,8 @@ static PlatMutex drop_lock;
 static void plat_mutex_lock(PlatMutex *m) { if ((*m)++) rt_fatal("FAIL: a lock taken while held (a deadlock)"); }
 static void plat_mutex_unlock(PlatMutex *m) { (*m)--; }
 static int drop_local;
+static int rt_knob(const char *name, const char *def) { (void)name; return *def == '1'; }   // wr_prune: DKB_RESET_FAST on
+#define RT_KNOB_ON(mode) (mode)
 static int vk_usnap_covers(uint64_t addr, uint64_t n) { (void)addr, (void)n; return 0; }
 static uint64_t marks;
 static void mark(uint64_t addr, uint64_t n) { (void)addr, (void)n, marks++; }
