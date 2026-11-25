@@ -16,6 +16,8 @@
 // Use the actual null replay to check that queued waits never dereference their submit-time source.
 #define gfx_backend unchosen_null_backend
 #include "../runtime/gfx_null.c"
+int rt_ab(void) { return 0; }   // nvn_api_cmd.c's DKB_CMD_REC_FAST
+int rt_knob(const char *name, const char *def) { (void)name; return !def || strcmp(def, "0") != 0; }
 #undef gfx_backend
 
 #define PROC(n) void nvnp_##n(Cpu *c)
