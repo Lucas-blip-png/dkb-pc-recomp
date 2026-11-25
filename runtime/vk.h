@@ -393,7 +393,9 @@ int vk_mem_wb_early_min(void);
 uint32_t vk_mem_wb_tag(uint32_t tag);
 void vk_mem_mirror_wb_held(uint64_t fence, uint32_t upto, uint64_t min_bytes);
 int vk_mem_mirror_pending(void);
-void vk_mem_mirror_prologue(VkCommandBuffer cb, uint64_t fence);   // fence: the value of the part's submission
+int vk_mem_mirror_pending_for(uint32_t upto);
+void vk_mem_mirror_part_done(uint32_t upto);
+void vk_mem_mirror_prologue(VkCommandBuffer cb, uint64_t fence, uint32_t upto);   // fence: the value of the part's submission
 // Shadow storage (vk_memory.c): vk_sync.c calls vk_mem_shadow_sync right before each submit; the replay notes every GPU
 // write into CPU-visible memory at record time (vk_mem_gpu_pending) and reports it at the fence with vk_gpu_written,
 // which copies the bytes back into guest memory before telling the texture cache (vk_guest_written).
@@ -779,7 +781,7 @@ VkCommandBuffer vk_sync_split_wait(void);
 // held-back calls into the oldest held part on the calling thread, ends it and submits it ahead of every later part:
 // the replay finishes every held part before any other split and before its submission ends, and does nothing in
 // between that needs a held part on the GPU.
-VkCommandBuffer vk_sync_split_defer(void);
+VkCommandBuffer vk_sync_split_defer(uint32_t wb_tag);
 void vk_sync_split_finish(void (*tail)(VkCommandBuffer cb, void *arg), void *arg);
 // DKB_TRACE=perf: the replay notes each draw or dispatch of the part being timed (kind 0 draw, 1 indirect draw, 2
 // dispatch, 3 indirect dispatch; a, b: the NVN 2 names of its vertex and fragment stages, or its compute stage and 0;

@@ -71,6 +71,8 @@ static void ts_drop(void) {}
 static void held_none(const char *where) { (void)where; }   // no split part held back (vk_sync_split_defer)
 static void state_reset(VkExec *ex) { memset(ex, 0, sizeof *ex); }
 void vk_dump_init(void) {}
+static uint32_t wb_tag_walk;
+uint32_t vk_mem_wb_tag(uint32_t tag) { return tag; }
 void vk_mem_mirror_begin(void) { NEED(x_here); mirror_begin++; }
 int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t f) { NEED(!x_here && cb == X.cb && f == X.fence); mirror_end++; return 2; }
 void vk_usnap_begin(const uint64_t *handles, int n, uint64_t f) {

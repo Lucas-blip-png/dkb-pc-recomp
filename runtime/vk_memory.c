@@ -19,6 +19,9 @@
 #include "host.h"
 #include "linux_pressure.h"
 #include "mirror_budget.h"
+#include "mirror_diff_spv.h"
+#include "mirror_merge_spv.h"
+#include "mirror_snap_spv.h"
 #include "mirror_sparse_spv.h"
 #include "nvn_api.h"
 #include "msort.h"
@@ -89,6 +92,7 @@ typedef struct PoolRec {
     int nown, cown;
     int own_ix;                        // own_lock: 1 + its place in st_own while own holds a range, else 0
     uint8_t *cpu_read;                 // per page: the CPU fetched it, so GPU writes to it go back at the fence
+    uint32_t cr_flip_sub;              // last msub in which staged_fetch flipped any cpu_read bit 0 -> 1 on this pool
     // DKB_STAGED_FETCH_TEST, per page: the submission of the last recorded write, that of the reference bytes, and
     // the reference (ft_check).
     uint32_t *t_rec, *t_ref;
@@ -2657,6 +2661,8 @@ static int mirror_gap = 2;             // pre-snap: hot pools at most this many 
 static int64_t mirror_budget_mib;      // DKB_MIRROR_BUDGET (mirror_ceiling), read once in mirror_mode: -1 auto, 0 none
 static int mirror_presnap = 8;         // pre-snap: longest submission period predicted (DKB_MIRROR_PRESNAP, presnap_wanted)
 static int mirror_own = 1;             // DKB_MIRROR_OWN: mirror_sync skips the pages own_chunk notes (rt_knob mode)
+static int mirror_diff_mode;           // DKB_MIRROR_DIFF: differential write-back and staged upload merge (rt_knob mode)
+static int mirror_diff_cur;            // replay: active DKB_MIRROR_DIFF state for the current submission
 static PoolRec **mlist;                // pool_lock: mirrored pools by import_lo
 static int nm, mcap;
 static uint32_t msub;                  // replay: number of the submission being recorded
@@ -2714,6 +2720,8 @@ typedef struct {
     uint64_t pro_t, st_blk_t, st_blk_n, st_blk_ranges, st_stg_n, st_stg_t, st_cpy_t;
     // DKB_TRACE=perf: staged_split_own's page split (its time), the ranges it took and the pieces it made.
     uint64_t st_sp_loop_t, st_sp_in, st_sp_pieces;
+    // DKB_MIRROR_DIFF: conditional staged upload merges and fallback fence waits on earlier staged jobs.
+    uint64_t st_w_merges, st_w_waits;
 } MirrorAcc;
 static MirrorAcc mrep;                 // replay: this submission
 static MirrorAcc macc;                 // mirror_stat_lock: since the last summary
@@ -2722,6 +2730,8 @@ static volatile int64_t m_live_n, m_live_bytes, m_refused_n[MR_N], m_refused_byt
 static volatile int64_t m_flush_calls, m_flush_bytes, v_pages, v_skipped, v_mismatch, v_owned;
 
 static void sparse_cache_open(void);
+static void pre_cache_open(void);
+static void hd_open(void);
 
 static void mirror_mode(int discrete, uint32_t vendor) {
     const char *e = cfg_value("DKB_MEMORY");
@@ -2735,6 +2745,14 @@ static void mirror_mode(int discrete, uint32_t vendor) {
     }
     vk_mirror_on = mode > 0;
     mirror_verify = mode == 2;
+    mirror_diff_mode = vk_mirror_on && !shadow_on ? rt_knob("MIRROR_DIFF", "1") : 0;
+    mirror_diff_cur = 0;
+    if (mirror_diff_mode) pre_cache_open(), hd_open();
+    if (vk_mirror_on)
+        rt_log("mem: differential mirror write-back %s (DKB_MIRROR_DIFF=%s)",
+               shadow_on ? "off (shadow storage)" :
+               mirror_diff_mode == 2 ? "on in the B blocks" : mirror_diff_mode ? "on" : "off",
+               shadow_on ? "0" : mirror_diff_mode == 2 ? "ab" : mirror_diff_mode ? "1" : "0");
     // The sparse write-back dispatch (sparse_ranges): by default on NVIDIA, the one vendor it was measured on;
     // DKB_SPARSE_MIRROR_COPY=1 turns it on elsewhere, 0 off.
     const char *sparse = cfg_get("DKB_SPARSE_MIRROR_COPY");
@@ -2864,10 +2882,16 @@ typedef struct WbLocal {
     int nk, ck;
     MRange *s;
     int ns, cs;
+    int has_new;   // w->lock: worker added a write since the last pre_collect_uncovered scan
+    int scan_a, scan_s;   // w->lock: leading entries already scanned by pre_collect_uncovered
     struct WbLocal *next;
     PlatMutex lock;
 } WbLocal;
 static WbLocal *wb_locals;   // every thread's, added under mirror_lock and kept until exit
+// Cheap dirty tracking for vk_mem_mirror_pending_for: avoids locking mirror_lock / WbLocal on parts with no new writes.
+static uint32_t pre_walk_writes, pre_seen_walk_writes;
+static uint32_t pre_worker_seq, pre_seen_worker_seq;
+static int pre_has_deferred, wbl_scan, stw_scan;
 // The submission's GPU writes into staged mirrors: the walk's as it records them (vk_mem_gpu_wrote, under mirror_lock
 // when a helper thread may add too, as wbl), the slice threads' moved in at its end (wb_locals_take); vk_mem_mirror_end
 // splits and records them (staged_split_own, staged_wb_record) and empties the list.
@@ -2890,29 +2914,34 @@ static WbLocal *wb_local(void) {
 
 static void wb_local_add(PoolRec *r, uint64_t off, uint64_t size) {
     WbLocal *w = wb_local();
-    if (r->sfeed) {   // a staged mirror's: vk_mem_mirror_end alone takes it (above)
-        range_add(&w->s, &w->ns, &w->cs, r, off, size);
-        return;
-    }
+    int bump = 0;
     plat_mutex_lock(&w->lock);
-    wb_range_add(&w->a, &w->n, &w->cap, r, off, size);
+    if (r->sfeed) wb_range_add(&w->s, &w->ns, &w->cs, r, off, size);
+    else wb_range_add(&w->a, &w->n, &w->cap, r, off, size);
+    if (mirror_diff_cur && !w->has_new &&
+        !(r->sfeed && staged_fault && !__atomic_load_n(&r->cpu_read, __ATOMIC_ACQUIRE)))
+        w->has_new = 1, bump = 1;
     plat_mutex_unlock(&w->lock);
+    if (bump) __atomic_fetch_add(&pre_worker_seq, 1, __ATOMIC_RELEASE);
 }
 
 static void wb_locals_take(void) {   // replay thread, no slice being recorded
-    plat_mutex_lock(&mirror_lock);
-    for (WbLocal *w = wb_locals; w; w = w->next) {
+    for (WbLocal *w = __atomic_load_n(&wb_locals, __ATOMIC_ACQUIRE); w; w = w->next) {
         plat_mutex_lock(&w->lock);
         for (int i = 0; i < w->n; i++) {
             if (nwbl == cwbl) grow((void **)&wbl, &cwbl, sizeof *wbl);
             wbl[nwbl++] = w->a[i];
         }
         w->n = 0;
-        plat_mutex_unlock(&w->lock);
-        for (int i = 0; i < w->ns; i++) range_add(&stw, &nstw, &cstw, w->s[i].r, w->s[i].off, w->s[i].size);
+        for (int i = 0; i < w->ns; i++) {
+            if (nstw == cstw) grow((void **)&stw, &cstw, sizeof *stw);
+            stw[nstw++] = w->s[i];
+        }
         w->ns = 0;
+        w->has_new = 0;
+        w->scan_a = w->scan_s = 0;
+        plat_mutex_unlock(&w->lock);
     }
-    plat_mutex_unlock(&mirror_lock);
 }
 
 // range_add for a write-back list: the range carries this thread's tag, and only a range of the same tag grows.
@@ -3128,15 +3157,713 @@ static void sparse_dispatch(VkCommandBuffer cb, SparseBatch *batch, PoolRec *poo
     vkCmdDispatch(cb, (uint32_t)count, 1, 1);
 }
 
-// Merge ranges by pool before recording either a transfer or an exact sparse write-back dispatch.
-// to_mirror: buf -> mbuf, else mbuf -> buf. Returns the command count; accumulates bytes and ranges moved.
+static void mbarrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFlags2 sa, VkPipelineStageFlags2 ds,
+                     VkAccessFlags2 da) {
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = ss, .srcAccessMask = sa,
+                           .dstStageMask = ds, .dstAccessMask = da};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+}
+
+// ---- differential mirror write-back and conditional staged-upload merge (DKB_MIRROR_DIFF)
+// Shaders translated with static storage-write flags declare whole SSBO bindings as written even when lanes branch
+// away from dead particle slots or inactive dynamic features, and unsized NVN 2 bindings span beyond the active slot
+// while the CPU concurrently updates other records on the same 4 KiB page. Before a part's shaders run (after its
+// CPU -> mirror uploads), vk_mem_mirror_prologue snapshots the pre-write mirror bytes of the ranges the part writes.
+// Write-back then stores only bytes that changed (after != before): on the CPU via wb_diff_copy for staged mirrors
+// (and unaligned/fallback slices), and on the GPU via mirror_diff_spv for imported mirrors (disabled under shadow
+// storage, where vk_gpu_written_many copies whole ranges from the shadow into guest memory). On slower GPUs where an
+// earlier submission's fence copy-back is still in flight when the next submission uploads a CPU-dirty page,
+// staged_upload merges new CPU words into the mirror via mirror_merge_spv wherever the earlier submission left its
+// snapshot unchanged.
+
+// Copies bytes where after[i] != before[i] into dst[i], leaving untouched guest bytes intact. Returns 1 if any byte
+// differed, 0 if the whole range matched before.
+static int wb_diff_copy(uint8_t *dst, const uint8_t *after, const uint8_t *before, size_t size) {
+    int changed = 0;
+    size_t i = 0;
+    while (i + 64 <= size) {
+        if (memcmp(after + i, before + i, 64) != 0) {
+            for (size_t k = 0; k < 64; k += 8) {
+                uint64_t a, b;
+                memcpy(&a, after + i + k, 8);
+                memcpy(&b, before + i + k, 8);
+                if (a != b) {
+                    changed = 1;
+                    for (size_t j = 0; j < 8; j++) {
+                        uint8_t av = after[i + k + j];
+                        if (av != before[i + k + j]) dst[i + k + j] = av;
+                    }
+                }
+            }
+        }
+        i += 64;
+    }
+    for (; i < size; i++) {
+        uint8_t av = after[i];
+        if (av != before[i]) {
+            dst[i] = av;
+            changed = 1;
+        }
+    }
+    return changed;
+}
+
+typedef struct PreBuf {
+    volatile int32_t refs;
+    int host;                  // 1: host-cached mapped, 0: device-local
+    VkBuffer buf;
+    VmaAllocation alloc;
+    uint8_t *map;
+    VkDeviceSize bytes, used;
+    struct PreBuf *all_prev, *all_next;
+} PreBuf;
+
+typedef struct {
+    PoolRec *r;
+    uint64_t off, size;
+    PreBuf *pb;
+    uint64_t poff;
+} PreSeg;
+
+typedef struct {
+    PreSeg *seg;               // sorted by (uintptr_t)r, then off; strictly disjoint
+    int n, cap;
+    PreBuf *cur;
+} PreMap;
+
+typedef struct {
+    PoolRec *r;
+    PreBuf *pb;
+    uint64_t off, poff, size;
+} PreCopy;
+
+enum { PRE_CACHE_COUNT = 32, PRE_CACHE_BYTES = 128 * 1024 * 1024, PRE_MIN_ALLOC = 256 * 1024 };
+static struct {
+    PlatMutex lock;
+    PreBuf *ready[2][PRE_CACHE_COUNT];
+    VkDeviceSize bytes[2];
+    int n[2], closed;
+    PreBuf *all_head;
+} pre_cache = {.lock = PLAT_MUTEX_INIT};
+
+static void pre_cache_open(void) {
+    plat_mutex_lock(&pre_cache.lock);
+    pre_cache.closed = 0;
+    plat_mutex_unlock(&pre_cache.lock);
+}
+
+static void pre_buf_destroy_now(VkCtx *c, PreBuf *pb) {
+    vmaDestroyBuffer(c->vma, pb->buf, pb->alloc);
+    free(pb);
+}
+
+static void pre_buf_complete(void *arg) {
+    PreBuf *pb = arg;
+    if (plat_dec32(&pb->refs) != 0) return;
+    int h = pb->host ? 1 : 0;
+    plat_mutex_lock(&pre_cache.lock);
+    if (!pre_cache.closed && pre_cache.n[h] < PRE_CACHE_COUNT &&
+        pb->bytes <= (VkDeviceSize)PRE_CACHE_BYTES - pre_cache.bytes[h]) {
+        pre_cache.ready[h][pre_cache.n[h]++] = pb;
+        pre_cache.bytes[h] += pb->bytes;
+        plat_mutex_unlock(&pre_cache.lock);
+        return;
+    }
+    if (pb->all_prev) pb->all_prev->all_next = pb->all_next;
+    else if (pre_cache.all_head == pb) pre_cache.all_head = pb->all_next;
+    if (pb->all_next) pb->all_next->all_prev = pb->all_prev;
+    plat_mutex_unlock(&pre_cache.lock);
+    pre_buf_destroy_now(vk_ctx(), pb);
+}
+
+static PreBuf *pre_buf_acquire(VkCtx *c, VkDeviceSize min_bytes, int host, uint64_t fence) {
+    VkDeviceSize want = host ? PRE_MIN_ALLOC : (4ull << 20);
+    while (want < min_bytes) want = want < (16ull << 20) ? want * 2 : (min_bytes + 0xffffull) & ~0xffffull;
+    int h = host ? 1 : 0;
+    PreBuf *pb = NULL;
+    plat_mutex_lock(&pre_cache.lock);
+    int best = -1;
+    for (int i = 0; i < pre_cache.n[h]; i++) {
+        VkDeviceSize sz = pre_cache.ready[h][i]->bytes;
+        if (sz >= min_bytes && (best < 0 || sz < pre_cache.ready[h][best]->bytes)) best = i;
+    }
+    if (best >= 0) {
+        pb = pre_cache.ready[h][best];
+        pre_cache.ready[h][best] = pre_cache.ready[h][--pre_cache.n[h]];
+        pre_cache.bytes[h] -= pb->bytes;
+    }
+    plat_mutex_unlock(&pre_cache.lock);
+    if (!pb) {
+        pb = calloc(1, sizeof *pb);
+        if (!pb) rt_fatal("vk: out of memory for a pre-write snapshot buffer");
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = want,
+                                 .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+        VmaAllocationInfo info = {0};
+        VkResult res = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        if (!h) {
+            VmaAllocationCreateInfo da = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+                                          .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
+            res = vmaCreateBuffer(c->vma, &bi, &da, &pb->buf, &pb->alloc, NULL);
+        }
+        if (res != VK_SUCCESS) {
+            h = 1;
+            VmaAllocationCreateInfo ha = {
+                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            };
+            res = vmaCreateBuffer(c->vma, &bi, &ha, &pb->buf, &pb->alloc, &info);
+            if (res != VK_SUCCESS || !info.pMappedData) {
+                if (res == VK_SUCCESS) vmaDestroyBuffer(c->vma, pb->buf, pb->alloc);
+                free(pb);
+                rt_fatal("vk: pre-write snapshot buffer of %llu bytes failed (%d)", (unsigned long long)want, (int)res);
+            }
+        }
+        pb->host = h;
+        pb->map = info.pMappedData;
+        pb->bytes = want;
+        plat_mutex_lock(&pre_cache.lock);
+        pb->all_next = pre_cache.all_head;
+        if (pre_cache.all_head) pre_cache.all_head->all_prev = pb;
+        pre_cache.all_head = pb;
+        plat_mutex_unlock(&pre_cache.lock);
+    }
+    pb->refs = 1;
+    pb->used = 0;
+    vk_completion_add(fence, pre_buf_complete, pb);
+    return pb;
+}
+
+static void pre_cache_close(VkCtx *c) {
+    plat_mutex_lock(&pre_cache.lock);
+    pre_cache.closed = 1;
+    pre_cache.n[0] = pre_cache.n[1] = 0;
+    pre_cache.bytes[0] = pre_cache.bytes[1] = 0;
+    PreBuf *all = pre_cache.all_head;
+    pre_cache.all_head = NULL;
+    plat_mutex_unlock(&pre_cache.lock);
+    while (all) {
+        PreBuf *next = all->all_next;
+        pre_buf_destroy_now(c, all);
+        all = next;
+    }
+}
+
+#define DIFF_CHUNK_BYTES 65536u
+typedef struct { uint32_t x, y, z, w; } DiffRange;
+typedef struct {
+    VkBuffer buffer;
+    VmaAllocation allocation;
+    DiffRange *ranges;
+    VkDeviceSize bytes;
+    uint32_t used;
+} DiffBatch;
+
+static struct {
+    int tried;
+    PFN_vkCmdPushDescriptorSetKHR push;
+    VkDescriptorSetLayout set;
+    VkPipelineLayout layout;
+    VkPipeline diff_pipe;
+    VkPipeline merge_pipe;
+    VkPipeline snap_pipe;
+} mirror_ops;
+
+enum { DIFF_CACHE_COUNT = 32, DIFF_CACHE_BYTES = 16 * 1024 * 1024 };
+static struct {
+    PlatMutex lock;
+    DiffBatch *ready[DIFF_CACHE_COUNT];
+    VkDeviceSize bytes;
+    int n, closed;
+} diff_cache = {.lock = PLAT_MUTEX_INIT};
+
+static int mirror_ops_init(VkCtx *c) {
+    if (__atomic_load_n(&mirror_ops.tried, __ATOMIC_ACQUIRE))
+        return mirror_ops.diff_pipe != VK_NULL_HANDLE && mirror_ops.merge_pipe != VK_NULL_HANDLE &&
+               mirror_ops.snap_pipe != VK_NULL_HANDLE;
+    static PlatMutex init_lock = PLAT_MUTEX_INIT;
+    plat_mutex_lock(&init_lock);
+    if (!mirror_ops.tried) {
+        mirror_ops.push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->device, "vkCmdPushDescriptorSetKHR");
+        if (mirror_ops.push) {
+            VkDescriptorSetLayoutBinding bindings[4];
+            for (uint32_t i = 0; i < 4; i++)
+                bindings[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                                             VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+            VkDescriptorSetLayoutCreateInfo set = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                                   .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+                                                   .bindingCount = 4, .pBindings = bindings};
+            VkPushConstantRange push = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t)};
+            if (vkCreateDescriptorSetLayout(c->device, &set, NULL, &mirror_ops.set) == VK_SUCCESS) {
+                VkPipelineLayoutCreateInfo lay = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                                  .setLayoutCount = 1, .pSetLayouts = &mirror_ops.set,
+                                                  .pushConstantRangeCount = 1, .pPushConstantRanges = &push};
+                if (vkCreatePipelineLayout(c->device, &lay, NULL, &mirror_ops.layout) == VK_SUCCESS) {
+                    VkShaderModule sm_d = VK_NULL_HANDLE, sm_m = VK_NULL_HANDLE, sm_s = VK_NULL_HANDLE;
+                    VkShaderModuleCreateInfo md = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                                   .codeSize = sizeof mirror_diff_spv, .pCode = mirror_diff_spv};
+                    VkShaderModuleCreateInfo mm = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                                   .codeSize = sizeof mirror_merge_spv, .pCode = mirror_merge_spv};
+                    VkShaderModuleCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                                   .codeSize = sizeof mirror_snap_spv, .pCode = mirror_snap_spv};
+                    if (vkCreateShaderModule(c->device, &md, NULL, &sm_d) == VK_SUCCESS &&
+                        vkCreateShaderModule(c->device, &mm, NULL, &sm_m) == VK_SUCCESS &&
+                        vkCreateShaderModule(c->device, &ms, NULL, &sm_s) == VK_SUCCESS) {
+                        VkComputePipelineCreateInfo cp[3] = {
+                            {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                             .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                       .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm_d, .pName = "main"},
+                             .layout = mirror_ops.layout},
+                            {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                             .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                       .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm_m, .pName = "main"},
+                             .layout = mirror_ops.layout},
+                            {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                             .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                       .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm_s, .pName = "main"},
+                             .layout = mirror_ops.layout},
+                        };
+                        VkPipeline out[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+                        if (vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 3, cp, NULL, out) == VK_SUCCESS)
+                            mirror_ops.diff_pipe = out[0], mirror_ops.merge_pipe = out[1], mirror_ops.snap_pipe = out[2];
+                    }
+                    if (sm_d) vkDestroyShaderModule(c->device, sm_d, NULL);
+                    if (sm_m) vkDestroyShaderModule(c->device, sm_m, NULL);
+                    if (sm_s) vkDestroyShaderModule(c->device, sm_s, NULL);
+                }
+            }
+        }
+        plat_mutex_lock(&diff_cache.lock);
+        diff_cache.closed = 0;
+        plat_mutex_unlock(&diff_cache.lock);
+        __atomic_store_n(&mirror_ops.tried, 1, __ATOMIC_RELEASE);
+    }
+    plat_mutex_unlock(&init_lock);
+    return mirror_ops.diff_pipe != VK_NULL_HANDLE && mirror_ops.merge_pipe != VK_NULL_HANDLE &&
+           mirror_ops.snap_pipe != VK_NULL_HANDLE;
+}
+
+static void diff_batch_free(DiffBatch *b) {
+    vmaDestroyBuffer(vk_ctx()->vma, b->buffer, b->allocation);
+    free(b);
+}
+
+static void diff_batch_complete(void *arg) {
+    DiffBatch *b = arg;
+    plat_mutex_lock(&diff_cache.lock);
+    if (!diff_cache.closed && diff_cache.n < DIFF_CACHE_COUNT &&
+        b->bytes <= (VkDeviceSize)DIFF_CACHE_BYTES - diff_cache.bytes) {
+        diff_cache.ready[diff_cache.n++] = b;
+        diff_cache.bytes += b->bytes;
+        plat_mutex_unlock(&diff_cache.lock);
+        return;
+    }
+    plat_mutex_unlock(&diff_cache.lock);
+    diff_batch_free(b);
+}
+
+static DiffBatch *diff_batch_create(VkCtx *c, uint32_t capacity) {
+    if (!capacity) capacity = 1;
+    VkDeviceSize min_bytes = (VkDeviceSize)capacity * sizeof(DiffRange);
+    if (min_bytes > c->props.limits.maxStorageBufferRange || !mirror_ops_init(c)) return NULL;
+    VkDeviceSize bytes = 4096;
+    while (bytes < min_bytes && bytes < (c->props.limits.maxStorageBufferRange >> 1)) bytes <<= 1;
+    if (bytes < min_bytes) bytes = min_bytes;
+    DiffBatch *batch = NULL;
+    plat_mutex_lock(&diff_cache.lock);
+    int best = -1;
+    for (int i = 0; i < diff_cache.n; i++) {
+        VkDeviceSize sz = diff_cache.ready[i]->bytes;
+        if (sz >= min_bytes && (best < 0 || sz < diff_cache.ready[best]->bytes)) best = i;
+    }
+    if (best >= 0) {
+        batch = diff_cache.ready[best];
+        diff_cache.ready[best] = diff_cache.ready[--diff_cache.n];
+        diff_cache.bytes -= batch->bytes;
+    }
+    plat_mutex_unlock(&diff_cache.lock);
+    if (batch) {
+        batch->used = 0;
+        return batch;
+    }
+    batch = calloc(1, sizeof *batch);
+    if (!batch) return NULL;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = bytes,
+                             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+    VmaAllocationCreateInfo ai = {
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    };
+    VmaAllocationInfo mapped;
+    if (vmaCreateBuffer(c->vma, &bi, &ai, &batch->buffer, &batch->allocation, &mapped) != VK_SUCCESS || !mapped.pMappedData) {
+        if (batch->buffer) vmaDestroyBuffer(c->vma, batch->buffer, batch->allocation);
+        free(batch);
+        return NULL;
+    }
+    batch->bytes = bytes;
+    batch->ranges = mapped.pMappedData;
+    return batch;
+}
+
+static void mirror_ops_close(VkCtx *c) {
+    DiffBatch *ready[DIFF_CACHE_COUNT];
+    plat_mutex_lock(&diff_cache.lock);
+    diff_cache.closed = 1;
+    int n = diff_cache.n;
+    memcpy(ready, diff_cache.ready, (size_t)n * sizeof *ready);
+    diff_cache.n = 0;
+    diff_cache.bytes = 0;
+    plat_mutex_unlock(&diff_cache.lock);
+    for (int i = 0; i < n; i++) vmaDestroyBuffer(c->vma, ready[i]->buffer, ready[i]->allocation), free(ready[i]);
+    if (mirror_ops.diff_pipe) vkDestroyPipeline(c->device, mirror_ops.diff_pipe, NULL);
+    if (mirror_ops.merge_pipe) vkDestroyPipeline(c->device, mirror_ops.merge_pipe, NULL);
+    if (mirror_ops.snap_pipe) vkDestroyPipeline(c->device, mirror_ops.snap_pipe, NULL);
+    if (mirror_ops.layout) vkDestroyPipelineLayout(c->device, mirror_ops.layout, NULL);
+    if (mirror_ops.set) vkDestroyDescriptorSetLayout(c->device, mirror_ops.set, NULL);
+    memset(&mirror_ops, 0, sizeof mirror_ops);
+}
+
+// Host-side fallback for non-staged write-backs when push descriptors are unavailable or a slice has < 4-byte edges.
+typedef struct {
+    PoolRec *r;
+    uint64_t lo, serial, off, size;
+    PreBuf *after_pb, *before_pb;
+    uint64_t aoff, boff;
+} HostDiffSlice;
+
+typedef struct HostDiffJob {
+    PlatMutex lock;
+    HostDiffSlice *s;
+    int n, cap;
+    PreBuf *rb;
+    struct HostDiffJob *all_prev, *all_next;
+} HostDiffJob;
+
+#define HD_FREE_MAX 4
+static PlatMutex hd_free_lock = PLAT_MUTEX_INIT;
+static HostDiffJob *hd_free[HD_FREE_MAX];
+static int nhd_free, hd_closed;
+static HostDiffJob *hd_all;
+static HostDiffJob *hd_cur;
+
+static void hd_open(void) {
+    plat_mutex_lock(&hd_free_lock);
+    hd_closed = 0;
+    plat_mutex_unlock(&hd_free_lock);
+}
+
+static void host_diff_done(void *arg) {
+    static struct KeptRange *cw;
+    static int ccw;
+    HostDiffJob *hd = arg;
+    if (hd->n) {
+        VkCtx *c = vk_ctx();
+        PreBuf *last_a = NULL, *last_b = NULL;
+        for (int i = 0; i < hd->n; i++) {
+            if (hd->s[i].after_pb != last_a)
+                vmaInvalidateAllocation(c->vma, hd->s[i].after_pb->alloc, 0, VK_WHOLE_SIZE), last_a = hd->s[i].after_pb;
+            if (hd->s[i].before_pb != last_b)
+                vmaInvalidateAllocation(c->vma, hd->s[i].before_pb->alloc, 0, VK_WHOLE_SIZE), last_b = hd->s[i].before_pb;
+        }
+        int ncw = 0;
+        pool_lock_shared();
+        for (int i = 0; i < hd->n; i++) {
+            const HostDiffSlice *x = &hd->s[i];
+            const pidx_ent *e = pidx_find(&pool_index, x->lo, 0);
+            PoolRec *r = x->r;
+            if (!e || e->buf != (void *)r || r->storage_serial != x->serial) continue;
+            uint8_t *dst = (uint8_t *)(uintptr_t)(r->import_lo + x->off);
+            const uint8_t *after = x->after_pb->map + x->aoff, *before = x->before_pb->map + x->boff;
+            if (memcmp(after, before, (size_t)x->size) == 0) continue;
+            mem_thaw(r->import_lo + x->off, x->size);
+            if (wb_diff_copy(dst, after, before, (size_t)x->size)) {
+                uint64_t a = (r->import_lo + x->off) & ~0xfffull;
+                uint64_t b = (r->import_lo + x->off + x->size + 0xfff) & ~0xfffull;
+                if (ncw && a >= cw[ncw - 1].lo && a <= cw[ncw - 1].hi) {
+                    if (b > cw[ncw - 1].hi) cw[ncw - 1].hi = b;
+                } else {
+                    if (ncw == ccw) grow((void **)&cw, &ccw, sizeof *cw);
+                    cw[ncw++] = (struct KeptRange){a, b};
+                }
+            }
+        }
+        plat_mutex_unlock_shared(&pool_lock);
+        for (int i = 0; i < ncw; i++) cpu_written_mark_range(cw[i].lo, cw[i].hi - cw[i].lo);
+    }
+    hd->n = 0;
+    hd->rb = NULL;
+    plat_mutex_lock(&hd_free_lock);
+    if (!hd_closed && nhd_free < HD_FREE_MAX) {
+        hd_free[nhd_free++] = hd;
+        hd = NULL;
+    } else {
+        if (hd->all_prev) hd->all_prev->all_next = hd->all_next;
+        else if (hd_all == hd) hd_all = hd->all_next;
+        if (hd->all_next) hd->all_next->all_prev = hd->all_prev;
+    }
+    plat_mutex_unlock(&hd_free_lock);
+    if (hd) free(hd->s), free(hd);
+}
+
+static void hd_begin(uint64_t fence) {
+    HostDiffJob *hd = NULL;
+    plat_mutex_lock(&hd_free_lock);
+    if (nhd_free) hd = hd_free[--nhd_free];
+    plat_mutex_unlock(&hd_free_lock);
+    if (!hd) {
+        hd = calloc(1, sizeof *hd);
+        if (!hd) rt_fatal("vk: out of memory");
+        plat_mutex_lock(&hd_free_lock);
+        hd->all_next = hd_all;
+        if (hd_all) hd_all->all_prev = hd;
+        hd_all = hd;
+        plat_mutex_unlock(&hd_free_lock);
+    }
+    hd->n = 0;
+    hd->rb = NULL;
+    hd_cur = hd;
+    vk_completion_add(fence, host_diff_done, hd);
+}
+
+static void hd_shutdown(void) {
+    hd_cur = NULL;
+    plat_mutex_lock(&hd_free_lock);
+    hd_closed = 1;
+    nhd_free = 0;
+    HostDiffJob *all = hd_all;
+    hd_all = NULL;
+    plat_mutex_unlock(&hd_free_lock);
+    while (all) {
+        HostDiffJob *next = all->all_next;
+        free(all->s);
+        free(all);
+        all = next;
+    }
+}
+
+static int host_diff_record(VkCommandBuffer cb, PoolRec *r, uint64_t off, uint64_t size, PreBuf *pb, uint64_t poff,
+                            uint64_t fence) {
+    HostDiffJob *hd = hd_cur;
+    if (!hd || !size) return 0;
+    VkCtx *c = vk_ctx();
+    int need_b = !pb->host;
+    VkDeviceSize total = size + (need_b ? size : 0);
+    plat_mutex_lock(&hd->lock);
+    if (!hd->rb || hd->rb->used + total > hd->rb->bytes) hd->rb = pre_buf_acquire(c, total, 1, fence);
+    PreBuf *rb = hd->rb;
+    uint64_t aoff = rb->used;
+    rb->used += size;
+    uint64_t boff = need_b ? rb->used : poff;
+    if (need_b) rb->used += size;
+    if (hd->n == hd->cap) grow((void **)&hd->s, &hd->cap, sizeof *hd->s);
+    hd->s[hd->n++] = (HostDiffSlice){r, r->lo, r->storage_serial, off, size, rb, need_b ? rb : pb, aoff, boff};
+    plat_mutex_unlock(&hd->lock);
+    VkBufferCopy c_after = {off, aoff, size};
+    vkCmdCopyBuffer(cb, r->mbuf, rb->buf, 1, &c_after);
+    if (need_b) {
+        VkBufferCopy c_before = {poff, boff, size};
+        vkCmdCopyBuffer(cb, pb->buf, rb->buf, 1, &c_before);
+    }
+    return 1 + need_b;
+}
+
+static uint64_t sbo_align_pow2(const VkCtx *c) {
+    uint64_t a = 4, lim = c->props.limits.minStorageBufferOffsetAlignment;
+    while (a < lim) a <<= 1;
+    return a;
+}
+
+static int diff_dispatch_slices(VkCommandBuffer cb, VkCtx *c, const PreCopy *sl, int nsl, uint64_t fence) {
+    uint32_t total_wg = 0;
+    for (int i = 0; i < nsl; i++) total_wg += (uint32_t)((sl[i].size + DIFF_CHUNK_BYTES - 1) / DIFF_CHUNK_BYTES);
+    if (!total_wg) return 0;
+    DiffBatch *batch = diff_batch_create(c, total_wg);
+    if (!batch) {
+        int rec = 0;
+        for (int i = 0; i < nsl; i++)
+            rec += host_diff_record(cb, sl[i].r, sl[i].off, sl[i].size, sl[i].pb, sl[i].poff, fence);
+        return rec;
+    }
+    const uint64_t al = sbo_align_pow2(c), max_sbo = c->props.limits.maxStorageBufferRange;
+    const uint32_t max_wg = c->props.limits.maxComputeWorkGroupCount[0];
+    int rec = 0;
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, mirror_ops.diff_pipe);
+    rec++;
+    PoolRec *cur_r = NULL;
+    PreBuf *cur_pb = NULL;
+    uint64_t p_base = 0, p_span = 0, b_base = 0, b_span = 0;
+    uint32_t group_first = 0, group_n = 0;
+    for (int i = 0; i < nsl; i++) {
+        PoolRec *r = sl[i].r;
+        PreBuf *pb = sl[i].pb;
+        uint64_t lim = r->import_hi - r->import_lo;
+        for (uint64_t done = 0; done < sl[i].size;) {
+            uint64_t c_sz = sl[i].size - done;
+            if (c_sz > DIFF_CHUNK_BYTES) c_sz = DIFF_CHUNK_BYTES;
+            uint64_t c_off = sl[i].off + done, c_poff = sl[i].poff + done;
+            int fit = group_n && r == cur_r && pb == cur_pb &&
+                      c_off >= p_base && c_off + c_sz - p_base <= p_span &&
+                      c_poff >= b_base && c_poff + c_sz - b_base <= b_span;
+            if (!fit) {
+                while (group_n) {
+                    uint32_t step = group_n > max_wg ? max_wg : group_n;
+                    VkDescriptorBufferInfo infos[4] = {{cur_r->mbuf, p_base, p_span}, {cur_r->buf, p_base, p_span},
+                                                       {cur_pb->buf, b_base, b_span}, {batch->buffer, 0, batch->bytes}};
+                    VkWriteDescriptorSet writes[4];
+                    for (uint32_t b = 0; b < 4; b++)
+                        writes[b] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                           .dstBinding = b, .descriptorCount = 1,
+                                                           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                                           .pBufferInfo = &infos[b]};
+                    rec_push(mirror_ops.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, mirror_ops.layout, 0, 4, writes);
+                    vkCmdPushConstants(cb, mirror_ops.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof group_first, &group_first);
+                    vkCmdDispatch(cb, step, 1, 1);
+                    rec += 3;
+                    group_first += step, group_n -= step;
+                }
+                cur_r = r, cur_pb = pb;
+                p_base = lim <= max_sbo ? 0 : (c_off & ~(al - 1));
+                p_span = lim - p_base <= max_sbo ? lim - p_base : max_sbo;
+                b_base = pb->bytes <= max_sbo ? 0 : (c_poff & ~(al - 1));
+                b_span = pb->bytes - b_base <= max_sbo ? pb->bytes - b_base : max_sbo;
+                group_first = batch->used;
+            }
+            batch->ranges[batch->used++] = (DiffRange){(uint32_t)((c_off - p_base) / 4),
+                                                       (uint32_t)((c_poff - b_base) / 4), (uint32_t)(c_sz / 4), 0};
+            group_n++;
+            done += c_sz;
+        }
+    }
+    while (group_n) {
+        uint32_t step = group_n > max_wg ? max_wg : group_n;
+        VkDescriptorBufferInfo infos[4] = {{cur_r->mbuf, p_base, p_span}, {cur_r->buf, p_base, p_span},
+                                           {cur_pb->buf, b_base, b_span}, {batch->buffer, 0, batch->bytes}};
+        VkWriteDescriptorSet writes[4];
+        for (uint32_t b = 0; b < 4; b++)
+            writes[b] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = b,
+                                               .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                               .pBufferInfo = &infos[b]};
+        rec_push(mirror_ops.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, mirror_ops.layout, 0, 4, writes);
+        vkCmdPushConstants(cb, mirror_ops.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof group_first, &group_first);
+        vkCmdDispatch(cb, step, 1, 1);
+        rec += 3;
+        group_first += step, group_n -= step;
+    }
+    vk_completion_add(fence, diff_batch_complete, batch);
+    return rec;
+}
+
+static int snap_dispatch_slices(VkCommandBuffer cb, VkCtx *c, const PreCopy *sl, int nsl, uint64_t fence) {
+    uint32_t total_wg = 0;
+    for (int i = 0; i < nsl; i++) total_wg += (uint32_t)((sl[i].size + DIFF_CHUNK_BYTES - 1) / DIFF_CHUNK_BYTES);
+    if (!total_wg) return 0;
+    DiffBatch *batch = diff_batch_create(c, total_wg);
+    if (!batch) return 0;
+    const uint64_t al = sbo_align_pow2(c), max_sbo = c->props.limits.maxStorageBufferRange;
+    const uint32_t max_wg = c->props.limits.maxComputeWorkGroupCount[0];
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, mirror_ops.snap_pipe);
+    PoolRec *cur_r = NULL;
+    PreBuf *cur_pb = NULL;
+    uint64_t p_base = 0, p_span = 0, b_base = 0, b_span = 0;
+    uint32_t group_first = 0, group_n = 0;
+    for (int i = 0; i < nsl; i++) {
+        PoolRec *r = sl[i].r;
+        PreBuf *pb = sl[i].pb;
+        uint64_t lim = r->import_hi - r->import_lo;
+        for (uint64_t done = 0; done < sl[i].size;) {
+            uint64_t c_sz = sl[i].size - done;
+            if (c_sz > DIFF_CHUNK_BYTES) c_sz = DIFF_CHUNK_BYTES;
+            uint64_t c_off = sl[i].off + done, c_poff = sl[i].poff + done;
+            int fit = group_n && r == cur_r && pb == cur_pb &&
+                      c_off >= p_base && c_off + c_sz - p_base <= p_span &&
+                      c_poff >= b_base && c_poff + c_sz - b_base <= b_span;
+            if (!fit) {
+                while (group_n) {
+                    uint32_t step = group_n > max_wg ? max_wg : group_n;
+                    VkDescriptorBufferInfo infos[4] = {{cur_r->mbuf, p_base, p_span}, {cur_pb->buf, b_base, b_span},
+                                                       {cur_r->mbuf, p_base, p_span}, {batch->buffer, 0, batch->bytes}};
+                    VkWriteDescriptorSet writes[4];
+                    for (uint32_t b = 0; b < 4; b++)
+                        writes[b] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                           .dstBinding = b, .descriptorCount = 1,
+                                                           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                                           .pBufferInfo = &infos[b]};
+                    rec_push(mirror_ops.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, mirror_ops.layout, 0, 4, writes);
+                    vkCmdPushConstants(cb, mirror_ops.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof group_first, &group_first);
+                    vkCmdDispatch(cb, step, 1, 1);
+                    group_first += step, group_n -= step;
+                }
+                cur_r = r, cur_pb = pb;
+                p_base = lim <= max_sbo ? 0 : (c_off & ~(al - 1));
+                p_span = lim - p_base <= max_sbo ? lim - p_base : max_sbo;
+                b_base = pb->bytes <= max_sbo ? 0 : (c_poff & ~(al - 1));
+                b_span = pb->bytes - b_base <= max_sbo ? pb->bytes - b_base : max_sbo;
+                group_first = batch->used;
+            }
+            batch->ranges[batch->used++] = (DiffRange){(uint32_t)((c_off - p_base) / 4),
+                                                       (uint32_t)((c_poff - b_base) / 4), (uint32_t)(c_sz / 4), 0};
+            group_n++;
+            done += c_sz;
+        }
+    }
+    while (group_n) {
+        uint32_t step = group_n > max_wg ? max_wg : group_n;
+        VkDescriptorBufferInfo infos[4] = {{cur_r->mbuf, p_base, p_span}, {cur_pb->buf, b_base, b_span},
+                                           {cur_r->mbuf, p_base, p_span}, {batch->buffer, 0, batch->bytes}};
+        VkWriteDescriptorSet writes[4];
+        for (uint32_t b = 0; b < 4; b++)
+            writes[b] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = b,
+                                               .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                               .pBufferInfo = &infos[b]};
+        rec_push(mirror_ops.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, mirror_ops.layout, 0, 4, writes);
+        vkCmdPushConstants(cb, mirror_ops.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof group_first, &group_first);
+        vkCmdDispatch(cb, step, 1, 1);
+        group_first += step, group_n -= step;
+    }
+    vk_completion_add(fence, diff_batch_complete, batch);
+    return 1;
+}
+
+// Pre-write snapshot maps of the submission being recorded (replay thread): wpre_map for imported mirrors (sfeed == 0),
+// spre_map for staged mirrors (sfeed == 1). Tags below pre_sealed_next belong to already-submitted parts and are never
+// snapshotted after the fact (they fall back to a full raw write-back).
+static PreMap wpre_map, spre_map;
+static PreCopy *pre_pend;
+static int npre_pend, cpre_pend;
+static int pre_end_done;
+static uint64_t pre_sealed_next;
+static MRange *pre_wtmp, *pre_stmp;
+static int pre_nwtmp, pre_cwtmp, pre_nstmp, pre_cstmp, pre_cache_valid;
+static uint32_t pre_cache_upto;
+
+static int pre_find_first_seg(const PreSeg *seg, int n, const PoolRec *r, uint64_t a) {
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if ((uintptr_t)seg[mid].r < (uintptr_t)r || (seg[mid].r == r && seg[mid].off + seg[mid].size <= a)) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+// Merge ranges by pool before recording transfers or differential write-back dispatches.
+// to_mirror: buf -> mbuf, else mbuf -> buf (differential against pre[0..npre) where covered).
 static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint64_t *bytes, uint64_t *copies,
-                       uint64_t fence) {
+                       uint64_t fence, const PreSeg *pre, int npre) {
     static _Thread_local MRange *sbuf;   // the replaying thread's (vk_mem_mirror_begin and _end) and the write-back thread's
     static _Thread_local size_t scap;
+    static _Thread_local PreCopy *dsl;
+    static _Thread_local int cdsl;
+    static _Thread_local VkBufferCopy *raw;
+    static _Thread_local int craw;
     sort_ranges(a, (size_t)n, &sbuf, &scap);
-    int rec = 0;
-    VkCtx *c = mirror_sparse && !to_mirror ? vk_ctx() : NULL;
+    int rec = 0, ndsl = 0;
+    VkCtx *vc = !to_mirror ? vk_ctx() : NULL;
+    int can_diff_gpu = vc && pre && npre && mirror_ops_init(vc);
+    VkCtx *c = mirror_sparse && !to_mirror ? vc : NULL;
     SparseBatch *sparse = NULL;
     int sparse_tried = 0;
     for (int i = 0; i < n;) {
@@ -3156,35 +3883,79 @@ static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint
             mregions[k++] = (VkBufferCopy){lo, lo, hi - lo};
         }
         if (!k) continue;
-        int dispatched = c ? sparse_ranges(c, lim, k) : 0;   // the first ones go to the dispatch, the rest are copied
-        if (dispatched) {
-            if (!sparse_tried) {
-                sparse = sparse_batch_create(c, n);
-                sparse_tried = 1;
-            }
-            if (sparse) {
-                sparse_dispatch(cb, sparse, r, lim, dispatched);
-                rec += 4;
-            } else dispatched = 0;
-        }
-        if (dispatched < k) {
-            if (to_mirror) vkCmdCopyBuffer(cb, r->buf, r->mbuf, (uint32_t)(k - dispatched), mregions + dispatched);
-            else vkCmdCopyBuffer(cb, r->mbuf, r->buf, (uint32_t)(k - dispatched), mregions + dispatched);
-            rec++;
-        }
         for (int j = 0; j < k; j++) *bytes += mregions[j].size;
         *copies += (uint64_t)k;
+        if (to_mirror || !pre || !npre) {
+            int dispatched = !to_mirror && c ? sparse_ranges(c, lim, k) : 0;
+            if (dispatched) {
+                if (!sparse_tried) sparse = sparse_batch_create(c, n), sparse_tried = 1;
+                if (sparse && sparse->used + (uint32_t)dispatched <= sparse->bytes / sizeof(SparseRange))
+                    sparse_dispatch(cb, sparse, r, lim, dispatched), rec += 4;
+                else dispatched = 0;
+            }
+            if (dispatched < k) {
+                if (to_mirror) vkCmdCopyBuffer(cb, r->buf, r->mbuf, (uint32_t)(k - dispatched), mregions + dispatched);
+                else vkCmdCopyBuffer(cb, r->mbuf, r->buf, (uint32_t)(k - dispatched), mregions + dispatched);
+                rec++;
+            }
+            continue;
+        }
+        int nraw = 0;
+        int pk = pre ? pre_find_first_seg(pre, npre, r, mregions[0].srcOffset) : 0;
+        for (int j = 0; j < k; j++) {
+            uint64_t lo = mregions[j].srcOffset, hi = lo + mregions[j].size;
+            while (lo < hi && pre && pk < npre && pre[pk].r == r) {
+                if (pre[pk].off + pre[pk].size <= lo) { pk++; continue; }
+                if (pre[pk].off >= hi) break;
+                if (pre[pk].off > lo) {
+                    if (nraw == craw) grow((void **)&raw, &craw, sizeof *raw);
+                    raw[nraw++] = (VkBufferCopy){lo, lo, pre[pk].off - lo};
+                    lo = pre[pk].off;
+                }
+                uint64_t y = pre[pk].off + pre[pk].size < hi ? pre[pk].off + pre[pk].size : hi;
+                uint64_t poff = pre[pk].poff + (lo - pre[pk].off);
+                PreBuf *pb = pre[pk].pb;
+                if (can_diff_gpu) {
+                    uint64_t w_lo = (lo + 3) & ~3ull, h_end = y < w_lo ? y : w_lo, w_hi = y & ~3ull;
+                    if (lo < h_end) rec += host_diff_record(cb, r, lo, h_end - lo, pb, poff, fence);
+                    if (w_lo < w_hi) {
+                        if (ndsl == cdsl) grow((void **)&dsl, &cdsl, sizeof *dsl);
+                        dsl[ndsl++] = (PreCopy){r, pb, w_lo, poff + (w_lo - lo), w_hi - w_lo};
+                    }
+                    uint64_t t_start = h_end > w_hi ? h_end : w_hi;
+                    if (t_start < y) rec += host_diff_record(cb, r, t_start, y - t_start, pb, poff + (t_start - lo), fence);
+                } else {
+                    rec += host_diff_record(cb, r, lo, y - lo, pb, poff, fence);
+                }
+                lo = y;
+                if (lo == pre[pk].off + pre[pk].size) pk++;
+            }
+            if (lo < hi) {
+                if (nraw == craw) grow((void **)&raw, &craw, sizeof *raw);
+                raw[nraw++] = (VkBufferCopy){lo, lo, hi - lo};
+            }
+        }
+        if (nraw) {
+            for (int j = 0; j < nraw; j++) {
+                if (j == cregions) grow((void **)&mregions, &cregions, sizeof *mregions);
+                mregions[j] = raw[j];
+            }
+            int dispatched = c ? sparse_ranges(c, lim, nraw) : 0;
+            if (dispatched) {
+                if (!sparse_tried) sparse = sparse_batch_create(c, n + npre), sparse_tried = 1;
+                if (sparse && sparse->used + (uint32_t)dispatched <= sparse->bytes / sizeof(SparseRange))
+                    sparse_dispatch(cb, sparse, r, lim, dispatched), rec += 4;
+                else dispatched = 0;
+            }
+            if (dispatched < nraw) {
+                vkCmdCopyBuffer(cb, r->mbuf, r->buf, (uint32_t)(nraw - dispatched), mregions + dispatched);
+                rec++;
+            }
+        }
     }
+    if (ndsl) rec += diff_dispatch_slices(cb, vc, dsl, ndsl, fence);
     if (sparse) vk_completion_add(fence, sparse_batch_complete, sparse);
     return rec;
-}
-
-static void mbarrier(VkCommandBuffer cb, VkPipelineStageFlags2 ss, VkAccessFlags2 sa, VkPipelineStageFlags2 ds,
-                     VkAccessFlags2 da) {
-    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = ss, .srcAccessMask = sa,
-                           .dstStageMask = ds, .dstAccessMask = da};
-    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
-    vkCmdPipelineBarrier2(cb, &di);
 }
 
 static void refuse(PoolRec *r, int why, const char *what) {
@@ -3310,8 +4081,9 @@ static int staged_inject(void) {
 
 // The write-backs of one submission: one job per submission while the mode is on, queued for its fence when its
 // recording begins. Ranges: offsets from import_lo of their pool, sorted by pool and offset, merged; roff where each
-// sits in the readback buffer; lo and serial identify the live pool at the fence.
-typedef struct { PoolRec *r; uint64_t lo, serial, off, size, roff; } StRange;
+// sits in the readback buffer; poff is 1 + offset in pb when a pre-write snapshot covers the range, 0 otherwise; lo and
+// serial identify the live pool at the fence.
+typedef struct { PoolRec *r; uint64_t lo, serial, off, size, roff, poff; struct PreBuf *pb; } StRange;
 typedef struct StJob {
     uint64_t fence;
     int ended;                          // st_lock: recorded (vk_mem_mirror_end): its ranges block the later uploads
@@ -3843,7 +4615,7 @@ static void staged_split_own(void) {
                 if (b > l->off + l->size) l->size = b - l->off;
             } else {
                 if (j->no == j->co) grow((void **)&j->o, &j->co, sizeof *j->o);
-                j->o[j->no++] = (StRange){r, r->lo, r->storage_serial, a, b - a, 0};
+                j->o[j->no++] = (StRange){r, r->lo, r->storage_serial, a, b - a, 0, 0, NULL};
             }
             mrep.st_sp_pieces++;
             continue;
@@ -3853,12 +4625,18 @@ static void staged_split_own(void) {
             if (e > b) e = b;
             StRange *l = j->no ? &j->o[j->no - 1] : NULL;
             if (__atomic_load_n(&cr[x >> 12], __ATOMIC_RELAXED)) {
-                range_add(&fb, &nfb, &cfb, r, x, e - x);
+                if (nfb && fb[nfb - 1].r == r && fb[nfb - 1].off + fb[nfb - 1].size == x &&
+                    fb[nfb - 1].tag == stw[i].tag)
+                    fb[nfb - 1].size += e - x;
+                else {
+                    if (nfb == cfb) grow((void **)&fb, &cfb, sizeof *fb);
+                    fb[nfb++] = (MRange){r, x, e - x, stw[i].tag};
+                }
             } else if (l && l->r == r && l->off <= x && l->off + l->size >= x) {
                 if (e > l->off + l->size) l->size = e - l->off;
             } else {
                 if (j->no == j->co) grow((void **)&j->o, &j->co, sizeof *j->o);
-                j->o[j->no++] = (StRange){r, r->lo, r->storage_serial, x, e - x, 0};
+                j->o[j->no++] = (StRange){r, r->lo, r->storage_serial, x, e - x, 0, 0, NULL};
             }
             x = e;
             mrep.st_sp_pieces++;
@@ -3869,7 +4647,16 @@ static void staged_split_own(void) {
     else if (j->no) st_sort_queue(j);
     nstw = 0;
     uint64_t fbb = 0;
-    for (int i = 0; i < nfb; i++) range_add(&stw, &nstw, &cstw, fb[i].r, fb[i].off, fb[i].size), fbb += fb[i].size;
+    for (int i = 0; i < nfb; i++) {
+        if (nstw && stw[nstw - 1].r == fb[i].r && stw[nstw - 1].off + stw[nstw - 1].size == fb[i].off &&
+            stw[nstw - 1].tag == fb[i].tag)
+            stw[nstw - 1].size += fb[i].size;
+        else {
+            if (nstw == cstw) grow((void **)&stw, &cstw, sizeof *stw);
+            stw[nstw++] = fb[i];
+        }
+        fbb += fb[i].size;
+    }
     plat_add64(&own_fb_ranges, nfb), plat_add64(&own_fb_bytes, (int64_t)fbb);
 }
 
@@ -4130,18 +4917,21 @@ static int staged_fetch(uint64_t page, int write, uint64_t rip, int kernel) {
     // is one page upload per fetched page, and fetches are rare (none on the Hilltop route without the exerciser).
     if (got) {
         uint8_t *cr = r->cpu_read;
+        int flipped = 0;
         if (!cr) {
             cr = calloc((size_t)((r->import_hi - r->import_lo) >> 12) + 1, 1);
             if (!cr) rt_fatal("vk: out of memory");
             for (uint64_t p = w0; p < w1; p += 0x1000)
                 if ((mine & got) >> ((p - w0) >> 12) & 1)
-                    cr[(p - r->import_lo) >> 12] = 1, plat_inc64(&own_switched);
+                    cr[(p - r->import_lo) >> 12] = 1, plat_inc64(&own_switched), flipped = 1;
+            if (flipped) __atomic_store_n(&r->cr_flip_sub, __atomic_load_n(&msub, __ATOMIC_RELAXED), __ATOMIC_RELEASE);
             __atomic_store_n(&r->cpu_read, cr, __ATOMIC_RELEASE);
         } else {
             for (uint64_t p = w0; p < w1; p += 0x1000)
                 if (((mine & got) >> ((p - w0) >> 12) & 1) &&
                     !__atomic_exchange_n(&cr[(p - r->import_lo) >> 12], 1, __ATOMIC_RELAXED))
-                    plat_inc64(&own_switched);
+                    plat_inc64(&own_switched), flipped = 1;
+            if (flipped) __atomic_store_n(&r->cr_flip_sub, __atomic_load_n(&msub, __ATOMIC_RELAXED), __ATOMIC_RELEASE);
         }
     }
     int pages = 0;
@@ -4869,14 +5659,183 @@ static void staged_piece_done(VkBuffer sb, VmaAllocation sa, uint64_t used, uint
     vk_completion_add(fence, staged_free_buffer, s);
 }
 
+typedef struct {
+    PoolRec *r;
+    PreBuf *pb;
+    uint64_t off, poff, size, soff;
+} StMerge;
+
+static void pre_refresh_staged(const MRange *cut, int ncut, const StMerge *mrg, int nmrg);
+
+static void merge_dispatch_slices(VkCommandBuffer cb, VkCtx *c, VkBuffer sb, uint64_t sb_bytes, const StMerge *sl,
+                                  int nsl, uint64_t fence) {
+    uint32_t total_wg = 0;
+    for (int i = 0; i < nsl; i++) total_wg += (uint32_t)((sl[i].size + DIFF_CHUNK_BYTES - 1) / DIFF_CHUNK_BYTES);
+    if (!total_wg) return;
+    DiffBatch *batch = diff_batch_create(c, total_wg);
+    if (!batch) rt_fatal("vk: out of memory for staged upload merge ranges");
+    const uint64_t al = sbo_align_pow2(c), max_sbo = c->props.limits.maxStorageBufferRange;
+    const uint32_t max_wg = c->props.limits.maxComputeWorkGroupCount[0];
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, mirror_ops.merge_pipe);
+    PoolRec *cur_r = NULL;
+    PreBuf *cur_pb = NULL;
+    uint64_t s_base = 0, s_span = 0, p_base = 0, p_span = 0, b_base = 0, b_span = 0;
+    uint32_t group_first = 0, group_n = 0;
+    for (int i = 0; i < nsl; i++) {
+        PoolRec *r = sl[i].r;
+        PreBuf *pb = sl[i].pb;
+        uint64_t lim = r->import_hi - r->import_lo;
+        for (uint64_t done = 0; done < sl[i].size;) {
+            uint64_t c_sz = sl[i].size - done;
+            if (c_sz > DIFF_CHUNK_BYTES) c_sz = DIFF_CHUNK_BYTES;
+            uint64_t c_soff = sl[i].soff + done, c_off = sl[i].off + done, c_poff = sl[i].poff + done;
+            int fit = group_n && r == cur_r && pb == cur_pb &&
+                      c_soff >= s_base && c_soff + c_sz - s_base <= s_span &&
+                      c_off >= p_base && c_off + c_sz - p_base <= p_span &&
+                      c_poff >= b_base && c_poff + c_sz - b_base <= b_span;
+            if (!fit) {
+                while (group_n) {
+                    uint32_t step = group_n > max_wg ? max_wg : group_n;
+                    VkDescriptorBufferInfo infos[4] = {{sb, s_base, s_span}, {cur_r->mbuf, p_base, p_span},
+                                                       {cur_pb->buf, b_base, b_span}, {batch->buffer, 0, batch->bytes}};
+                    VkWriteDescriptorSet writes[4];
+                    for (uint32_t b = 0; b < 4; b++)
+                        writes[b] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                           .dstBinding = b, .descriptorCount = 1,
+                                                           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                                           .pBufferInfo = &infos[b]};
+                    rec_push(mirror_ops.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, mirror_ops.layout, 0, 4, writes);
+                    vkCmdPushConstants(cb, mirror_ops.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof group_first, &group_first);
+                    vkCmdDispatch(cb, step, 1, 1);
+                    group_first += step, group_n -= step;
+                }
+                cur_r = r, cur_pb = pb;
+                s_base = sb_bytes <= max_sbo ? 0 : (c_soff & ~(al - 1));
+                s_span = sb_bytes - s_base <= max_sbo ? sb_bytes - s_base : max_sbo;
+                p_base = lim <= max_sbo ? 0 : (c_off & ~(al - 1));
+                p_span = lim - p_base <= max_sbo ? lim - p_base : max_sbo;
+                b_base = pb->bytes <= max_sbo ? 0 : (c_poff & ~(al - 1));
+                b_span = pb->bytes - b_base <= max_sbo ? pb->bytes - b_base : max_sbo;
+                group_first = batch->used;
+            }
+            batch->ranges[batch->used++] = (DiffRange){(uint32_t)((c_soff - s_base) / 4),
+                                                       (uint32_t)((c_off - p_base) / 4),
+                                                       (uint32_t)((c_poff - b_base) / 4), (uint32_t)(c_sz / 4)};
+            group_n++;
+            done += c_sz;
+        }
+    }
+    while (group_n) {
+        uint32_t step = group_n > max_wg ? max_wg : group_n;
+        VkDescriptorBufferInfo infos[4] = {{sb, s_base, s_span}, {cur_r->mbuf, p_base, p_span},
+                                           {cur_pb->buf, b_base, b_span}, {batch->buffer, 0, batch->bytes}};
+        VkWriteDescriptorSet writes[4];
+        for (uint32_t b = 0; b < 4; b++)
+            writes[b] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = b,
+                                               .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                               .pBufferInfo = &infos[b]};
+        rec_push(mirror_ops.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, mirror_ops.layout, 0, 4, writes);
+        vkCmdPushConstants(cb, mirror_ops.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof group_first, &group_first);
+        vkCmdDispatch(cb, step, 1, 1);
+        group_first += step, group_n -= step;
+    }
+    vk_completion_add(fence, diff_batch_complete, batch);
+}
+
+// st_lock (and own_lock with staged_fault) held: for bytes of [a, b) that are not GPU-owned (r->own or j->o) yet are
+// covered by an earlier ended job's copy-back list (j->w), mirror_sync has already consumed the OS write-watch bit and
+// advanced r->mgen. Rather than dropping concurrent CPU writes on slower GPUs, single-job word-aligned overlaps with a
+// pre-write snapshot are queued in *mrg for mirror_merge_spv; multi-job or unaligned/un-snapshotted overlaps record
+// *wait_fence so staged_upload waits for that job outside st_lock and uploads the merged guest page cleanly.
+static void st_w_merge_scan(PoolRec *r, uint64_t a, uint64_t b, uint64_t fence, int can_merge,
+                            StMerge **mrg, int *nmrg, int *cmrg, uint64_t *wait_fence) {
+    typedef struct { uint64_t lo, hi, fence, poff; PreBuf *pb; } WOverlap;
+    static struct KeptRange *oblk, *osbuf;
+    static int noblk, coblk;
+    static size_t oscap;
+    static WOverlap *wov;
+    static int cwov;
+    noblk = 0;
+    if (staged_fault && r->nown) {
+        int lo = 0, hi = r->nown;
+        while (lo < hi) {
+            int mid = lo + (hi - lo) / 2;
+            if (r->own[mid].hi <= a) lo = mid + 1;
+            else hi = mid;
+        }
+        for (int k = lo; k < r->nown && r->own[k].lo < b; k++) {
+            if (noblk == coblk) grow((void **)&oblk, &coblk, sizeof *oblk);
+            oblk[noblk++] = (struct KeptRange){r->own[k].lo > a ? r->own[k].lo : a, r->own[k].hi < b ? r->own[k].hi : b};
+        }
+    }
+    for (const StJob *j = st_jobs; j; j = j->next) {
+        if (!j->ended || j->fence >= fence) continue;
+        st_job_blocked(j->o, j->no, r, a, b, &oblk, &noblk, &coblk);
+    }
+    if (noblk > 1) sort_kept(oblk, (size_t)noblk, &osbuf, &oscap);
+    uint64_t cur = a;
+    for (int idx = 0; cur < b; idx++) {
+        uint64_t qa = cur, qb = b;
+        while (idx < noblk && oblk[idx].hi <= cur) idx++;
+        if (idx < noblk) {
+            if (oblk[idx].lo <= cur) {
+                cur = oblk[idx].hi;
+                continue;
+            }
+            qb = oblk[idx].lo;
+        }
+        cur = idx < noblk ? oblk[idx].hi : b;
+        int nwov = 0;
+        for (const StJob *j = st_jobs; j; j = j->next) {
+            if (!j->ended || j->fence >= fence || !j->n) continue;
+            int lo = 0, hi = j->n;
+            while (lo < hi) {
+                int mid = lo + (hi - lo) / 2;
+                if ((uintptr_t)j->w[mid].r < (uintptr_t)r ||
+                    (j->w[mid].r == r && j->w[mid].off + j->w[mid].size <= qa)) lo = mid + 1;
+                else hi = mid;
+            }
+            for (int k = lo; k < j->n && j->w[k].r == r && j->w[k].off < qb; k++) {
+                uint64_t x = j->w[k].off > qa ? j->w[k].off : qa;
+                uint64_t y = j->w[k].off + j->w[k].size < qb ? j->w[k].off + j->w[k].size : qb;
+                if (x >= y) continue;
+                uint64_t poff = j->w[k].poff ? (j->w[k].poff - 1) + (x - j->w[k].off) : UINT64_MAX;
+                if (nwov == cwov) grow((void **)&wov, &cwov, sizeof *wov);
+                wov[nwov++] = (WOverlap){x, y, j->fence, poff, j->w[k].pb};
+            }
+        }
+        if (!nwov) continue;
+        for (int u = 1; u < nwov; u++) {
+            WOverlap v = wov[u];
+            int t = u;
+            while (t > 0 && v.lo < wov[t - 1].lo) wov[t] = wov[t - 1], t--;
+            wov[t] = v;
+        }
+        int need_wait = !can_merge;
+        for (int u = 0; u < nwov && !need_wait; u++) {
+            if (!wov[u].pb || wov[u].poff == UINT64_MAX || ((wov[u].lo | wov[u].hi | wov[u].poff) & 3) ||
+                (u > 0 && wov[u].lo < wov[u - 1].hi))
+                need_wait = 1;
+        }
+        if (need_wait) {
+            for (int u = 0; u < nwov; u++)
+                if (wov[u].fence > *wait_fence) *wait_fence = wov[u].fence;
+        } else if (!*wait_fence) {
+            for (int u = 0; u < nwov; u++) {
+                if (*nmrg == *cmrg) grow((void **)mrg, cmrg, sizeof **mrg);
+                (*mrg)[(*nmrg)++] = (StMerge){r, wov[u].pb, wov[u].lo, wov[u].poff, wov[u].hi - wov[u].lo, 0};
+            }
+        }
+    }
+}
+
 // Replay thread, in the prologue of the part (fence: its submission's), mirror_lock not held: the ranges in stq go
-// from guest memory into staging buffers and from there into their mirrors, minus the write-back bytes in flight.
+// from guest memory into staging buffers and from there into their mirrors, minus the GPU-owned bytes in flight.
 // A small staged mirror made during the part (szero, mirror_create) is zeroed first, and the pages ever written
 // (staged_runs) take the place of its queued whole range: the first fills of a layer's 276 small pools go into this one
 // prologue, with no submission of their own. Staging comes in pieces of at most STG_CHUNK from the staging pool's kept
 // blocks (vk_staging), so the up to 73 MiB of such a frame need no vkAllocateMemory of a larger buffer.
-// The barriers around it are the prologue's. Returns whether it recorded zero fills: the prologue's last barrier then
-// covers clears as well as copies.
+// The barriers around it are the prologue's. Returns bit 0 for zero fills and bit 1 for compute upload merges.
 static int staged_upload(VkCommandBuffer cb, uint64_t fence) {
     static MRange *sbuf, *cut;
     static size_t scap;
@@ -4887,6 +5846,10 @@ static int staged_upload(VkCommandBuffer cb, uint64_t fence) {
     static int creg;
     static PoolRec **zl;   // the pools first filled here, in stq's order (by address of the record)
     static int nzl, czl;
+    static StMerge *mrg;
+    static int nmrg, cmrg;
+    static PreBuf **ret_pb;
+    static int cret_pb;
     uint64_t t0 = qpc();
     sort_ranges(stq, (size_t)nstq, &sbuf, &scap);
     nzl = 0;
@@ -4913,6 +5876,12 @@ static int staged_upload(VkCommandBuffer cb, uint64_t fence) {
                  VK_ACCESS_2_TRANSFER_WRITE_BIT);   // the written pages land over the zeros
         sort_ranges(stq, (size_t)nstq, &sbuf, &scap);
     }
+    VkCtx *vc = vk_ctx();
+    int diff_on = mirror_diff_cur;
+    int can_merge = diff_on && mirror_ops_init(vc);
+    int nret_pb = 0;
+    uint64_t total = 0, skipped = 0;
+retry_blk:
     // A job leaves st_jobs only after its bytes are in guest memory or on the pool's own list (staged_wb_done), so a
     // range blocked here has its bytes in the mirror and one not blocked has them in guest memory; the copies need not
     // hold the lock. No job ends meanwhile: vk_mem_mirror_end runs on this thread. A fetch that empties an own range
@@ -4924,8 +5893,9 @@ static int staged_upload(VkCommandBuffer cb, uint64_t fence) {
     if (staged_fault) plat_mutex_lock(&own_lock);   // the own lists stay as they are while they are read
     if (blk_check) st_chk_union(fence);   // DKB_STAGED_BLK_CHECK
     uint64_t tb = qpc();
-    ncut = 0;
-    uint64_t total = 0, skipped = 0;
+    ncut = 0, nmrg = 0, nret_pb = 0;
+    total = 0, skipped = 0;
+    uint64_t wait_fence = 0;
     for (int i = 0; i < nstq;) {   // merged per pool, clamped to the mirror, then the blocked bytes cut out
         PoolRec *r = stq[i].r;
         uint64_t lim = r->import_hi - r->import_lo;
@@ -4938,18 +5908,39 @@ static int staged_upload(VkCommandBuffer cb, uint64_t fence) {
             st_blocked(r, a, b, fence, &blk, &nblk, &cblk);
             mrep.st_blk_n++, mrep.st_blk_ranges += (uint64_t)nblk;
             if (blk_check) st_chk_range(r, a, b, fence, blk, nblk);
+            uint64_t sk0 = skipped;
             st_cut(r, a, b, blk, nblk, &cut, &ncut, &ccut, &total, &skipped);
+            if (diff_on && skipped > sk0)
+                st_w_merge_scan(r, a, b, fence, can_merge, &mrg, &nmrg, &cmrg, &wait_fence);
         }
     }
     mrep.st_blk_t += qpc() - tb;
+    if (wait_fence) {
+        if (staged_fault) plat_mutex_unlock(&own_lock);
+        plat_mutex_unlock(&st_lock);
+        mrep.st_w_waits++;
+        vk_sync_fence_wait(wait_fence, UINT64_MAX);
+        goto retry_blk;
+    }
+    for (int i = 0; i < nmrg; i++) {
+        PreBuf *pb = mrg[i].pb;
+        int seen_pb = 0;
+        for (int p = 0; p < nret_pb && !seen_pb; p++) seen_pb = ret_pb[p] == pb;
+        if (!seen_pb) {
+            if (nret_pb == cret_pb) grow((void **)&ret_pb, &cret_pb, sizeof *ret_pb);
+            ret_pb[nret_pb++] = pb;
+            plat_inc32(&pb->refs);
+        }
+    }
     if (staged_fault) plat_mutex_unlock(&own_lock);
     plat_mutex_unlock(&st_lock);
+    if (diff_on && spre_map.n && (ncut || nmrg)) pre_refresh_staged(cut, ncut, mrg, nmrg);
+    int probe = staged_fault || mem_probe_on() > 0;   // owned or probed pages: copied without opening them
     if (total) {
         VkBuffer sb = VK_NULL_HANDLE;
         VmaAllocation sa = NULL;
         uint8_t *map = NULL;
         uint64_t used = 0, room = 0, left = total;
-        int probe = staged_fault || mem_probe_on() > 0;   // owned or probed pages: copied without opening them
         for (int i = 0, zi = 0; i < ncut;) {
             PoolRec *r = cut[i].r;
             while (zi < nzl && (uintptr_t)zl[zi] < (uintptr_t)r) zi++;
@@ -4982,12 +5973,51 @@ static int staged_upload(VkCommandBuffer cb, uint64_t fence) {
         }
         if (sb) staged_piece_done(sb, sa, used, fence);
     }
+    uint64_t mrg_bytes = 0;
+    if (nmrg) {
+        static StMerge *mpiece;
+        static int cmpiece;
+        mrep.st_w_merges += (uint64_t)nmrg;
+        for (int i = 0; i < nmrg; i++) mrg_bytes += mrg[i].size;
+        mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
+        VkBuffer msb = VK_NULL_HANDLE;
+        VmaAllocation msa = NULL;
+        uint8_t *mmap = NULL;
+        uint64_t used = 0, room = 0, left = mrg_bytes;
+        int nmp = 0;
+        for (int i = 0; i < nmrg;) {
+            for (uint64_t done = 0; i < nmrg;) {
+                if (used == room) {
+                    if (nmp) merge_dispatch_slices(cb, vc, msb, used, mpiece, nmp, fence), nmp = 0;
+                    if (msb) staged_piece_done(msb, msa, used, fence);
+                    room = left < STG_CHUNK ? left : STG_CHUNK;
+                    mmap = vk_staging(room, &msb, &msa);
+                    used = 0;
+                }
+                uint64_t len = mrg[i].size - done;
+                if (len > room - used) len = (room - used) & ~3ull;
+                uint64_t src = mrg[i].r->import_lo + mrg[i].off + done;
+                if (probe) mem_probe_copy(mmap + used, src, len);
+                else memcpy(mmap + used, (const void *)(uintptr_t)src, len);
+                if (nmp == cmpiece) grow((void **)&mpiece, &cmpiece, sizeof *mpiece);
+                mpiece[nmp++] = (StMerge){mrg[i].r, mrg[i].pb, mrg[i].off + done, mrg[i].poff + done, len, used};
+                used += len, left -= len, done += len;
+                if (done == mrg[i].size) i++, done = 0;
+            }
+        }
+        if (nmp) merge_dispatch_slices(cb, vc, msb, used, mpiece, nmp, fence);
+        if (msb) staged_piece_done(msb, msa, used, fence);
+        for (int p = 0; p < nret_pb; p++) vk_completion_add(fence, pre_buf_complete, ret_pb[p]);
+    }
     if (nzl) ST_ADD(small_n, nzl), ST_ADD(small_bytes, z_bytes), ST_ADD(small_copied, z_copied), ST_ADD(small_ns, z_ns);
-    mrep.upload_bytes += total, mrep.upload_copies += (uint64_t)ncut;   // the mirror line's totals include them
-    mrep.st_up_bytes += total, mrep.st_up_ranges += (uint64_t)ncut, mrep.st_skip_bytes += skipped;
+    uint64_t up_tot = total + mrg_bytes, up_cnt = (uint64_t)(ncut + nmrg);
+    mrep.upload_bytes += up_tot, mrep.upload_copies += up_cnt;   // the mirror line's totals include them
+    mrep.st_up_bytes += up_tot, mrep.st_up_ranges += up_cnt;
+    mrep.st_skip_bytes += skipped >= mrg_bytes ? skipped - mrg_bytes : 0;
     mrep.st_up_t += qpc() - t0;
     nstq = 0;
-    return nzl > 0;
+    return (nzl > 0 ? 1 : 0) | (nmrg > 0 ? 2 : 0);
 }
 
 // vk_mem_mirror_end: the write-back ranges of staged mirrors (stw) go mirror -> a readback buffer of the submission's
@@ -5005,15 +6035,36 @@ static int staged_wb_record(VkCommandBuffer cb) {
     for (int i = 0; i < nstw;) {
         PoolRec *r = stw[i].r;
         uint64_t lim = r->import_hi - r->import_lo;
+        int pk = spre_map.n ? pre_find_first_seg(spre_map.seg, spre_map.n, r, stw[i].off) : 0;
         for (; i < nstw && stw[i].r == r;) {
             uint64_t a = stw[i].off, b = a + stw[i].size;
             for (i++; i < nstw && stw[i].r == r && stw[i].off <= b; i++)
                 if (stw[i].off + stw[i].size > b) b = stw[i].off + stw[i].size;
             if (b > lim) b = lim;
             if (a >= b) continue;
-            if (j->n == j->cap) grow((void **)&j->w, &j->cap, sizeof *j->w);
-            j->w[j->n++] = (StRange){r, r->lo, r->storage_serial, a, b - a, j->bytes};
-            j->bytes += b - a;
+            while (a < b && pk < spre_map.n && spre_map.seg[pk].r == r) {
+                const PreSeg *ps = &spre_map.seg[pk];
+                if (ps->off + ps->size <= a) { pk++; continue; }
+                if (ps->off >= b) break;
+                if (ps->off > a) {
+                    if (j->n == j->cap) grow((void **)&j->w, &j->cap, sizeof *j->w);
+                    j->w[j->n++] = (StRange){r, r->lo, r->storage_serial, a, ps->off - a, j->bytes, 0, NULL};
+                    j->bytes += ps->off - a;
+                    a = ps->off;
+                }
+                uint64_t y = ps->off + ps->size < b ? ps->off + ps->size : b;
+                uint64_t poff = ps->poff + (a - ps->off);
+                if (j->n == j->cap) grow((void **)&j->w, &j->cap, sizeof *j->w);
+                j->w[j->n++] = (StRange){r, r->lo, r->storage_serial, a, y - a, j->bytes, poff + 1, ps->pb};
+                j->bytes += y - a;
+                a = y;
+                if (a == ps->off + ps->size) pk++;
+            }
+            if (a < b) {
+                if (j->n == j->cap) grow((void **)&j->w, &j->cap, sizeof *j->w);
+                j->w[j->n++] = (StRange){r, r->lo, r->storage_serial, a, b - a, j->bytes, 0, NULL};
+                j->bytes += b - a;
+            }
         }
     }
     nstw = 0;
@@ -5039,7 +6090,7 @@ static int staged_wb_record(VkCommandBuffer cb) {
 }
 
 // staged_copy_back: the bytes of one page that a copy-back carries (offsets from import_lo, roff in the readback).
-typedef struct { uint64_t off, size, roff; } CbPiece;
+typedef struct { uint64_t off, size, roff; const uint8_t *pre; } CbPiece;
 
 // own_lock held: whether every owned byte of the page at offset pg lies in the sorted, disjoint pieces pc[0..n) of
 // that page (a page owned with no byte on the list counts as covered).
@@ -5102,7 +6153,8 @@ static void staged_copy_back(PoolRec *r, const StJob *j, int i0, int i1, struct 
             uint64_t e = (a & ~0xfffull) + 0x1000;
             if (e > b) e = b;
             if (npc == cpc) grow((void **)&pc, &cpc, sizeof *pc);
-            pc[npc++] = (CbPiece){a, e - a, j->w[x].roff + (a - j->w[x].off)};
+            const uint8_t *pre = j->w[x].poff ? j->w[x].pb->map + (j->w[x].poff - 1) + (a - j->w[x].off) : NULL;
+            pc[npc++] = (CbPiece){a, e - a, j->w[x].roff + (a - j->w[x].off), pre};
             a = e;
         }
     plat_mutex_lock(&own_lock);
@@ -5124,7 +6176,7 @@ static void staged_copy_back(PoolRec *r, const StJob *j, int i0, int i1, struct 
         } else {
             for (int q = p0; q < p1; q++) {
                 if (nkeep == ckeep) grow((void **)&keep, &ckeep, sizeof *keep);
-                keep[nkeep++] = (StRange){r, r->lo, r->storage_serial, pc[q].off, pc[q].size, 0};
+                keep[nkeep++] = (StRange){r, r->lo, r->storage_serial, pc[q].off, pc[q].size, 0, 0, NULL};
             }
             if (st == 2) {
                 if (nagain == cagain) grow((void **)&again, &cagain, sizeof *again);
@@ -5142,16 +6194,40 @@ static void staged_copy_back(PoolRec *r, const StJob *j, int i0, int i1, struct 
     for (int i = 0; i < ngone; i++) cw_note_range(cw, ncw, ccw, base + gone[i].lo, base + gone[i].hi);
     for (int i = 0; i < nagain; i++) plat_add64(&own_protects, mem_guard_own(again[i]));
     plat_add64(&own_cb_opened, ngone), plat_add64(&own_cb_kept, nkeep);
-    for (int x = 0; x < nop;) {   // runs of pieces whose pages touch: one thaw each (guarded pages are not among them)
-        uint64_t a = (base + open[x].off) & ~0xfffull, b = (base + open[x].off + open[x].size + 0xfff) & ~0xfffull;
-        int y = x + 1;
-        for (; y < nop && ((base + open[y].off) & ~0xfffull) <= b; y++) {
-            uint64_t e2 = (base + open[y].off + open[y].size + 0xfff) & ~0xfffull;
-            if (e2 > b) b = e2;
+    int any_pre = 0;
+    for (int x = 0; x < nop && !any_pre; x++) any_pre = open[x].pre != NULL;
+    if (!any_pre) {
+        for (int x = 0; x < nop;) {   // runs of pieces whose pages touch: one thaw each (guarded pages are not among them)
+            uint64_t a = (base + open[x].off) & ~0xfffull, b = (base + open[x].off + open[x].size + 0xfff) & ~0xfffull;
+            int y = x + 1;
+            for (; y < nop && ((base + open[y].off) & ~0xfffull) <= b; y++) {
+                uint64_t e2 = (base + open[y].off + open[y].size + 0xfff) & ~0xfffull;
+                if (e2 > b) b = e2;
+            }
+            mem_thaw_keep(a, b - a);   // a frozen region is read-only; nothing to settle on these pages
+            for (; x < y; x++) memcpy((void *)(uintptr_t)(base + open[x].off), j->map + open[x].roff, open[x].size);
+            cw_note_range(cw, ncw, ccw, a, b);
         }
-        mem_thaw_keep(a, b - a);   // a frozen region is read-only; nothing to settle on these pages
-        for (; x < y; x++) memcpy((void *)(uintptr_t)(base + open[x].off), j->map + open[x].roff, open[x].size);
-        cw_note_range(cw, ncw, ccw, a, b);
+        return;
+    }
+    for (int p0 = 0; p0 < nop;) {
+        uint64_t pg = open[p0].off & ~0xfffull;
+        int p1 = p0 + 1;
+        while (p1 < nop && (open[p1].off & ~0xfffull) == pg) p1++;
+        int diff = 0;
+        for (int z = p0; z < p1 && !diff; z++)
+            diff = !open[z].pre || memcmp(j->map + open[z].roff, open[z].pre, (size_t)open[z].size) != 0;
+        if (diff) {
+            uint64_t paddr = base + pg;
+            mem_thaw_keep(paddr, 0x1000);   // a frozen region is read-only; nothing to settle on these pages
+            for (int z = p0; z < p1; z++) {
+                uint8_t *dst = (uint8_t *)(uintptr_t)(base + open[z].off);
+                if (open[z].pre) wb_diff_copy(dst, j->map + open[z].roff, open[z].pre, (size_t)open[z].size);
+                else memcpy(dst, j->map + open[z].roff, (size_t)open[z].size);
+            }
+            cw_note_range(cw, ncw, ccw, paddr, paddr + 0x1000);
+        }
+        p0 = p1;
     }
 }
 
@@ -5164,6 +6240,8 @@ static void staged_copy_back(PoolRec *r, const StJob *j, int i0, int i1, struct 
 static void staged_wb_done(void *arg) {
     static struct KeptRange *cw;   // completion thread: guest ranges written here, marked in cpu_written after pool_lock
     static int ccw;
+    static CbPiece *fpc;
+    static int cfpc;
     StJob *j = arg;
     uint64_t t_done = qpc();
     st_in_wb = 1;
@@ -5185,7 +6263,12 @@ static void staged_wb_done(void *arg) {
     if (j->n) {
         uint64_t t0 = qpc();
         int ncw = 0;
-        vmaInvalidateAllocation(vk_ctx()->vma, j->alloc, 0, VK_WHOLE_SIZE);
+        VkCtx *vc = vk_ctx();
+        vmaInvalidateAllocation(vc->vma, j->alloc, 0, VK_WHOLE_SIZE);
+        PreBuf *last_pb = NULL;
+        for (int i = 0; i < j->n; i++)
+            if (j->w[i].pb && j->w[i].pb != last_pb)
+                vmaInvalidateAllocation(vc->vma, j->w[i].pb->alloc, 0, VK_WHOLE_SIZE), last_pb = j->w[i].pb;
         pool_lock_shared();   // the pools stay as they are while the bytes go in (vk_gpu_written does the same)
         for (int i = 0; i < j->n;) {
             PoolRec *r = j->w[i].r;
@@ -5194,21 +6277,59 @@ static void staged_wb_done(void *arg) {
             int k = i;
             for (; k < j->n && j->w[k].r == r; k++) {}
             if (live && staged_fault && ms_get(r) == MS_ON) staged_copy_back(r, j, i, k, &cw, &ncw, &ccw), live = 0;
-            for (int x = i; live && x < k;) {   // DKB_STAGED_WB=fence: runs of ranges whose pages touch, one thaw each
-                uint64_t base = r->import_lo, a = (base + j->w[x].off) & ~0xfffull;
-                uint64_t b = (base + j->w[x].off + j->w[x].size + 0xfff) & ~0xfffull;
-                int y = x + 1;
-                for (; y < k && ((base + j->w[y].off) & ~0xfffull) <= b; y++) {
-                    uint64_t e2 = (base + j->w[y].off + j->w[y].size + 0xfff) & ~0xfffull;
-                    if (e2 > b) b = e2;
+            if (live) {   // DKB_STAGED_WB=fence
+                int any_pre = 0;
+                for (int x = i; x < k && !any_pre; x++) any_pre = j->w[x].poff != 0;
+                if (!any_pre) {
+                    for (int x = i; x < k;) {   // runs of ranges whose pages touch, one thaw each
+                        uint64_t base = r->import_lo, a = (base + j->w[x].off) & ~0xfffull;
+                        uint64_t b = (base + j->w[x].off + j->w[x].size + 0xfff) & ~0xfffull;
+                        int y = x + 1;
+                        for (; y < k && ((base + j->w[y].off) & ~0xfffull) <= b; y++) {
+                            uint64_t e2 = (base + j->w[y].off + j->w[y].size + 0xfff) & ~0xfffull;
+                            if (e2 > b) b = e2;
+                        }
+                        mem_probe_release(a, b - a);
+                        mem_thaw(a, b - a);
+                        for (int z = x; z < y; z++)
+                            memcpy((void *)(uintptr_t)(base + j->w[z].off), j->map + j->w[z].roff, j->w[z].size);
+                        cw_note_range(&cw, &ncw, &ccw, a, b);
+                        for (; x < y; x++) mem_probe_protect(base + j->w[x].off, j->w[x].size);
+                    }
+                } else {   // differential copy-back by 4 KiB page
+                    uint64_t base = r->import_lo;
+                    int nfpc = 0;
+                    for (int x = i; x < k; x++)
+                        for (uint64_t a = j->w[x].off, b = a + j->w[x].size; a < b;) {
+                            uint64_t pe = (a & ~0xfffull) + 0x1000;
+                            if (pe > b) pe = b;
+                            if (nfpc == cfpc) grow((void **)&fpc, &cfpc, sizeof *fpc);
+                            const uint8_t *pre = j->w[x].poff ? j->w[x].pb->map + (j->w[x].poff - 1) + (a - j->w[x].off) : NULL;
+                            fpc[nfpc++] = (CbPiece){a, pe - a, j->w[x].roff + (a - j->w[x].off), pre};
+                            a = pe;
+                        }
+                    for (int p0 = 0; p0 < nfpc;) {
+                        uint64_t pg = fpc[p0].off & ~0xfffull;
+                        int p1 = p0 + 1;
+                        while (p1 < nfpc && (fpc[p1].off & ~0xfffull) == pg) p1++;
+                        int diff = 0;
+                        for (int z = p0; z < p1 && !diff; z++)
+                            diff = !fpc[z].pre || memcmp(j->map + fpc[z].roff, fpc[z].pre, (size_t)fpc[z].size) != 0;
+                        if (diff) {
+                            uint64_t paddr = base + pg;
+                            mem_probe_release(paddr, 0x1000);
+                            mem_thaw(paddr, 0x1000);
+                            for (int z = p0; z < p1; z++) {
+                                uint8_t *dst = (uint8_t *)(uintptr_t)(base + fpc[z].off);
+                                if (fpc[z].pre) wb_diff_copy(dst, j->map + fpc[z].roff, fpc[z].pre, (size_t)fpc[z].size);
+                                else memcpy(dst, j->map + fpc[z].roff, (size_t)fpc[z].size);
+                            }
+                            cw_note_range(&cw, &ncw, &ccw, paddr, paddr + 0x1000);
+                            for (int z = p0; z < p1; z++) mem_probe_protect(base + fpc[z].off, fpc[z].size);
+                        }
+                        p0 = p1;
+                    }
                 }
-                mem_probe_release(a, b - a);   // the read probe's pages from an earlier write-back, uncounted
-                mem_thaw(a, b - a);   // a frozen region is read-only
-                for (int z = x; z < y; z++)
-                    memcpy((void *)(uintptr_t)(base + j->w[z].off), j->map + j->w[z].roff, j->w[z].size);
-                cw_note_range(&cw, &ncw, &ccw, a, b);
-                // DKB_STAGED_READ_PROBE: from here on the first CPU access to these pages is counted (memory.c).
-                for (; x < y; x++) mem_probe_protect(base + j->w[x].off, j->w[x].size);
             }
             i = k;
         }
@@ -5253,6 +6374,15 @@ static void staged_shutdown(VkCtx *c) {
     for (int k = 0; k < ST_OBUF; k++) free(st_obuf[k]), st_obuf[k] = NULL;
     st_cur = NULL;
     plat_mutex_unlock(&st_lock);
+    wpre_map.n = spre_map.n = 0;
+    wpre_map.cur = spre_map.cur = NULL;
+    npre_pend = pre_end_done = 0;
+    pre_sealed_next = 0;
+    pre_walk_writes = pre_seen_walk_writes = 0;
+    wbl_scan = stw_scan = 0;
+    pre_seen_worker_seq = __atomic_load_n(&pre_worker_seq, __ATOMIC_ACQUIRE);
+    pre_has_deferred = pre_cache_valid = 0;
+    mirror_diff_cur = 0;
     if (blk_check) st_chk_log("at exit");
 }
 
@@ -5636,9 +6766,11 @@ void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
     if (count_quiet) wb_local_add(r, sp->offset, size);
     else {
         int locked = mirror_lock_if_shared();
-        if (r->sfeed) range_add(&stw, &nstw, &cstw, r, sp->offset, size);   // only the submission's end takes it
+        if (r->sfeed) wb_range_add(&stw, &nstw, &cstw, r, sp->offset, size);   // only the submission's end takes it
         else wb_range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
         mirror_unlock(locked);
+        if (mirror_diff_cur && !(r->sfeed && staged_fault && !__atomic_load_n(&r->cpu_read, __ATOMIC_ACQUIRE)))
+            pre_walk_writes++;
     }
     *k = (__typeof__(*k)){r, sp->offset, size, sub, wb_tag};
 }
@@ -5855,6 +6987,403 @@ static int presnap_wanted(const PoolRec *r, uint32_t prev) {
     return 0;
 }
 
+static void pre_pend_add(PoolRec *r, PreBuf *pb, uint64_t off, uint64_t poff, uint64_t size) {
+    if (!size) return;
+    if (npre_pend && pre_pend[npre_pend - 1].r == r && pre_pend[npre_pend - 1].pb == pb &&
+        pre_pend[npre_pend - 1].off + pre_pend[npre_pend - 1].size == off &&
+        pre_pend[npre_pend - 1].poff + pre_pend[npre_pend - 1].size == poff) {
+        pre_pend[npre_pend - 1].size += size;
+        return;
+    }
+    if (npre_pend == cpre_pend) grow((void **)&pre_pend, &cpre_pend, sizeof *pre_pend);
+    pre_pend[npre_pend++] = (PreCopy){r, pb, off, poff, size};
+}
+
+// Preserves (poff & 3) == (off & 3) so every 4-byte-aligned sub-slice inside a segment also has a 4-byte-aligned
+// snapshot offset for mirror_diff_spv and mirror_merge_spv.
+static PreBuf *pre_alloc(VkCtx *c, PreMap *m, uint64_t off, uint64_t size, int host, uint64_t fence, uint64_t *poff_out) {
+    uint64_t u = m->cur ? ((m->cur->used + 3ull) & ~3ull) + (off & 3ull) : 0;
+    if (!m->cur || u + size > m->cur->bytes) {
+        m->cur = pre_buf_acquire(c, size + 4, host, fence);
+        u = off & 3ull;
+    }
+    m->cur->used = u + size;
+    *poff_out = u;
+    return m->cur;
+}
+
+static void mr_normalize(MRange **arr, int *n) {
+    static MRange *sbuf;
+    static size_t scap;
+    int cnt = *n;
+    if (cnt <= 0) return;
+    MRange *a = *arr;
+    if (cnt > 1) sort_ranges(a, (size_t)cnt, &sbuf, &scap);
+    int out = 0;
+    for (int i = 0; i < cnt; i++) {
+        PoolRec *r = a[i].r;
+        uint64_t lim = r->import_hi - r->import_lo;
+        uint64_t lo = a[i].off, hi = lo + a[i].size;
+        if (hi > lim) hi = lim;
+        if (lo >= hi) continue;
+        if (out && a[out - 1].r == r && lo <= a[out - 1].off + a[out - 1].size) {
+            uint64_t end = a[out - 1].off + a[out - 1].size;
+            if (hi > end) a[out - 1].size = hi - a[out - 1].off;
+        } else {
+            a[out++] = (MRange){r, lo, hi - lo, 0};
+        }
+    }
+    *n = out;
+}
+
+static void pre_seg_push(PreSeg **arr, int *n, int *cap, PreSeg s) {
+    if (!s.size) return;
+    if (*n && (*arr)[*n - 1].r == s.r && (*arr)[*n - 1].pb == s.pb &&
+        (*arr)[*n - 1].off + (*arr)[*n - 1].size == s.off &&
+        (*arr)[*n - 1].poff + (*arr)[*n - 1].size == s.poff) {
+        (*arr)[*n - 1].size += s.size;
+        return;
+    }
+    if (*n == *cap) grow((void **)arr, cap, sizeof **arr);
+    (*arr)[(*n)++] = s;
+}
+
+// Covers any uncovered sub-ranges of in[0..nin) in m, allocating PreBuf slices and queueing r->mbuf -> pb->buf copies.
+static void pre_cover_ranges(VkCtx *c, PreMap *m, const MRange *in, int nin, int host, uint64_t fence) {
+    static MRange *mr;
+    static int cmr;
+    static PreSeg *out;
+    static int cout;
+    if (!nin) return;
+    while (cmr < nin) grow((void **)&mr, &cmr, sizeof *mr);
+    memcpy(mr, in, (size_t)nin * sizeof *mr);
+    int nmr = nin;
+    mr_normalize(&mr, &nmr);
+    if (!nmr) return;
+    int si = 0, mi = 0, nout = 0;
+    while (si < m->n || mi < nmr) {
+        if (mi == nmr || (si < m->n && ((uintptr_t)m->seg[si].r < (uintptr_t)mr[mi].r ||
+                                        (m->seg[si].r == mr[mi].r &&
+                                         m->seg[si].off + m->seg[si].size <= mr[mi].off)))) {
+            pre_seg_push(&out, &nout, &cout, m->seg[si++]);
+        } else if (si < m->n && m->seg[si].r == mr[mi].r && m->seg[si].off < mr[mi].off + mr[mi].size) {
+            if (mr[mi].off < m->seg[si].off) {
+                uint64_t gap = m->seg[si].off - mr[mi].off, poff = 0;
+                PreBuf *pb = pre_alloc(c, m, mr[mi].off, gap, host, fence, &poff);
+                pre_pend_add(mr[mi].r, pb, mr[mi].off, poff, gap);
+                pre_seg_push(&out, &nout, &cout, (PreSeg){mr[mi].r, mr[mi].off, gap, pb, poff});
+                mr[mi].off = m->seg[si].off;
+                mr[mi].size -= gap;
+            }
+            uint64_t send = m->seg[si].off + m->seg[si].size;
+            pre_seg_push(&out, &nout, &cout, m->seg[si++]);
+            if (mr[mi].off + mr[mi].size <= send) mi++;
+            else {
+                uint64_t d = send - mr[mi].off;
+                mr[mi].off = send;
+                mr[mi].size -= d;
+            }
+        } else {
+            uint64_t poff = 0;
+            PreBuf *pb = pre_alloc(c, m, mr[mi].off, mr[mi].size, host, fence, &poff);
+            pre_pend_add(mr[mi].r, pb, mr[mi].off, poff, mr[mi].size);
+            pre_seg_push(&out, &nout, &cout, (PreSeg){mr[mi].r, mr[mi].off, mr[mi].size, pb, poff});
+            mi++;
+        }
+    }
+    PreSeg *old = m->seg;
+    int ocap = m->cap;
+    m->seg = out, m->cap = cout, m->n = nout;
+    out = old, cout = ocap;
+}
+
+// If a later part's prologue uploads new CPU bytes into a range already covered by m, refresh that slice of pb->buf
+// after the upload barrier so before matches r->mbuf prior to the part's shaders.
+static void pre_refresh_batch(PreMap *m, const MRange *up, int nup) {
+    static MRange *mr;
+    static int cmr;
+    if (!m->n || !nup) return;
+    while (cmr < nup) grow((void **)&mr, &cmr, sizeof *mr);
+    memcpy(mr, up, (size_t)nup * sizeof *mr);
+    int nmr = nup;
+    mr_normalize(&mr, &nmr);
+    int si = 0;
+    for (int i = 0; i < nmr && si < m->n; i++) {
+        PoolRec *r = mr[i].r;
+        uint64_t lo = mr[i].off, hi = lo + mr[i].size;
+        while (si < m->n && ((uintptr_t)m->seg[si].r < (uintptr_t)r ||
+                             (m->seg[si].r == r && m->seg[si].off + m->seg[si].size <= lo)))
+            si++;
+        for (int k = si; k < m->n && m->seg[k].r == r && m->seg[k].off < hi; k++) {
+            uint64_t x = m->seg[k].off > lo ? m->seg[k].off : lo;
+            uint64_t y = m->seg[k].off + m->seg[k].size < hi ? m->seg[k].off + m->seg[k].size : hi;
+            if (x < y) pre_pend_add(r, m->seg[k].pb, x, m->seg[k].poff + (x - m->seg[k].off), y - x);
+        }
+    }
+}
+
+static void pre_refresh_staged(const MRange *cut, int ncut, const StMerge *mrg, int nmrg) {
+    static MRange *mr;
+    static int cmr;
+    if (ncut) pre_refresh_batch(&spre_map, cut, ncut);
+    if (nmrg) {
+        while (cmr < nmrg) grow((void **)&mr, &cmr, sizeof *mr);
+        for (int i = 0; i < nmrg; i++) mr[i] = (MRange){mrg[i].r, mrg[i].off, mrg[i].size, 0};
+        pre_refresh_batch(&spre_map, mr, nmrg);
+    }
+}
+
+// Cuts take[0..ntake) out of m into *out (allocated fresh for a WbJob's ownership), leaving the rest in m so any later
+// part that writes the same range again takes its own fresh pre-write snapshot.
+static void pre_cut_copy(PreMap *m, const MRange *take, int ntake, PreMap *out) {
+    static MRange *mr;
+    static int cmr;
+    static PreSeg *rem;
+    static int crem;
+    *out = (PreMap){0};
+    if (!m->n || !ntake) return;
+    while (cmr < ntake) grow((void **)&mr, &cmr, sizeof *mr);
+    memcpy(mr, take, (size_t)ntake * sizeof *mr);
+    int nmr = ntake;
+    mr_normalize(&mr, &nmr);
+    if (!nmr) return;
+    int nrem = 0, mi = 0;
+    for (int si = 0; si < m->n; si++) {
+        PreSeg s = m->seg[si];
+        uint64_t lo = s.off, hi = lo + s.size;
+        while (mi < nmr && ((uintptr_t)mr[mi].r < (uintptr_t)s.r ||
+                            (mr[mi].r == s.r && mr[mi].off + mr[mi].size <= lo)))
+            mi++;
+        while (lo < hi && mi < nmr && mr[mi].r == s.r && mr[mi].off < hi) {
+            if (mr[mi].off > lo) {
+                uint64_t len = mr[mi].off - lo;
+                pre_seg_push(&rem, &nrem, &crem, (PreSeg){s.r, lo, len, s.pb, s.poff + (lo - s.off)});
+                lo = mr[mi].off;
+            }
+            uint64_t y = mr[mi].off + mr[mi].size < hi ? mr[mi].off + mr[mi].size : hi;
+            pre_seg_push(&out->seg, &out->n, &out->cap, (PreSeg){s.r, lo, y - lo, s.pb, s.poff + (lo - s.off)});
+            lo = y;
+            if (mr[mi].off + mr[mi].size <= hi) mi++;
+        }
+        if (lo < hi)
+            pre_seg_push(&rem, &nrem, &crem, (PreSeg){s.r, lo, hi - lo, s.pb, s.poff + (lo - s.off)});
+    }
+    PreSeg *old = m->seg;
+    int ocap = m->cap;
+    m->seg = rem, m->cap = crem, m->n = nrem;
+    rem = old, crem = ocap;
+    if (out->n) pre_has_deferred = 1;
+}
+
+static int pre_map_covers(const PreMap *m, const PoolRec *r, uint64_t lo, uint64_t hi) {
+    if (lo >= hi) return 1;
+    int k = pre_find_first_seg(m->seg, m->n, r, lo);
+    while (lo < hi && k < m->n && m->seg[k].r == r && m->seg[k].off <= lo) {
+        lo = m->seg[k].off + m->seg[k].size;
+        k++;
+    }
+    return lo >= hi;
+}
+
+#define PRECOPY_LESS(a, b)                                                                                             \
+    ((uintptr_t)(a)->r != (uintptr_t)(b)->r ? (uintptr_t)(a)->r < (uintptr_t)(b)->r :                                  \
+     (uintptr_t)(a)->pb != (uintptr_t)(b)->pb ? (uintptr_t)(a)->pb < (uintptr_t)(b)->pb : (a)->poff < (b)->poff)
+MSORT_DEFINE(sort_precopies, PreCopy, PRECOPY_LESS)
+
+static void pre_record_copies(VkCommandBuffer cb, int need_pre_barrier, uint64_t fence) {
+    static PreCopy *sbuf, *cslices;
+    static size_t scap;
+    static int ccslices;
+    static VkBufferCopy *reg;
+    static int creg;
+    if (!npre_pend) return;
+    if (npre_pend > 1) sort_precopies(pre_pend, (size_t)npre_pend, &sbuf, &scap);
+    VkCtx *vc = vk_ctx();
+    int use_compute = npre_pend >= 64 && mirror_ops_init(vc);
+    int ncs = 0, used_copy = 0, used_comp = 0;
+    if (need_pre_barrier) {
+        VkPipelineStageFlags2 ds = VK_PIPELINE_STAGE_2_COPY_BIT | (use_compute ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : 0);
+        VkAccessFlags2 da = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                            (use_compute ? VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT : 0);
+        mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, ds, da);
+    }
+    for (int i = 0; i < npre_pend;) {
+        PoolRec *r = pre_pend[i].r;
+        PreBuf *pb = pre_pend[i].pb;
+        int k = 0;
+        for (; i < npre_pend && pre_pend[i].r == r && pre_pend[i].pb == pb; i++) {
+            uint64_t src = pre_pend[i].off, dst = pre_pend[i].poff, sz = pre_pend[i].size;
+            if (!sz) continue;
+            if (k && dst <= reg[k - 1].dstOffset + reg[k - 1].size &&
+                src - dst == reg[k - 1].srcOffset - reg[k - 1].dstOffset) {
+                uint64_t end = reg[k - 1].dstOffset + reg[k - 1].size;
+                if (dst + sz > end) reg[k - 1].size = dst + sz - reg[k - 1].dstOffset;
+                continue;
+            }
+            if (k == creg) grow((void **)&reg, &creg, sizeof *reg);
+            reg[k++] = (VkBufferCopy){src, dst, sz};
+        }
+        if (use_compute) {
+            int rem = 0;
+            for (int j = 0; j < k; j++) {
+                if (!((reg[j].srcOffset | reg[j].dstOffset | reg[j].size) & 3)) {
+                    if (ncs == ccslices) grow((void **)&cslices, &ccslices, sizeof *cslices);
+                    cslices[ncs++] = (PreCopy){r, pb, reg[j].srcOffset, reg[j].dstOffset, reg[j].size};
+                } else {
+                    reg[rem++] = reg[j];
+                }
+            }
+            if (rem) vkCmdCopyBuffer(cb, r->mbuf, pb->buf, (uint32_t)rem, reg), used_copy = 1;
+        } else if (k) {
+            vkCmdCopyBuffer(cb, r->mbuf, pb->buf, (uint32_t)k, reg), used_copy = 1;
+        }
+    }
+    if (ncs) {
+        if (snap_dispatch_slices(cb, vc, cslices, ncs, fence)) {
+            used_comp = 1;
+        } else {
+            for (int i = 0; i < ncs;) {
+                PoolRec *r = cslices[i].r;
+                PreBuf *pb = cslices[i].pb;
+                int k = 0;
+                for (; i < ncs && cslices[i].r == r && cslices[i].pb == pb; i++) {
+                    if (k == creg) grow((void **)&reg, &creg, sizeof *reg);
+                    reg[k++] = (VkBufferCopy){cslices[i].off, cslices[i].poff, cslices[i].size};
+                }
+                if (k) vkCmdCopyBuffer(cb, r->mbuf, pb->buf, (uint32_t)k, reg), used_copy = 1;
+            }
+        }
+    }
+    npre_pend = 0;
+    VkPipelineStageFlags2 ss = (used_copy ? VK_PIPELINE_STAGE_2_COPY_BIT : 0) |
+                               (used_comp ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : 0);
+    VkAccessFlags2 sa = (used_copy ? VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT : 0) |
+                        (used_comp ? VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT : 0);
+    if (ss)
+        mbarrier(cb, ss, sa, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_2_HOST_BIT,
+                 VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_HOST_READ_BIT);
+}
+
+static void pre_scan_staged_range(PoolRec *r, uint64_t off, uint64_t size, MRange **stmp, int *nstmp, int *cstmp) {
+    uint64_t lim = r->import_hi - r->import_lo, a = off, b = a + size;
+    if (b > lim) b = lim;
+    if (a >= b) return;
+    if (!staged_fault) {
+        if (!pre_map_covers(&spre_map, r, a, b)) range_add(stmp, nstmp, cstmp, r, a, b - a);
+        return;
+    }
+    uint8_t *cr = __atomic_load_n(&r->cpu_read, __ATOMIC_ACQUIRE);
+    if (!cr) return;
+    // If staged_fetch flipped any page of r to cpu_read during this submission, skip new snapshots on r for the
+    // remainder of this submission so pages written by an earlier part fall back to a full raw copy-back.
+    if (__atomic_load_n(&r->cr_flip_sub, __ATOMIC_ACQUIRE) == msub) return;
+    for (uint64_t x = a; x < b;) {
+        uint64_t e = (x & ~0xfffull) + 0x1000;
+        if (e > b) e = b;
+        if (__atomic_load_n(&cr[x >> 12], __ATOMIC_RELAXED) && !pre_map_covers(&spre_map, r, x, e))
+            range_add(stmp, nstmp, cstmp, r, x, e - x);
+        x = e;
+    }
+}
+
+static int pre_need_scan(void) {
+    return pre_walk_writes != pre_seen_walk_writes ||
+           __atomic_load_n(&pre_worker_seq, __ATOMIC_ACQUIRE) != pre_seen_worker_seq || pre_has_deferred;
+}
+
+static void pre_collect_uncovered(uint32_t upto, MRange **wtmp, int *nwtmp, int *cwtmp, MRange **stmp, int *nstmp,
+                                  int *cstmp) {
+    *nwtmp = 0, *nstmp = 0;
+    int deferred = 0;
+    uint32_t seen_walk = pre_walk_writes;
+    uint32_t seen_work = __atomic_load_n(&pre_worker_seq, __ATOMIC_ACQUIRE);
+    int locked = mirror_lock_if_shared();
+    int w_adv = 1;
+    for (int i = wbl_scan; i < nwbl; i++) {
+        if (wbl[i].tag > upto) { deferred = 1; w_adv = 0; continue; }
+        if (w_adv) wbl_scan = i + 1;
+        if ((uint64_t)wbl[i].tag < pre_sealed_next) continue;   // already submitted: fall back to raw write-back
+        uint64_t lim = wbl[i].r->import_hi - wbl[i].r->import_lo, a = wbl[i].off, b = a + wbl[i].size;
+        if (b > lim) b = lim;
+        if (a < b && !pre_map_covers(&wpre_map, wbl[i].r, a, b))
+            range_add(wtmp, nwtmp, cwtmp, wbl[i].r, a, b - a);
+    }
+    int s_adv = 1;
+    for (int i = stw_scan; i < nstw; i++) {
+        if (stw[i].tag > upto) { deferred = 1; s_adv = 0; continue; }
+        if (s_adv) stw_scan = i + 1;
+        if ((uint64_t)stw[i].tag < pre_sealed_next) continue;
+        pre_scan_staged_range(stw[i].r, stw[i].off, stw[i].size, stmp, nstmp, cstmp);
+    }
+    mirror_unlock(locked);
+    // wb_locals is append-only (head inserted with release order): walk without mirror_lock so slice workers in
+    // mirror_sync do not block on this scan.
+    for (WbLocal *w = __atomic_load_n(&wb_locals, __ATOMIC_ACQUIRE); w; w = w->next) {
+        plat_mutex_lock(&w->lock);
+        int w_def = 0, a_adv = 1, ss_adv = 1;
+        for (int i = w->scan_a; i < w->n; i++) {
+            if (w->a[i].tag > upto) { w_def = deferred = 1; a_adv = 0; continue; }
+            if (a_adv) w->scan_a = i + 1;
+            if ((uint64_t)w->a[i].tag < pre_sealed_next) continue;
+            uint64_t lim = w->a[i].r->import_hi - w->a[i].r->import_lo, a = w->a[i].off, b = a + w->a[i].size;
+            if (b > lim) b = lim;
+            if (a < b && !pre_map_covers(&wpre_map, w->a[i].r, a, b))
+                range_add(wtmp, nwtmp, cwtmp, w->a[i].r, a, b - a);
+        }
+        for (int i = w->scan_s; i < w->ns; i++) {
+            if (w->s[i].tag > upto) { w_def = deferred = 1; ss_adv = 0; continue; }
+            if (ss_adv) w->scan_s = i + 1;
+            if ((uint64_t)w->s[i].tag < pre_sealed_next) continue;
+            pre_scan_staged_range(w->s[i].r, w->s[i].off, w->s[i].size, stmp, nstmp, cstmp);
+        }
+        if (!w_def) w->has_new = 0;
+        plat_mutex_unlock(&w->lock);
+    }
+    pre_seen_walk_writes = seen_walk;
+    pre_seen_worker_seq = seen_work;
+    pre_has_deferred = deferred;
+}
+
+static void pre_prepare_part(uint32_t upto, uint64_t fence) {
+    if (pre_cache_valid && pre_cache_upto == upto) {
+        pre_cache_valid = 0;
+    } else if (pre_need_scan()) {
+        pre_collect_uncovered(upto, &pre_wtmp, &pre_nwtmp, &pre_cwtmp, &pre_stmp, &pre_nstmp, &pre_cstmp);
+    } else {
+        pre_nwtmp = pre_nstmp = 0;
+    }
+    VkCtx *c = vk_ctx();
+    if (pre_nwtmp) pre_cover_ranges(c, &wpre_map, pre_wtmp, pre_nwtmp, !mirror_ops_init(c), fence);
+    if (pre_nstmp) pre_cover_ranges(c, &spre_map, pre_stmp, pre_nstmp, 1, fence);
+}
+
+static void pre_reserve_end(uint64_t fence) {
+    if (!mirror_diff_cur) return;
+    static MRange *wtmp, *stmp;
+    static int cwtmp, cstmp;
+    VkCtx *c = vk_ctx();
+    if (nwbl) {
+        int nwtmp = 0;
+        for (int i = 0; i < nwbl; i++) {
+            if ((uint64_t)wbl[i].tag < pre_sealed_next) continue;   // already submitted: fall back to raw write-back
+            uint64_t lim = wbl[i].r->import_hi - wbl[i].r->import_lo, a = wbl[i].off, b = a + wbl[i].size;
+            if (b > lim) b = lim;
+            if (a < b && !pre_map_covers(&wpre_map, wbl[i].r, a, b))
+                range_add(&wtmp, &nwtmp, &cwtmp, wbl[i].r, a, b - a);
+        }
+        if (nwtmp) pre_cover_ranges(c, &wpre_map, wtmp, nwtmp, !mirror_ops_init(c), fence);
+    }
+    if (nstw) {
+        int nstmp = 0;
+        for (int i = 0; i < nstw; i++) {
+            if ((uint64_t)stw[i].tag < pre_sealed_next) continue;   // already submitted: fall back to raw write-back
+            pre_scan_staged_range(stw[i].r, stw[i].off, stw[i].size, &stmp, &nstmp, &cstmp);
+        }
+        if (nstmp) pre_cover_ranges(c, &spre_map, stmp, nstmp, 1, fence);
+    }
+    pre_end_done = 1;
+}
+
 static void mirror_begin(void) {
     if (!vk_mirror_on) {   // import mode: the texture checks' snapshots still skip frozen regions
         if (!freeze_idle) return;
@@ -5865,6 +7394,16 @@ static void mirror_begin(void) {
         return;
     }
     uint64_t t0 = qpc();
+    mirror_diff_cur = RT_KNOB_ON(mirror_diff_mode);
+    wpre_map.n = spre_map.n = 0;
+    wpre_map.cur = spre_map.cur = NULL;
+    npre_pend = pre_end_done = 0;
+    pre_sealed_next = 0;
+    pre_walk_writes = pre_seen_walk_writes = 0;
+    wbl_scan = stw_scan = 0;
+    pre_seen_worker_seq = __atomic_load_n(&pre_worker_seq, __ATOMIC_ACQUIRE);
+    pre_has_deferred = pre_cache_valid = 0;
+    uint64_t next_fence = vk_sync_issued() + 1;
     if (staged_min) {
         // The staged write-backs of this submission go into guest memory at its fence ahead of every callback the
         // recording queues for it, so the reports of the GPU writes (vk_exec_draw.c cb_done, vk_exec_xfer.c
@@ -5872,7 +7411,7 @@ static void mirror_begin(void) {
         // being recorded is the newest issued one plus one.
         StJob *j = calloc(1, sizeof *j);
         if (!j) rt_fatal("vk: out of memory");
-        j->fence = vk_sync_issued() + 1;
+        j->fence = next_fence;
         j->sorted = 1;   // until staged_split_own hands o to the sort thread
         plat_mutex_lock(&st_lock);
         j->next = st_jobs, st_jobs = j;
@@ -5880,6 +7419,8 @@ static void mirror_begin(void) {
         vk_completion_add(j->fence, staged_wb_done, j);
         st_cur = j;
     }
+    if (mirror_diff_cur) hd_begin(next_fence);
+    else hd_cur = NULL;
     uint32_t prev = msub;
     msub = msub + 1 ? msub + 1 : 1;
     if (st_cur) st_cur->sub = msub;
@@ -5930,7 +7471,32 @@ void vk_mem_mirror_begin(void) {
 // vk_mem_mirror_prologue reads the count again under the lock. The atomic accesses make the unlocked read defined.
 int vk_mem_mirror_pending(void) { return __atomic_load_n(&npend, __ATOMIC_RELAXED); }
 
-void vk_mem_mirror_prologue(VkCommandBuffer cb, uint64_t fence) {
+int vk_mem_mirror_pending_for(uint32_t upto) {
+    int n = __atomic_load_n(&npend, __ATOMIC_RELAXED);
+    if (n) return n;
+    if (!vk_mirror_on || !mirror_diff_cur) return 0;
+    if (pre_end_done) return npre_pend;
+    if (npre_pend) return 1;
+    if (!pre_need_scan()) return 0;
+    pre_collect_uncovered(upto, &pre_wtmp, &pre_nwtmp, &pre_cwtmp, &pre_stmp, &pre_nstmp, &pre_cstmp);
+    pre_cache_upto = upto;
+    pre_cache_valid = 1;
+    return pre_nwtmp || pre_nstmp;
+}
+
+void vk_mem_mirror_part_done(uint32_t upto) {
+    pre_cache_valid = 0;
+    if (!vk_mirror_on || !mirror_diff_cur) return;
+    uint64_t next = upto == UINT32_MAX ? (uint64_t)wb_tag + 1 : (uint64_t)upto + 1;
+    if (next > pre_sealed_next) pre_sealed_next = next;
+    if (pre_end_done) {
+        wpre_map.n = spre_map.n = 0;
+        wpre_map.cur = spre_map.cur = NULL;
+        pre_end_done = 0;
+    }
+}
+
+void vk_mem_mirror_prologue(VkCommandBuffer cb, uint64_t fence, uint32_t upto) {
     uint64_t tp = qpc();
     int locked = mirror_lock_if_shared();   // a helper may be queueing a sync
     int any = npend > 0;
@@ -5945,7 +7511,10 @@ void vk_mem_mirror_prologue(VkCommandBuffer cb, uint64_t fence) {
                 if (pend[i].r->sfeed) range_add(&stq, &nstq, &cstq, pend[i].r, pend[i].off, pend[i].size);
                 else pend[k++] = pend[i];
         }
-        if (k) copy_ranges(cb, pend, k, 1, &mrep.upload_bytes, &mrep.upload_copies, 0);
+        if (k) {
+            if (mirror_diff_cur && wpre_map.n) pre_refresh_batch(&wpre_map, pend, k);
+            copy_ranges(cb, pend, k, 1, &mrep.upload_bytes, &mrep.upload_copies, 0, NULL, 0);
+        }
         __atomic_store_n(&npend, 0, __ATOMIC_RELAXED);
         mrep.prologues++;
         if (big_mirror.pending) {   // its first full copy was in pend (mirror_create queues it before any prologue)
@@ -5963,10 +7532,18 @@ void vk_mem_mirror_prologue(VkCommandBuffer cb, uint64_t fence) {
     }
     mirror_unlock(locked);
     int fills = nstq ? staged_upload(cb, fence) : 0;   // the replay thread's list: no other thread adds to it
-    if (any)
-        mbarrier(cb, fills ? VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT : VK_PIPELINE_STAGE_2_COPY_BIT,
-                 VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+    if (any || fills) {
+        VkPipelineStageFlags2 ss = ((fills & 1) ? VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT : VK_PIPELINE_STAGE_2_COPY_BIT) |
+                                   ((fills & 2) ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : 0);
+        VkAccessFlags2 sa = VK_ACCESS_2_TRANSFER_WRITE_BIT | ((fills & 2) ? VK_ACCESS_2_SHADER_WRITE_BIT : 0);
+        mbarrier(cb, ss, sa, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    }
+    if (mirror_diff_cur) {
+        if (!pre_end_done) pre_prepare_part(upto, fence);
+        if (npre_pend) pre_record_copies(cb, !(any || fills), fence);
+    }
+    vk_mem_mirror_part_done(upto);
     mrep.pro_t += qpc() - tp;
 }
 
@@ -6136,7 +7713,7 @@ static uint64_t wb_take_tagged(MRange *a, int *n, uint32_t upto, MRange **out, i
 // while the GPU waited for it. The submission's end (vk_mem_mirror_end) waits for the jobs, so its last part, which
 // signals the fence, follows their copies in queue order. A copy that lands after a later part wrote the same range again
 // copies newer bytes, and that write is noted again with its own tag and copied at its own time.
-typedef struct { uint64_t fence; uint32_t upto, sub; uint64_t min_bytes; MRange *own; int nown; } WbJob;
+typedef struct { uint64_t fence; uint32_t upto, sub; uint64_t min_bytes; MRange *own; int nown; PreSeg *pre; int npre; int took_locals; } WbJob;
 #define WB_JOBS 16
 static struct {
     PlatMutex lock;
@@ -6160,19 +7737,20 @@ static void wb_cb_done(void *arg) {   // completion thread
 static void wb_job_run(const WbJob *j) {
     static MRange *h;
     static int ch;
-    int nh = 0;
-    uint64_t bytes = 0;
-    for (int i = 0; i < j->nown; i++) {
-        if (nh == ch) grow((void **)&h, &ch, sizeof *h);
-        h[nh++] = j->own[i], bytes += j->own[i].size;
+    int nh = j->nown;
+    if (nh) {
+        while (ch < nh) grow((void **)&h, &ch, sizeof *h);
+        memcpy(h, j->own, (size_t)nh * sizeof *h);
     }
-    plat_mutex_lock(&mirror_lock);   // the list of lists
-    for (WbLocal *w = wb_locals; w; w = w->next) {
-        plat_mutex_lock(&w->lock);
-        bytes += wb_take_tagged(w->a, &w->n, j->upto, &h, &nh, &ch);
-        plat_mutex_unlock(&w->lock);
+    if (!j->took_locals && __atomic_load_n(&wb_locals, __ATOMIC_ACQUIRE)) {
+        plat_mutex_lock(&mirror_lock);
+        for (WbLocal *w = wb_locals; w; w = w->next) {
+            plat_mutex_lock(&w->lock);
+            wb_take_tagged(w->a, &w->n, j->upto, &h, &nh, &ch);
+            plat_mutex_unlock(&w->lock);
+        }
+        plat_mutex_unlock(&mirror_lock);
     }
-    plat_mutex_unlock(&mirror_lock);
     if (!nh) return;
     VkCtx *c = vk_ctx();
     if (!WB.pool) {
@@ -6195,7 +7773,7 @@ static void wb_job_run(const WbJob *j) {
     vkBeginCommandBuffer(cb, &bi);
     VkPipelineStageFlags2 stage = VK_PIPELINE_STAGE_2_COPY_BIT;
     VkAccessFlags2 reads = VK_ACCESS_2_TRANSFER_READ_BIT, writes = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    if (mirror_sparse) {
+    if (j->npre || mirror_sparse) {
         stage |= VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         reads |= VK_ACCESS_2_SHADER_READ_BIT;
         writes |= VK_ACCESS_2_SHADER_WRITE_BIT;
@@ -6203,7 +7781,7 @@ static void wb_job_run(const WbJob *j) {
     mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, stage, reads);
     for (int i = 0; i < nh; i++) __atomic_store_n(&h[i].r->wb_sub, j->sub, __ATOMIC_RELAXED);
     uint64_t wbytes = 0, wcopies = 0;
-    copy_ranges(cb, h, nh, 0, &wbytes, &wcopies, j->fence);
+    copy_ranges(cb, h, nh, 0, &wbytes, &wcopies, j->fence, j->pre, j->npre);
     mbarrier(cb, stage, writes, VK_PIPELINE_STAGE_2_HOST_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
              VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
     vkEndCommandBuffer(cb);
@@ -6231,6 +7809,7 @@ static void wb_thread(void *arg) {
         plat_mutex_unlock(&WB.lock);
         wb_job_run(&j);
         free(j.own);
+        free(j.pre);
         plat_mutex_lock(&WB.lock);
         WB.head = (WB.head + 1) % WB_JOBS, WB.n--, WB.busy = 0;
         plat_cond_broadcast(&WB.idle);
@@ -6251,6 +7830,9 @@ static void wb_shutdown(VkCtx *c) {   // vk_mem_shutdown, the device idle: the p
     if (WB.pool) vkDestroyCommandPool(c->device, WB.pool, NULL);
     WB.pool = VK_NULL_HANDLE, WB.nfree = 0;
     plat_mutex_unlock(&WB.lock);
+    mirror_ops_close(c);
+    pre_cache_close(c);
+    hd_shutdown();
 }
 
 void vk_mem_mirror_wb_held(uint64_t fence, uint32_t upto, uint64_t min_bytes) {
@@ -6266,9 +7848,21 @@ void vk_mem_mirror_wb_held(uint64_t fence, uint32_t upto, uint64_t min_bytes) {
     }
     perf_ph_end(PERF_PH_WB_HELD, ph);
     if (bytes < min_bytes) return;
-    WbJob j = {fence, upto, msub, min_bytes, NULL, 0};
+    WbJob j = {fence, upto, msub, min_bytes, NULL, 0, NULL, 0, 0};
     int cown = 0;
-    wb_take_tagged(wbl, &nwbl, upto, &j.own, &j.nown, &cown);   // the walk's list is this thread's to change
+    if (wb_take_tagged(wbl, &nwbl, upto, &j.own, &j.nown, &cown)) wbl_scan = 0;
+    if (mirror_diff_cur && wpre_map.n) {
+        for (WbLocal *w = __atomic_load_n(&wb_locals, __ATOMIC_ACQUIRE); w; w = w->next) {
+            plat_mutex_lock(&w->lock);
+            if (wb_take_tagged(w->a, &w->n, upto, &j.own, &j.nown, &cown)) w->scan_a = 0;
+            plat_mutex_unlock(&w->lock);
+        }
+        j.took_locals = 1;
+        if (!j.nown) { free(j.own); return; }
+        PreMap taken = {0};
+        pre_cut_copy(&wpre_map, j.own, j.nown, &taken);
+        j.pre = taken.seg, j.npre = taken.n;
+    }
     plat_mutex_lock(&WB.lock);
     if (!WB.t) {
         WB.t = plat_thread_new(wb_thread, NULL, "vk write-back");
@@ -6300,11 +7894,12 @@ int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
         staged_split_own();
         perf_ph_end(PERF_PH_ST_SPLIT, ps);
     }
+    pre_reserve_end(fence);
     int need_ref = fetch_test && st_cur && st_cur->no;
     if (nwbl || nstw || need_ref) {   // staged mirrors' (stw) write back through the job's readback buffer (staged_wb_record)
         VkPipelineStageFlags2 stage = VK_PIPELINE_STAGE_2_COPY_BIT;
         VkAccessFlags2 reads = VK_ACCESS_2_TRANSFER_READ_BIT, writes = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        if (mirror_sparse) {
+        if ((nwbl && wpre_map.n) || mirror_sparse) {
             stage |= VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             reads |= VK_ACCESS_2_SHADER_READ_BIT;
             writes |= VK_ACCESS_2_SHADER_WRITE_BIT;
@@ -6313,7 +7908,7 @@ int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
         for (int i = 0; i < nwbl; i++) wbl[i].r->wb_sub = msub;
         for (int i = 0; i < nstw; i++) stw[i].r->wb_sub = msub;
         mrep.wb_ranges += (uint64_t)(nwbl + nstw);
-        if (nwbl) rec += copy_ranges(cb, wbl, nwbl, 0, &mrep.wb_bytes, &mrep.wb_copies, fence);
+        if (nwbl) rec += copy_ranges(cb, wbl, nwbl, 0, &mrep.wb_bytes, &mrep.wb_copies, fence, wpre_map.seg, wpre_map.n);
         if (need_ref || nstw) {
             uint64_t ps = perf_ph_begin_cpu();
             if (need_ref) rec += staged_ref_record(cb);   // DKB_STAGED_FETCH_TEST
@@ -6427,13 +8022,14 @@ static void mirror_log(uint64_t frame) {
         int64_t sw0 = plat_xchg64(&st_sort_waits[0], 0), swt0 = plat_xchg64(&st_sort_wait_ns[0], 0);
         int64_t sw1 = plat_xchg64(&st_sort_waits[1], 0), swt1 = plat_xchg64(&st_sort_wait_ns[1], 0);
         rt_log("mem: staged frame %llu: per frame: upload %.3f MiB in %.1f ranges (%.3f MiB of write-backs in flight "
-               "left out), CPU copy %.3f ms (blocked bytes looked up in %.3f ms for %.1f ranges, %.1f pieces found, "
+               "left out, merges %.2f, waits %.2f), CPU copy %.3f ms (blocked bytes looked up in %.3f ms for %.1f ranges, %.1f pieces found, "
                "staging buffers %.2f in %.3f ms, copies from guest memory %.3f ms); write-back %.3f MiB in %.1f ranges, "
                "recorded in %.3f ms, split for the own lists in %.3f ms (%.0f ranges, %.0f pieces), sorted in %.3f ms "
                "(sort thread; waits for it by the uploads %.2f, %.3f ms, at the fence %.2f, %.3f ms), "
                "%.3f MiB copied into guest memory in %.3f ms (completion thread); so far: first fills %d (%.0f MiB, %.1f "
                "ms in all), pools imported after all %d",
                (unsigned long long)frame, a.st_up_bytes / f / M, a.st_up_ranges / f, a.st_skip_bytes / f / M,
+               a.st_w_merges / f, a.st_w_waits / f,
                qpc_ms(a.st_up_t) / f, qpc_ms(a.st_blk_t) / f, a.st_blk_n / f, a.st_blk_ranges / f,
                a.st_stg_n / f, qpc_ms(a.st_stg_t) / f, qpc_ms(a.st_cpy_t) / f,
                a.st_wb_bytes / f / M, a.st_wb_ranges / f, qpc_ms(a.st_wb_t) / f,
@@ -6745,7 +8341,8 @@ static int stg_pool_tried;
 void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc) {
     VkCtx *c = vk_ctx();
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size ? size : 16,
-                             .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+                             .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
     VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                    .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
     if (!__atomic_load_n(&stg_pool_tried, __ATOMIC_ACQUIRE)) {

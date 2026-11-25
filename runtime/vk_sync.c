@@ -639,17 +639,21 @@ VkResult vk_sync_queue_submit(const VkSubmitInfo2 *si, VkFence fence, uint64_t v
 // before the pool is touched here (a no-op after rec_end_cb, which drains it already).
 // DKB_TRACE=perf: a part of the replay (perf.c ph_frame) when the recording calls it (a split part's); the
 // submission's last prologue comes after the recording and is counted only in the mirror line's prologue time.
-static VkCommandBuffer prologue_impl(VkCtx *c, uint64_t fence);
-static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) {
+static VkCommandBuffer prologue_impl(VkCtx *c, uint64_t fence, uint32_t upto);
+static VkCommandBuffer prologue_for(VkCtx *c, uint64_t fence, uint32_t upto) {
     uint64_t ph = perf_ph_begin_cpu();
-    VkCommandBuffer cb = prologue_impl(c, fence);
+    VkCommandBuffer cb = prologue_impl(c, fence, upto);
     perf_ph_end(PERF_PH_PROLOGUE, ph);
     return cb;
 }
+static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) { return prologue_for(c, fence, UINT32_MAX); }
 
-static VkCommandBuffer prologue_impl(VkCtx *c, uint64_t fence) {
+static VkCommandBuffer prologue_impl(VkCtx *c, uint64_t fence, uint32_t upto) {
     vk_mem_shadow_sync();   // shadow storage: the CPU's writes go in before the part is submitted
-    if (!vk_mem_mirror_pending()) return VK_NULL_HANDLE;
+    if (!vk_mem_mirror_pending_for(upto)) {
+        vk_mem_mirror_part_done(upto);
+        return VK_NULL_HANDLE;
+    }
     rec_drain();
     int i = claim_slot(c, fence);   // before reading slots: the claim may move it
     VkCommandBuffer cb = slots[i].cb;
@@ -657,15 +661,15 @@ static VkCommandBuffer prologue_impl(VkCtx *c, uint64_t fence) {
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     vkBeginCommandBuffer(cb, &bi);
     int pair = ts_open(cb);
-    vk_mem_mirror_prologue(cb, fence);
+    vk_mem_mirror_prologue(cb, fence, upto);
     ts_close(cb, pair, fence, NULL);
     vkEndCommandBuffer(cb);
     return cb;
 }
 
-// The parts vk_sync_split_defer left open, oldest first: command buffer, the value it belongs to, timing (sub_lock).
+// The parts vk_sync_split_defer left open, oldest first: command buffer, the value it belongs to, timing, write-back tag (sub_lock).
 #define HELD_MAX 8
-static struct { int ts; VkCommandBuffer cb; uint64_t fence; PartNote note; } held[HELD_MAX];
+static struct { int ts; VkCommandBuffer cb; uint64_t fence; uint32_t wb_tag; PartNote note; } held[HELD_MAX];
 static int held_head, held_n;
 
 // Replay thread (sub_lock), as it collects a pass's slices (vk_exec.c par_notes). held_front: the slices execute in the
@@ -731,12 +735,12 @@ static VkCommandBuffer split_impl(int wait) {
 
 VkCommandBuffer vk_sync_split(void) { return split_impl(0); }
 
-VkCommandBuffer vk_sync_split_defer(void) {
+VkCommandBuffer vk_sync_split_defer(uint32_t wb_tag) {
     if (held_n == HELD_MAX) rt_fatal("vk: more than %d split parts held back", HELD_MAX);
     VkCommandBuffer cb = slots[cur_slot].cb;
     rec_end();   // the recorder has made every call queued for cb; cb stays open, and its slot claimed for cur_fence
     typeof(held[0]) *h = &held[(held_head + held_n++) % HELD_MAX];
-    h->cb = cb, h->fence = cur_fence, h->ts = ts_cur, h->note = note;
+    h->cb = cb, h->fence = cur_fence, h->ts = ts_cur, h->wb_tag = wb_tag, h->note = note;
     ts_cur = -1, note.args = NULL, note.marks = NULL;   // the note's lists moved to the held part
     vk_upload_flush(0);   // the uploads the part asked for so far precede it in queue order
     CmdSlot *s = take_slot(vk_ctx(), cur_fence);
@@ -768,7 +772,7 @@ void vk_sync_split_finish(void (*tail)(VkCommandBuffer cb, void *arg), void *arg
     if (rec_call(held_end, &e)) rec_drain();   // after the calls queued before it, then the wait for the end
     else rec_drain(), held_end(&e);
     vk_upload_flush(0);
-    VkCommandBuffer pro = prologue(c, h.fence);
+    VkCommandBuffer pro = prologue_for(c, h.fence, h.wb_tag);
     VkCommandBufferSubmitInfo cbi[2] = {{.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = pro},
                                         {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = h.cb}};
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = pro ? 2 : 1,
