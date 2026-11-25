@@ -29,6 +29,10 @@ int rt_linked_modules(RtModule *out, int max);
 // rt_dispatch_init; the registry is fixed afterwards.
 void rt_register_host(uint64_t addr, GuestFn fn);
 
+// Direct dispatch for the contiguous hostfn window [RT_HOSTFN_BASE, RT_HOSTFN_BASE + 16 * slots): bypasses the
+// general host hash table on the slow path of rt_dispatch. Pass slots = 0 to disable.
+void rt_dispatch_set_hostfn(GuestFn entry, uint64_t slots);
+
 // Build the table from the modules (kept by pointer; they must outlive the process). Call it once, before any guest
 // thread starts: thread creation publishes the table to the threads. Fatal on a malformed table:
 // unsorted or duplicate starts, a start outside its module, overlapping modules, host code spread over 4 GiB.

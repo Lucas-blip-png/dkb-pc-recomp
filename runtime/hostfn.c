@@ -52,10 +52,34 @@ typedef struct {
     int blocking;        // runs with the virtual core given up (hostfn_blocking)
 } Slot;
 static Slot slots[MAX_HOSTFN];
+// Read-only hot dispatch table populated before hostfn_seal: kept separate from slots[].calls so guest cores
+// reading fn and blocking never suffer cache-line invalidation from call counting.
+typedef struct {
+    GuestFn fn;
+    int blocking;
+} HotSlot;
+static HotSlot hot_slots[MAX_HOSTFN];
 static int nslots;
 static RtHostEntry added[MAX_ADDED];
 static int nadded;
 static int sealed;
+
+// Per-thread call total for the fast dispatch path: one 64-byte-aligned node per thread eliminates global atomic
+// contention on every host call while keeping hostfn_calls() exact.
+typedef struct HostTls {
+    uint64_t total;
+    struct HostTls *next;
+} HostTls;
+static _Thread_local HostTls *tl_host;
+static HostTls *tl_head;
+static PlatMutex tl_lock = PLAT_MUTEX_INIT;
+static int fast_mode = -1, fast_applied = -1;
+
+// Weak fallback so standalone unit tests can link hostfn.c without perf.c.
+__attribute__((weak)) int rt_knob(const char *name, const char *def) {
+    (void)name;
+    return def && strcmp(def, "0") != 0;
+}
 
 static GuestFn table_find(const RtHostEntry *start, const RtHostEntry *stop, const char *name) {
     __asm__("" : "+r"(start), "+r"(stop));   // separate objects: keep the compiler from reasoning about them
@@ -107,7 +131,9 @@ uint64_t hostfn_register(const char *name, GuestFn fn) {
     if (nslots == MAX_HOSTFN) rt_fatal("hostfn_register: more than %d host functions", MAX_HOSTFN);
     uint64_t a = slot_addr(nslots);
     if (a >= RT_RET_HOST) rt_fatal("hostfn_register: host-function window full");
-    slots[nslots] = (Slot){.name = name, .fn = fn, .blocking = !strncmp(name, "_ZN2nn2fs", 9)};
+    int blocking = !strncmp(name, "_ZN2nn2fs", 9);
+    slots[nslots] = (Slot){.name = name, .fn = fn, .blocking = blocking};
+    hot_slots[nslots] = (HotSlot){.fn = fn, .blocking = blocking};
     rt_register_host(a, hostfn_entry);
     nslots++;
     return a;
@@ -175,6 +201,57 @@ static void hostfn_entry(Cpu *c) {
     __attribute__((musttail)) return s->fn(c);
 }
 
+__attribute__((noinline, cold)) static HostTls *host_tls_get(void) {
+    HostTls *tls = plat_aligned_alloc(64, 64);
+    if (!tls) rt_fatal("hostfn: out of memory allocating thread counter");
+    memset(tls, 0, 64);
+    plat_mutex_lock(&tl_lock);
+    tls->next = tl_head;
+    tl_head = tls;
+    plat_mutex_unlock(&tl_lock);
+    tl_host = tls;
+    return tls;
+}
+
+__attribute__((noinline, cold)) static void hostfn_trace_count(Cpu *c, uint64_t i) {
+    uint64_t n = __atomic_fetch_add(&slots[i].calls, 1, __ATOMIC_RELAXED);
+    if (!n) {
+        char lr[96];
+        rt_log("host call %s from %s", slots[i].name, ldr_describe(c->x[30] - 4, lr, sizeof lr));
+    }
+}
+
+// Fast host-function dispatch (DKB_HOSTFN_FAST=1): reads the read-only hot_slots[] table, counts calls in a
+// thread-private cache line (falling back to per-slot atomics only when DKB_TRACE=host is on), and inlines the
+// common kern_host_track depth update instead of calling out-of-line hostfn_tracked.
+static void hostfn_entry_fast(Cpu *c) {
+    uint64_t i = (c->pc - RT_HOSTFN_BASE) >> 4;
+    if (__builtin_expect((c->pc & 15) || i >= (uint64_t)nslots, 0)) bad_entry(c);
+    HotSlot s = hot_slots[i];
+    if (__builtin_expect(rt_trace & RT_TRACE_HOSTCALL, 0)) {
+        hostfn_trace_count(c, i);
+    } else {
+        HostTls *tls = tl_host;
+        if (__builtin_expect(!tls, 0)) tls = host_tls_get();
+        __atomic_store_n(&tls->total, tls->total + 1, __ATOMIC_RELAXED);
+    }
+    if (__builtin_expect(s.blocking, 0)) {
+        hostfn_blocking(c, s.fn);
+        return;
+    }
+    void *t = c->thread;
+    if (__builtin_expect(kern_host_track && t != NULL, 1)) {
+        int *d = kern_host_depth(t);
+        __atomic_store_n(d, *d + 1, __ATOMIC_RELAXED);
+        s.fn(c);
+        int n = *d - 1;
+        __atomic_store_n(d, n, __ATOMIC_RELAXED);
+        if (__builtin_expect(!n && kern_preempt_pending(t), 0)) kern_host_left(t);
+        return;
+    }
+    s.fn(c);
+}
+
 // A guest jump to the rt_call return sentinel: guest code used x30 as data, which a lifted RET never does.
 static void return_sentinel(Cpu *c) {
     rt_fatal("guest code jumped to the host return address %#llx (x0 %#llx)", (unsigned long long)RT_RET_HOST,
@@ -188,11 +265,30 @@ void hostfn_seal(void) {
     sealed = 1;
     int n = rt_linked_modules(mods, 16);
     rt_dispatch_init(mods, n);
+    fast_mode = rt_knob("HOSTFN_FAST", "1");
+    if (fast_mode == 1) {
+        fast_applied = 1;
+        rt_dispatch_set_hostfn(hostfn_entry_fast, (uint64_t)nslots);
+    } else {
+        fast_applied = 0;
+        if (fast_mode == 2) rt_log("hostfn: fast dispatch in the B blocks of DKB_AB only (DKB_HOSTFN_FAST=ab)");
+    }
+}
+
+void hostfn_ab_sync(int ab_side) {
+    if (__builtin_expect(fast_mode != 2, 1)) return;
+    int on = ab_side != 0;
+    if (on == fast_applied) return;
+    fast_applied = on;
+    rt_dispatch_set_hostfn(hostfn_entry_fast, on ? (uint64_t)nslots : 0);
 }
 
 uint64_t hostfn_calls(void) {
     uint64_t n = 0;
     for (int i = 0; i < nslots; i++) n += __atomic_load_n(&slots[i].calls, __ATOMIC_RELAXED);
+    plat_mutex_lock(&tl_lock);
+    for (HostTls *p = tl_head; p; p = p->next) n += __atomic_load_n(&p->total, __ATOMIC_RELAXED);
+    plat_mutex_unlock(&tl_lock);
     return n;
 }
 

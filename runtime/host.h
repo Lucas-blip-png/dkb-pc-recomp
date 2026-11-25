@@ -150,6 +150,7 @@ void hostfn_add_override(const char *name, GuestFn fn);    // an override outsid
 const char *hostfn_name(uint64_t addr);                    // name registered at a synthetic address, NULL if none
 void hostfn_seal(void);                                    // build the dispatch table (rt_dispatch_init over every
                                                            // linked module); idempotent; registration ends here
+void hostfn_ab_sync(int ab_side);                          // DKB_HOSTFN_FAST=ab: switch fast dispatch on A/B flips
 uint64_t hostfn_calls(void);                               // host-function calls so far, all threads
 void hostfn_report(void);                                  // call count per host function to stderr, busiest first
 int hostfn_table_size(int observers);                      // linked HOST_OVERRIDE (0) / HOST_OBSERVER (1) entries

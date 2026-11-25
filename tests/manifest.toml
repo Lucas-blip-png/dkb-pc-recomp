@@ -1041,6 +1041,13 @@ area = "tools"
 cmd = ["{python}", "tests/scenario_test.py"]
 
 [[test]]
+name = "hostfn-fast"
+tier = 1
+area = "cpu"
+cmd = ["{python}", "tests/hostfn_fast_test.py", "--cc", "{cc}", "--out", "{out}"]
+needs = ["cc"]
+
+[[test]]
 name = "save-warp"
 tier = 0
 area = "tools"

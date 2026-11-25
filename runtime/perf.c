@@ -570,6 +570,7 @@ void perf_present(uint64_t frame) {
     prof_sampler_frame(frame, now, last ? d : 0);
     uint64_t rep = ft_frame(frame, now, d);   // d is 0 on the first present: it only starts the period
     int ab_side = rt_ab();
+    hostfn_ab_sync(ab_side);
     ab_b += ab_side;
     ab_frame(frame, d, rep, ab_side);
     cpu_placement();
