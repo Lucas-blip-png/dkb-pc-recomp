@@ -75,12 +75,6 @@ static HostTls *tl_head;
 static PlatMutex tl_lock = PLAT_MUTEX_INIT;
 static int fast_mode = -1, fast_applied = -1;
 
-// Weak fallback so standalone unit tests can link hostfn.c without perf.c.
-__attribute__((weak)) int rt_knob(const char *name, const char *def) {
-    (void)name;
-    return def && strcmp(def, "0") != 0;
-}
-
 static GuestFn table_find(const RtHostEntry *start, const RtHostEntry *stop, const char *name) {
     __asm__("" : "+r"(start), "+r"(stop));   // separate objects: keep the compiler from reasoning about them
     for (const RtHostEntry *p = start; p < stop; p++)
@@ -249,7 +243,7 @@ static void hostfn_entry_fast(Cpu *c) {
         if (__builtin_expect(!n && kern_preempt_pending(t), 0)) kern_host_left(t);
         return;
     }
-    s.fn(c);
+    __attribute__((musttail)) return s.fn(c);
 }
 
 // A guest jump to the rt_call return sentinel: guest code used x30 as data, which a lifted RET never does.
