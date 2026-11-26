@@ -2797,10 +2797,19 @@ static void mirror_mode(int discrete, uint32_t vendor) {
 #if defined(_WIN32) || defined(__APPLE__)
     shadow_on = sh && *sh && strcmp(sh, "0");
 #else
-    shadow_on = !sh || !*sh || strcmp(sh, "0");
+    // Linux: on by default, except on NVIDIA's proprietary driver. The shadow copies were chosen for amdgpu, where
+    // re-protecting imported memory invalidates the driver's userptr buffer at every submit (docs/building.md). With
+    // NVIDIA's driver the pools are imported as on Windows, and the shadow sync cost more than the imports: on 3.2.0 in a
+    // level of the first save (Ryzen 7 5700, RTX 3070), 4.2 ms a frame of the submitting thread's replay. Without it the
+    // mirror check (DKB_MEMORY=verify) found no page that differed from guest memory over 9.8 million compared.
+    shadow_on = sh && *sh ? strcmp(sh, "0") != 0 : !vk_caps.nvidia_prop;
 #endif
     if (shadow_on) rt_log("mem: shadow storage: CPU-visible pools are host-visible copies of guest memory, not imports%s",
                           sh && *sh ? " (DKB_SHADOW)" : "");
+#if !defined(_WIN32) && !defined(__APPLE__)
+    else rt_log("mem: no shadow storage: CPU-visible pools are imported (%s)",
+                sh && *sh ? "DKB_SHADOW=0" : "the default on NVIDIA's proprietary driver; DKB_SHADOW=1 turns it on");
+#endif
     // The differential write-back needs shadow_on, so it is decided here. By default on NVIDIA, the one vendor it was
     // measured on; DKB_MIRROR_DIFF=1 or ab turns it on elsewhere, 0 off.
     mirror_diff_mode = vk_mirror_on && !shadow_on ? rt_knob("MIRROR_DIFF", vendor == 0x10de ? "1" : "0") : 0;

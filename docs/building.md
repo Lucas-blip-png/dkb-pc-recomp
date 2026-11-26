@@ -191,6 +191,13 @@ writes come back at its fence. In play that costs about 0.2 ms a frame and doubl
 1.1 GB). `DKB_SHADOW=1` turns it on under Windows too. The Steam Deck's RADV has `VK_EXT_external_memory_host` as
 well: the shadow copies are chosen for the measured cost above, not for a missing extension.
 
+NVIDIA's proprietary driver imports the pools as on Windows, and there the shadow copies are off by default
+(`DKB_SHADOW=1` turns them on). On 3.2.0, in a level of the first save, they cost the submitting thread about
+4.2 ms a frame (2,100 pools, about 10 MiB copied in and 7 MiB back a frame), all inside the replay. Without them the
+replay went from 8.6-8.9 ms to 4.4-4.7 ms a frame and the scene held 60 fps (`docs/dkb-testing.md`, `DKB_SHADOW`). The
+write watch still sees every CPU write: a write clears the page's protection through the page tables whether or not
+the driver pinned the page, and `DKB_MEMORY=verify` found no mirror page that differed from guest memory.
+
 The Deck's GPU (Van Gogh) has no native ASTC, so its textures go through the compute decoder (`runtime/vk_astc.c`,
 `DKB_ASTC`) as on desktop AMD GPUs without it; frame times measured there include it.
 
