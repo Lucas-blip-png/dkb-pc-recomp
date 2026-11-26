@@ -1,7 +1,9 @@
 // The start-up screen's text (splash.h): each string rendered at its exact pixel size with stb_truetype from the
 // menu's own font (Roboto Medium, Apache-2.0, ui/fonts/LICENSE-Roboto.txt, embedded by ui/menu.cpp) into one 8-bit
-// coverage atlas, a row of the atlas per string. vk_splash.c hands the atlas and the boxes to the screen's shader.
+// coverage atlas, a row of the atlas per string. Roboto has no Chinese, so the glyphs it lacks come from the system's
+// Chinese font, as the menu's atlas merges them. vk_splash.c hands the atlas and the boxes to the screen's shader.
 #include "splash.h"
+#include "platform/platform.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -19,6 +21,9 @@ const unsigned char *menu_font_ttf(size_t *size);   // ui/menu.cpp: the font fil
 
 struct SplashText {
     stbtt_fontinfo font;
+    stbtt_fontinfo cjk;           // the system's Chinese font, for the glyphs Roboto lacks
+    int has_cjk;
+    unsigned char *cjk_data;
     int ascent, descent, gap;     // font units
     uint8_t *px;                  // the atlas
     int w, h, cap_w, cap_h;       // its size in use and allocated
@@ -33,10 +38,23 @@ SplashText *splash_text_new(void) {
         return NULL;
     }
     stbtt_GetFontVMetrics(&t->font, &t->ascent, &t->descent, &t->gap);
+    char path[512];
+    uint64_t size = 0;
+    if (plat_font_path("zh-Hans", path, sizeof path) && (t->cjk_data = plat_file_read(path, &size)) &&
+        size >= 1024 && stbtt_InitFont(&t->cjk, t->cjk_data, stbtt_GetFontOffsetForIndex(t->cjk_data, 0)))
+        t->has_cjk = 1;
     return t;
 }
 
+// The font that has this codepoint: the menu's own, then the system's Chinese one for the glyphs it lacks.
+static const stbtt_fontinfo *font_for(SplashText *t, int cp) {
+    if (stbtt_FindGlyphIndex(&t->font, cp)) return &t->font;
+    if (t->has_cjk && stbtt_FindGlyphIndex(&t->cjk, cp)) return &t->cjk;
+    return &t->font;
+}
+
 void splash_text_free(SplashText *t) {
+    if (t) free(t->cjk_data);
     if (!t) return;
     free(t->px);
     free(t);
@@ -69,14 +87,17 @@ static float scale_of(SplashText *t, float px) { return stbtt_ScaleForMappingEmT
 float splash_text_ascent(SplashText *t, float px) { return (float)t->ascent * scale_of(t, px); }
 
 float splash_text_width(SplashText *t, const char *s, float px, float spacing) {
-    float sc = scale_of(t, px), x = 0;
+    float x = 0;
     int prev = 0;
+    const stbtt_fontinfo *prevf = NULL;
     while (*s) {
         int cp = next_cp(&s), adv, lsb;
-        if (prev) x += sc * (float)stbtt_GetCodepointKernAdvance(&t->font, prev, cp);
-        stbtt_GetCodepointHMetrics(&t->font, cp, &adv, &lsb);
+        const stbtt_fontinfo *f = font_for(t, cp);
+        float sc = stbtt_ScaleForMappingEmToPixels(f, px);
+        if (prev && f == prevf) x += sc * (float)stbtt_GetCodepointKernAdvance(f, prev, cp);
+        stbtt_GetCodepointHMetrics(f, cp, &adv, &lsb);
         x += sc * (float)adv + (*s ? spacing : 0);
-        prev = cp;
+        prev = cp, prevf = f;
     }
     return x;
 }
@@ -108,18 +129,21 @@ SplashGlyphBox splash_text_add(SplashText *t, const char *s, float px, float spa
     float origin = floorf(left);   // the box starts on a whole pixel; the glyphs keep the fraction
     float pen = left - origin + (float)pad;
     int prev = 0;
+    const stbtt_fontinfo *prevf = NULL;
     while (*s) {
         int cp = next_cp(&s), adv, lsb;
-        if (prev) pen += sc * (float)stbtt_GetCodepointKernAdvance(&t->font, prev, cp);
-        stbtt_GetCodepointHMetrics(&t->font, cp, &adv, &lsb);
+        const stbtt_fontinfo *f = font_for(t, cp);
+        float gsc = stbtt_ScaleForMappingEmToPixels(f, px);
+        if (prev && f == prevf) pen += gsc * (float)stbtt_GetCodepointKernAdvance(f, prev, cp);
+        stbtt_GetCodepointHMetrics(f, cp, &adv, &lsb);
         int x0, y0, x1, y1;
         float fx = pen - floorf(pen);
-        stbtt_GetCodepointBitmapBoxSubpixel(&t->font, cp, sc, sc, fx, 0, &x0, &y0, &x1, &y1);
+        stbtt_GetCodepointBitmapBoxSubpixel(f, cp, gsc, gsc, fx, 0, &x0, &y0, &x1, &y1);
         int gw = x1 - x0, gh = y1 - y0;
         if (gw > 0 && gh > 0) {
             unsigned char *g = malloc((size_t)gw * gh);
             if (g) {
-                stbtt_MakeCodepointBitmapSubpixel(&t->font, g, gw, gh, gw, sc, sc, fx, 0, cp);
+                stbtt_MakeCodepointBitmapSubpixel(f, g, gw, gh, gw, gsc, gsc, fx, 0, cp);
                 int ox = (int)floorf(pen) + x0, oy = pad + asc + y0;
                 for (int y = 0; y < gh; y++) {
                     int ay = oy + y;
@@ -134,8 +158,8 @@ SplashGlyphBox splash_text_add(SplashText *t, const char *s, float px, float spa
                 free(g);
             }
         }
-        pen += sc * (float)adv + (*s ? spacing : 0);
-        prev = cp;
+        pen += gsc * (float)adv + (*s ? spacing : 0);
+        prev = cp, prevf = f;
     }
     b.x = origin - (float)pad;
     b.y = floorf(baseline) - (float)(asc + pad);

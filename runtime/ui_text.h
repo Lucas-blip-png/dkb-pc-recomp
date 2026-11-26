@@ -11,7 +11,7 @@ typedef enum {
     UI_SWKBD_CANCEL,
     UI_SWKBD_PAD_HINT,       // how a controller answers
 
-    // Menu: window, tabs, bottom row. UI_MENU_FIRST..UI_MENU_LAST_ID carry English and Russian texts.
+    // Menu: window, tabs, bottom row. UI_MENU_FIRST..UI_MENU_LAST_ID carry English, Russian and Chinese texts.
     UI_MENU_FIRST,
     UI_MENU_TITLE = UI_MENU_FIRST,
     UI_MENU_TAB_DISPLAY, UI_MENU_TAB_GRAPHICS, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND, UI_MENU_TAB_CONTROLS, UI_MENU_TAB_MENU,
@@ -235,7 +235,8 @@ typedef enum {
     UI_MENU_SPLASH_TIP_FULLSCREEN, UI_MENU_SPLASH_TIP_SETTINGS, UI_MENU_SPLASH_TIP_OVERLAY, UI_MENU_SPLASH_TIP_GRAPHICS,
     UI_MENU_SPLASH_TIP_FRAME_RATE,    // Bananza's Display tab only
     UI_MENU_SPLASH_TIP_REMAP, UI_MENU_SPLASH_TIP_KEPT, UI_MENU_SPLASH_TIP_TABS,
-    UI_MENU_LAST_ID = UI_MENU_SPLASH_TIP_TABS,
+    UI_MENU_PAD_DEVICE_AUTO_FMT,   // "Auto: %s": the controller chosen automatically, with its name
+    UI_MENU_LAST_ID = UI_MENU_PAD_DEVICE_AUTO_FMT,
     UI_TEXT_COUNT
 } UiTextId;
 
@@ -254,6 +255,7 @@ int ui_text_defined(const char *lang, UiTextId id);
 // The catalog language for a Switch language code ("en-GB" -> "en", "zh-CN" -> "zh-Hans", ...).
 const char *ui_text_lang(const char *switch_code);
 
-// Menu text: ui_text_in(menu language, id). The menu language is DKB_MENU_LANG ("en" / "ru"); unset, Russian when the
-// system UI language is Russian, else English. Follows a live change of the setting.
+// Menu text: ui_text_in(menu language, id). The menu language is DKB_MENU_LANG ("en", "ru" or "zh-Hans"); unset,
+// Chinese when the system UI language is Chinese, Russian when it is Russian, else English. Follows a live change of
+// the setting.
 const char *menu_text(UiTextId id);
