@@ -36,7 +36,7 @@ MacNativeGames cannot run on x86-64 as is: its CPU path executes ARM64 code nati
   - jump tables resolved by our own symbolic pass instead of Unicorn, which keeps GPL code out of the shipped generator;
   - `LDXP`/`STXP` (128-bit exclusive pairs) supported;
   - no 64 MB limit on `main`; `subsdk*` loaded;
-  - NZCV and the six most used general registers of each function kept in C locals instead of the `Cpu`
+  - NZCV and the ten most used general registers (`LOCALS`) of each function kept in C locals instead of the `Cpu`
     (`recomp/flags.py`, `recomp/regs.py`): registers are stored back where they changed, before calls, SVCs and
     exits, and reloaded after them. A call reloads only X0-X18 and X30, as AAPCS64 has the callee preserve X19-X29 and
     SP; `gen.py --no-callee-saved-trust` reloads those too.

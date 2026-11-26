@@ -33,9 +33,12 @@ SP = 31   # index of SP in the register sets
 # what a call may change, after.
 SPILL, RELOAD, RELOAD_CALL = '\x00S', '\x00R', '\x00C'
 CALLEE_SAVED = frozenset(range(19, 30)) | {SP}
-# Locals per function: the most used registers. More cost more than they save, as clang then spills them to the stack
-# and the syncs stay (300 hot TotK functions: fewest instructions and memory operands at 4-6).
-LOCALS = 6
+# Locals per function: the most used registers. Past some count clang spills them to the stack and the syncs stay
+# (300 hot TotK functions: fewest instructions and memory operands at 4-6). Bananza's hot job-worker functions are
+# long (1.0.0 main's f_7000004180: 9,000 lines of C) and keep more registers busy: over six alternating 60 s runs of
+# a player's save (tutorial-cave scenario) 10 gave 59.2 fps on average (58.3 to 59.6) against 58.8 at 6 (58.5 to
+# 59.2). TotK is unmeasured at 10; gen.py --reg-locals 6 gives the old output.
+LOCALS = 10
 
 
 def name(r):
