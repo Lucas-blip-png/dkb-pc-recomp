@@ -134,8 +134,24 @@ void widen(const char *s, wchar_t *out, int cap)
     if (!MultiByteToWideChar(CP_UTF8, 0, s, -1, out, cap)) out[0] = 0;
 }
 
-/* folder\python\pythonw.exe -m installer.gui <head> <args>, in folder. 0 when that Python is not there */
-static int start_python(const wchar_t *folder, const wchar_t *head, const wchar_t *args)
+/* 1 when args hold an option that runs the setup or the game with no window (installer/gui.py CLI_OPTIONS, and
+   --play). A frontend such as RecompLauncher then reads the progress lines and waits for the exit code (#402). */
+static int frontend_run(const wchar_t *args)
+{
+    static const wchar_t *const opts[] = {L"--dest", L"--source", L"--prepare", L"--nup", L"--exefs", L"--romfs",
+                                          L"--keys", L"--update", L"--verify", L"--clean", L"--uninstall", L"--play"};
+    for (size_t i = 0; i < sizeof opts / sizeof *opts; i++) {
+        size_t n = wcslen(opts[i]);
+        for (const wchar_t *p = wcsstr(args, opts[i]); p; p = wcsstr(p + 1, opts[i]))
+            if ((p == args || p[-1] == L' ' || p[-1] == L'"') && (!p[n] || p[n] == L' ' || p[n] == L'=' || p[n] == L'"'))
+                return 1;
+    }
+    return 0;
+}
+
+/* folder\python\pythonw.exe -m installer.gui <head> <args>, in folder. 0 when that Python is not there. With code,
+   the child gets this process's standard handles and is waited for, and *code is its exit code. */
+static int start_python(const wchar_t *folder, const wchar_t *head, const wchar_t *args, DWORD *code)
 {
     wchar_t python[PATH_CHARS], cmd[CMD_CHARS];
     STARTUPINFOW si = {sizeof si};
@@ -144,8 +160,18 @@ static int start_python(const wchar_t *folder, const wchar_t *head, const wchar_
     if (swprintf(cmd, CMD_CHARS, L"\"%ls\" -m installer.gui%ls%ls%ls%ls", python, head[0] ? L" " : L"", head,
                  args[0] ? L" " : L"", args) < 0)
         return 0;
-    if (!CreateProcessW(python, cmd, NULL, NULL, FALSE, 0, NULL, folder, &si, &pi)) return 0;
+    if (code) {   /* a GUI exe still holds the pipes its caller gave it: pass them on so the progress lines get there */
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+        si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    }
+    if (!CreateProcessW(python, cmd, NULL, NULL, code != NULL, 0, NULL, folder, &si, &pi)) return 0;
     CloseHandle(pi.hThread);
+    if (code) {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        if (!GetExitCodeProcess(pi.hProcess, code)) *code = 1;
+    }
     CloseHandle(pi.hProcess);
     return 1;
 }
@@ -161,7 +187,7 @@ static int start_installed(const wchar_t *base, const wchar_t *pointer, const wc
     if (!valid_tag(tag)) return 0;
     widen(tag, wtag, 64);
     if (swprintf(path, PATH_CHARS, L"%ls\\versions\\%ls", base, wtag) < 0) return 0;
-    return start_python(path, head, args);
+    return start_python(path, head, args, NULL);
 }
 #endif
 
@@ -178,7 +204,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE previous, LPWSTR args, int show)
     if (slash) *slash = 0;
 
     /* the setup: an unpacked release folder */
-    if (start_python(folder, L"", args)) return 0;
+    DWORD code = 0;
+    if (start_python(folder, L"", args, frontend_run(args) ? &code : NULL)) return (int)code;
 #ifndef DKB_LAUNCHER
     ask(NULL, T(PYTHON_MISSING), MB_OK | MB_ICONERROR);
     return 1;

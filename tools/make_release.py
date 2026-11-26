@@ -500,6 +500,8 @@ def build_sources(out, *, setup_program=None):
         if setup_program:   # The bundled installers can both prepare and play. Source packages use play.sh.
             profile['prepare']['program'] = [setup_program]
             profile['start'] = {'program': [setup_program], 'args': ['--play', '{install}/game']}
+            if setup_program.endswith('.exe'):   # the game the build leaves, as prepare.done names it
+                profile['prepare']['done'] = ['{install}/game/dkb.exe']
         (out / 'recomplauncher.json').write_text(json.dumps(profile, indent=2) + '\n', encoding='utf-8')
     shutil.copy2(ROOT / 'THIRD_PARTY_NOTICES.md', out / 'THIRD_PARTY_NOTICES.md')
     for lic in sorted(ROOT.glob('LICENSE*')):   # GPL-3.0-or-later, and MIT for the files from TotK Recomp
