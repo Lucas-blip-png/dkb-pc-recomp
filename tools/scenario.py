@@ -439,6 +439,9 @@ def run_once(s, exe, out, env_extra, args, warp=None):
         log.flush()
         try:
             p = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+            if args.cpus and os.name == 'nt':   # as tools/lowend_bench.py: the first N logical processors only
+                import ctypes
+                ctypes.windll.kernel32.SetProcessAffinityMask(ctypes.c_void_p(int(p._handle)), ctypes.c_size_t((1 << args.cpus) - 1))
             finished = None   # when the game logged its end-of-run screenshot (runtime/boot.c)
             tail = LogTail(out / 'game.log')
             last_write = time.monotonic()
@@ -561,6 +564,8 @@ def main(argv=None):
     ap.add_argument('--ab', metavar='VARIANTS', help='the scenario\'s [variants.<name>] table to alternate')
     ap.add_argument('--env', action='append', default=[], metavar='KEY=VALUE', help='extra environment for every run')
     ap.add_argument('--seconds', type=float, help="override the scenario's game time")
+    ap.add_argument('--cpus', type=int, help='run the game on the first N logical processors only (Windows), as a '
+                    'weaker CPU would')
     ap.add_argument('--keep-profile', action='store_true', help='keep the run\'s profile copy (for a save to inspect)')
     ap.add_argument('--force', action='store_true', help='run even while another game process is running')
     ap.add_argument('--sweep', metavar='REGEX', help='run once per stage whose name matches, e.g. LevelStage$ for the '
