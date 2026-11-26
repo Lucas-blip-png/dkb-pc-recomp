@@ -571,6 +571,12 @@ area = "shaders"
 cmd = ["{python}", "tests/fsr3fi_bindings_test.py"]
 
 [[test]]
+name = "shader-async-disk"
+tier = 1
+area = "shaders"
+cmd = ["{python}", "tests/shader_async_disk_test.py", "--cc", "{cc}", "--out", "{out}"]
+
+[[test]]
 name = "temporal-idle"
 tier = 1
 area = "gfx"

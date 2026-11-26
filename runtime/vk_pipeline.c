@@ -1922,8 +1922,9 @@ static VkPipelineLayout half_layout(Layout *l, int h) {
     return l->half[h];
 }
 
-// Builds one library from the pipeline's state; key is the library's key (PrKey: fin holds the added outputs).
-static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPipelineLayout lay, const void *key) {
+// Builds one library from the pipeline's state into cache; key is the library's key (PrKey: fin holds the added outputs).
+static VkPipeline lib_create_in(int kind, const VkPipeState *s, const GKey *k, VkPipelineLayout lay, const void *key,
+                                VkPipelineCache cache) {
     static const VkGraphicsPipelineLibraryFlagsEXT part[4] = {
         VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT, VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT,
         VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT};
@@ -2025,13 +2026,17 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
         ri.depthAttachmentFormat = (VkFormat)k->depth, ri.stencilAttachmentFormat = (VkFormat)k->stencil;
         pi.pColorBlendState = &cb, pi.pMultisampleState = &ms;
     }
-    pcache_build_begin();
-    if (vkCreateGraphicsPipelines(P.device, P.cache, 1, &pi, NULL, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
-    pcache_build_end();
+    if (cache == P.cache) pcache_build_begin();
+    if (vkCreateGraphicsPipelines(P.device, cache, 1, &pi, NULL, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
+    if (cache == P.cache) pcache_build_end();
 out:
     if (m) vkDestroyShaderModule(P.device, m, NULL);
     free(patched);
     return pipe;
+}
+
+static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPipelineLayout lay, const void *key) {
+    return lib_create_in(kind, s, k, lay, key, P.cache);
 }
 
 // The cached library for key. Caller holds P.lock. build 0: lookup only (VK_NULL_HANDLE and *miss when absent);
@@ -2133,8 +2138,12 @@ static VkPipeline lib_get(int kind, const VkPipeState *s, const GKey *k, Layout 
         if (have->pre && !have->used) have->used = 1, P.g.pre_used[kind]++;
         return have->pipe;
     }
+    if (!build) {
+        *miss = 1;
+        return VK_NULL_HANDLE;
+    }
     VkPipelineLayout lay = kind == LIB_PR ? half_layout(l, 0) : kind == LIB_FS ? half_layout(l, 1) : VK_NULL_HANDLE;
-    if (!build || ((kind == LIB_PR || kind == LIB_FS) && !lay)) {
+    if ((kind == LIB_PR || kind == LIB_FS) && !lay) {
         *miss = 1;
         return VK_NULL_HANDLE;
     }
@@ -3052,7 +3061,7 @@ static void prebuild_start(void) {
 }
 
 // A compute pipeline for cs in layout l; VK_NULL_HANDLE on failure. No lock needed (P.cache is driver-synchronised).
-static VkPipeline compute_create(const GfxShader *cs, const Layout *l) {
+static VkPipeline compute_create_in(const GfxShader *cs, const Layout *l, VkPipelineCache cache) {
     uint64_t words;
     const uint32_t *code = gfx_shader_spirv(cs, &words);
     VkShaderModule m = make_module(cs, code, words);
@@ -3064,11 +3073,15 @@ static VkPipeline compute_create(const GfxShader *cs, const Layout *l) {
                                       .flags = vk_pipeline_capture_flags(), .layout = l->layout};
     pin_subgroup32(&ci.stage, &rqc, code, words);
     VkPipeline pipe = VK_NULL_HANDLE;
-    pcache_build_begin();
-    if (vkCreateComputePipelines(P.device, P.cache, 1, &ci, NULL, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
-    pcache_build_end();
+    if (cache == P.cache) pcache_build_begin();
+    if (vkCreateComputePipelines(P.device, cache, 1, &ci, NULL, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
+    if (cache == P.cache) pcache_build_end();
     vkDestroyShaderModule(P.device, m, NULL);
     return pipe;
+}
+
+static VkPipeline compute_create(const GfxShader *cs, const Layout *l) {
+    return compute_create_in(cs, l, P.cache);
 }
 
 // The layout of a compute shader in *B; NULL with *why on failure. Caller holds P.lock.
@@ -3230,7 +3243,7 @@ static void lb_compute(const GfxShader *cs) {
 
 // The pre-rasterization (vertex) or fragment-shader library of one shader with the LB state.
 // keep 0: build into the driver's pipeline cache only (sh is a private copy; the library is destroyed).
-static void lb_library(const GfxShader *sh, int vertex, int keep) {
+static void lb_library_in(const GfxShader *sh, int vertex, int keep, VkPipelineCache cache) {
     int kind = vertex ? LIB_PR : LIB_FS, stat = vertex ? 0 : 1;
     VkPipeState s;
     vk_pipe_state_defaults(&s);
@@ -3270,7 +3283,7 @@ static void lb_library(const GfxShader *sh, int vertex, int keep) {
         return;
     }
     double t0 = now_ms();
-    VkPipeline pipe = lib_create(kind, &s, &k, lay, key);
+    VkPipeline pipe = lib_create_in(kind, &s, &k, lay, key, cache);
     double ms = now_ms() - t0;
     if (!keep) {
         if (pipe) vkDestroyPipeline(P.device, pipe, NULL);
@@ -3286,6 +3299,10 @@ static void lb_library(const GfxShader *sh, int vertex, int keep) {
     }
     lb_unlock();
     lb_count(stat, !pipe ? 2 : have || got != pipe ? 1 : 0, ms);
+}
+
+static void lb_library(const GfxShader *sh, int vertex, int keep) {
+    lb_library_in(sh, vertex, keep, P.cache);
 }
 
 // A vertex or fragment variant with the graphics pipeline library off: no stage library to build ahead.
@@ -3403,13 +3420,23 @@ static void lb_stop(void) {
     LB.threads = 0;
 }
 
+static VkPipelineCache warm_cache_new(void) {
+    VkPipelineCache c = VK_NULL_HANDLE;
+    VkPipelineCacheCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+    if (vkCreatePipelineCache(P.device, &ci, NULL, &c) != VK_SUCCESS) c = VK_NULL_HANDLE;
+    return c;
+}
+
 // Preparation: one prepared variant at a time into the driver's disk cache (private shader copy, nothing kept).
+// Uses a per-worker scratch VkPipelineCache reset every 256 variants so P.cache stays unbloated and compiler memory stays bounded.
 static void lb_warm_worker(void *arg) {
     (void)arg;
     plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);   // an hour-long run must leave the PC usable
+    VkPipelineCache wcache = warm_cache_new();
+    uint32_t built_in_cache = 0;
     for (;;) {
         size_t i = (size_t)plat_inc64(&LB.next) - 1;
-        if (i >= LB.n) return;
+        if (i >= LB.n) break;
         int owned = 0;
         const GfxShader *sh = gfx_shader_load_private(LB.e[i].iid, &owned);
         int st = sh ? gfx_shader_stage(sh) : -1;
@@ -3424,14 +3451,19 @@ static void lb_warm_worker(void *arg) {
             Layout *l = compute_layout(sh, &B, &why);
             lb_unlock();
             double t0 = now_ms();
-            VkPipeline pipe = l ? compute_create(sh, l) : VK_NULL_HANDLE;
+            VkPipeline pipe = l ? compute_create_in(sh, l, wcache) : VK_NULL_HANDLE;
             if (pipe) vkDestroyPipeline(P.device, pipe, NULL);
             lb_count(2, pipe ? 3 : 2, now_ms() - t0);
         } else if (st == GFX_STAGE_VS || st == GFX_STAGE_FS) {
-            if (P.gpl) lb_library(sh, st == GFX_STAGE_VS, 0);
+            if (P.gpl) lb_library_in(sh, st == GFX_STAGE_VS, 0, wcache);
             else lb_skip_lib();
         }
         if (owned) gfx_shader_release_private(sh);
+        if (wcache && ++built_in_cache >= 256) {
+            vkDestroyPipelineCache(P.device, wcache, NULL);
+            wcache = warm_cache_new();
+            built_in_cache = 0;
+        }
         plat_mutex_lock(&LB.stat);
         uint64_t d = ++LB.done;
         LB.ok[i] = 1;
@@ -3446,6 +3478,7 @@ static void lb_warm_worker(void *arg) {
         plat_mutex_unlock(&LB.stat);
         if (d % 4000 == 0) lb_report("preparation progress");
     }
+    if (wcache) vkDestroyPipelineCache(P.device, wcache, NULL);
 }
 
 // Preparation: every variant of <dir>/shader-prepared.bin on every core but one (from 4 cores up) at below-normal priority.
@@ -3483,8 +3516,15 @@ static void lb_warm_prepared(const char *dir) {
     free(pf);
     static const uint32_t no_pr[16], no_fs[4];
     lb_state(no_pr, no_fs);
+    const char *te = cfg_get("DKB_LIB_PREBUILD_THREADS");
     int cpus = (int)plat_cpu_usable(), k = 0;
-    if (cpus >= 4) cpus--;
+    if (te && *te && atoi(te) > 0) {
+        cpus = atoi(te);
+        if (cpus > 64) cpus = 64;
+    } else {
+        if (cpus >= 4) cpus--;
+        if (vk_ctx()->props.vendorID == 0x10de && cpus > 8) cpus = 8;
+    }
     rt_log("vk_pipeline: stage library preparation on %d threads at below-normal priority", cpus);
     PlatThread *t[64];
     for (int i = 0; i < cpus && i < 64; i++)

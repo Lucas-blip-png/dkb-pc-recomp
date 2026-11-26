@@ -1304,21 +1304,64 @@ static void use_preload(void *arg) {
     plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
     uint64_t t0 = plat_now_ns();
     int n = 0, bad = 0;
-    for (uint32_t i = 0; i < pack_n; i++) {   // the packed masks; the loose files below add the masks found since
-        uint32_t u[5];
-        UseFile **slot, *x;
-        if (pack_ix[i].kind != PACK_USE) continue;
-        if (pack_ix[i].size != sizeof u || !pack_read_at(pack_ix[i].offset, u, sizeof u) || u[0] != USE_MAGIC ||
-            u[1] != USE_VERSION) {
-            bad++;
+    uint8_t *buf = NULL;
+    uint32_t buf_cap = 0;
+    for (uint32_t i = 0; i < pack_n; ) {   // the packed masks are contiguous in offset order; the loose files below add the masks found since
+        if (pack_ix[i].kind != PACK_USE) {
+            i++;
             continue;
         }
-        if (!*(slot = use_file_slot(pack_ix[i].name)) && (x = malloc(sizeof *x))) {
-            memcpy(x->name, pack_ix[i].name, 32);
-            x->next = NULL, x->m.slots = u[2], x->m.attrs = u[3], x->m.fouts = u[4];
-            *slot = x, n++;
+        if (pack_ix[i].size != 20) {
+            bad++;
+            i++;
+            continue;
         }
+        uint64_t run_off = pack_ix[i].offset;
+        uint32_t run_bytes = 20, j = i + 1;
+        while (j < pack_n && pack_ix[j].kind == PACK_USE && pack_ix[j].size == 20 &&
+               pack_ix[j].offset == run_off + run_bytes && run_bytes + 20 <= (4u << 20)) {
+            run_bytes += 20;
+            j++;
+        }
+        if (run_bytes > buf_cap) {
+            uint8_t *t = realloc(buf, run_bytes);
+            if (t) buf = t, buf_cap = run_bytes;
+        }
+        if (!buf || buf_cap < run_bytes) {
+            j = i + 1;
+            uint32_t u[5];
+            UseFile **slot, *x;
+            if (!pack_read_at(run_off, u, sizeof u) || u[0] != USE_MAGIC || u[1] != USE_VERSION) bad++;
+            else if (!*(slot = use_file_slot(pack_ix[i].name)) && (x = malloc(sizeof *x))) {
+                memcpy(x->name, pack_ix[i].name, 32);
+                x->next = NULL, x->m.slots = u[2], x->m.attrs = u[3], x->m.fouts = u[4];
+                *slot = x, n++;
+            }
+            i = j;
+            continue;
+        }
+        if (!pack_read_at(run_off, buf, run_bytes)) {
+            bad += (int)(j - i);
+            i = j;
+            continue;
+        }
+        for (uint32_t k = i; k < j; k++) {
+            uint32_t u[5];
+            UseFile **slot, *x;
+            memcpy(u, buf + (size_t)(k - i) * 20, sizeof u);
+            if (u[0] != USE_MAGIC || u[1] != USE_VERSION) {
+                bad++;
+                continue;
+            }
+            if (!*(slot = use_file_slot(pack_ix[k].name)) && (x = malloc(sizeof *x))) {
+                memcpy(x->name, pack_ix[k].name, 32);
+                x->next = NULL, x->m.slots = u[2], x->m.attrs = u[3], x->m.fouts = u[4];
+                *slot = x, n++;
+            }
+        }
+        i = j;
     }
+    free(buf);
     UsePreload st = {0};
     plat_file_list(cache_dir, ".use", use_preload_file, &st);
     n += st.n, bad += st.bad;
@@ -1814,7 +1857,10 @@ static uint32_t origin_used;
 static long origin_good;                 // bytes of whole records in the file when it was loaded
 static int origin_read;                  // the file was opened and read: only then may a torn tail be overwritten
 static PlatMutex origin_lock = PLAT_MUTEX_INIT;
+static PlatMutex origin_io = PLAT_MUTEX_INIT;
 static PlatOnce origin_once = PLAT_ONCE_INIT;
+static uint8_t *origin_pend;
+static size_t origin_pend_n, origin_pend_cap;
 
 static OriginRec *origin_slot(const uint8_t iid[32]) {
     uint32_t h;
@@ -1853,40 +1899,59 @@ static void origin_load(void *param) {
     fclose(f);
 }
 
-static void note_origin(const GfxShader *s, const uint8_t *code) {
-    if (!s || __atomic_load_n(&s->origin, __ATOMIC_RELAXED)) return;
-    uint64_t o = nvn2_origin(code);
-    if (!o) return;
+static void note_origin_val(const GfxShader *s, uint64_t o) {
+    if (!s || !o || __atomic_load_n(&s->origin, __ATOMIC_RELAXED)) return;
     __atomic_store_n(&((GfxShader *)s)->origin, o, __ATOMIC_RELAXED);
     plat_once(&origin_once, origin_load, NULL);
     plat_mutex_lock(&origin_lock);
     OriginRec *r = origin_tab && origin_used < ORIGIN_SLOTS * 3 / 4 ? origin_slot(s->iid) : NULL;
     if (r && !r->origin && cache_dir[0]) {
-        static FILE *append;   // kept open: --translate-shaders notes thousands of stages from several threads
-        static int tried;
         origin_put(s->iid, o);
-        if (!tried) {
-            tried = 1;
-            char path[PATH_CAP + 32];
-            snprintf(path, sizeof path, "%s/nvn2-origins.bin", cache_dir);
-            // Not "ab" when the file was read: a torn tail must be overwritten, not appended after. A file that could
-            // not be read (a lock, say) is only appended to, so records already in it are never overwritten, and a
-            // failed seek writes nothing rather than appending after a torn tail.
-            if (origin_read) {
-                append = fopen(path, "r+b");
-                if (append && fseek(append, origin_good, SEEK_SET)) fclose(append), append = NULL;
-            } else {
-                append = fopen(path, "ab");
-            }
+        if (origin_pend_n + 40 > origin_pend_cap) {
+            size_t cap = origin_pend_cap ? origin_pend_cap * 2 : 4096;
+            uint8_t *t = realloc(origin_pend, cap);
+            if (t) origin_pend = t, origin_pend_cap = cap;
         }
-        if (append) {
-            uint8_t buf[40];
-            memcpy(buf, s->iid, 32), memcpy(buf + 32, &o, 8);
-            fwrite(buf, 1, sizeof buf, append);
-            fflush(append);
+        if (origin_pend_n + 40 <= origin_pend_cap) {
+            memcpy(origin_pend + origin_pend_n, s->iid, 32);
+            memcpy(origin_pend + origin_pend_n + 32, &o, 8);
+            origin_pend_n += 40;
         }
     }
     plat_mutex_unlock(&origin_lock);
+}
+
+static void note_origin(const GfxShader *s, const uint8_t *code) {
+    if (s && !__atomic_load_n(&s->origin, __ATOMIC_RELAXED)) note_origin_val(s, nvn2_origin(code));
+}
+
+static void origin_flush(void) {
+    if (!cache_dir[0]) return;
+    plat_mutex_lock(&origin_io);
+    plat_mutex_lock(&origin_lock);
+    uint8_t *buf = origin_pend;
+    size_t n = origin_pend_n;
+    origin_pend = NULL, origin_pend_n = origin_pend_cap = 0;
+    int use_good = origin_read;
+    long good = origin_good;
+    if (n && use_good) origin_read = 0;
+    plat_mutex_unlock(&origin_lock);
+    if (n) {
+        char path[PATH_CAP + 32];
+        snprintf(path, sizeof path, "%s/nvn2-origins.bin", cache_dir);
+        // Not "ab" when the file was read: a torn tail must be overwritten on the first flush, not appended after.
+        FILE *f = use_good ? fopen(path, "r+b") : fopen(path, "ab");
+        if (use_good && f && fseek(f, good, SEEK_SET)) {
+            fclose(f);
+            f = NULL;
+        }
+        if (f) {
+            fwrite(buf, 1, n, f);
+            fclose(f);
+        }
+    }
+    free(buf);
+    plat_mutex_unlock(&origin_io);
 }
 
 uint64_t gfx_shader_origin(const GfxShader *s) {
@@ -2195,31 +2260,37 @@ static const GfxShader *translate(const Req *r, int stage, const uint8_t *contro
     return s;
 }
 
-// ---- background translation (gfx_shader_get_async)
-// svc_runtime_limit() workers, one per translator child. A job owns copies of the control section and the code, so the
-// guest may free or rewrite its program while the job waits. A key stays in X.waits while its job is queued or running,
-// and for good when the translation failed, so a failing shader is not sent again on every draw.
+// ---- background translation and disk loading (gfx_shader_get_async)
+// svc_runtime_limit() translation workers (one per translator child) plus LOAD_WORKERS disk-loader threads that
+// serve already-cached packed/loose shaders off the calling thread. A job owns copies of the control section and code,
+// so the guest may free or rewrite its program while the job waits. A key stays in X.waits while its job is queued or
+// running, and for good when the translation failed, so a failing shader is not sent again on every draw.
+#define LOAD_WORKERS 2
 typedef struct XJob {
     struct XJob *next;
     int stage;
     Req r;                                                 // r.c1 points into code
     uint8_t *control, *code;
     GfxShaderAnswers a;
+    uint64_t origin;
 } XJob;
 
 typedef struct XWait {
     struct XWait *next;
     uint8_t key[32];
     int failed;
+    int urgent;
 } XWait;
 
 static struct {
     PlatMutex lock;
-    PlatCond work, done;                         // done: a job finished (gfx_shader_await)
+    PlatCond work, done, load_work;              // done: a job finished (gfx_shader_await)
     XJob *head, *tail;
+    XJob *load_head, *load_tail;
     XWait *waits[256];
     int started;                                           // 1 running, -1 no thread could be created
-} X = {PLAT_MUTEX_INIT, PLAT_COND_INIT, PLAT_COND_INIT};
+    int load_started;
+} X = {PLAT_MUTEX_INIT, PLAT_COND_INIT, PLAT_COND_INIT, PLAT_COND_INIT};
 
 static volatile int64_t n_async;
 
@@ -2246,6 +2317,21 @@ static void note_failed(const uint8_t key[32]) {
     plat_mutex_unlock(&X.lock);
 }
 
+static void job_finish(XJob *j, const GfxShader *s) {
+    if (s) {
+        note_origin_val(s, j->origin);
+        ans_note(&j->r, j->stage, j->control, j->code, &j->a, s);
+    }
+    plat_mutex_lock(&X.lock);
+    XWait **w = wait_slot(j->r.key), *e = *w;
+    if (e && s) *w = e->next, free(e);
+    else if (e) e->failed = 1;
+    plat_mutex_unlock(&X.lock);
+    plat_cond_broadcast(&X.done);
+    if (s) plat_inc64(&n_async);
+    free(j->control), free(j->code), free(j);
+}
+
 static void xlate_worker(void *arg) {
     (void)arg;
     for (;;) {
@@ -2255,17 +2341,73 @@ static void xlate_worker(void *arg) {
         if (!(X.head = j->next)) X.tail = NULL;
         plat_mutex_unlock(&X.lock);
         const GfxShader *s = translate(&j->r, j->stage, j->control, j->code, &j->a);
-        plat_mutex_lock(&X.lock);
-        XWait **w = wait_slot(j->r.key), *e = *w;
-        if (e && s) *w = e->next, free(e);
-        else if (e) e->failed = 1;
-        plat_mutex_unlock(&X.lock);
-        plat_cond_broadcast(&X.done);
-        if (s) plat_inc64(&n_async);
-        free(j->control), free(j->code), free(j);
+        job_finish(j, s);
     }
     return;
 }
+
+// Caller holds X.lock.
+static void xlate_workers_start_locked(void) {
+    if (X.started) return;
+    int n = 0;
+    for (int i = 0; i < svc_runtime_limit(); i++) {
+        if (plat_thread_spawn(xlate_worker, NULL, "xlate", 0)) n++;
+    }
+    X.started = n ? 1 : -1;
+    if (n) rt_log("gfx_shader: graphics shaders are translated by %d background workers (DKB_XLATE_PROCS)", n);
+    else rt_log("gfx_shader: cannot start the translation workers; translating synchronously");
+}
+
+static void load_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        plat_mutex_lock(&X.lock);
+        while (!X.load_head) plat_cond_wait(&X.load_work, &X.lock);
+        XJob *j = X.load_head;
+        if (!(X.load_head = j->next)) X.load_tail = NULL;
+        plat_mutex_unlock(&X.lock);
+        GfxShader *loaded = request_disk_load(&j->r, j->r.key, j->r.iid);
+        if (loaded) {
+            plat_inc64(&n_hits);
+            const GfxShader *s = mem_insert(loaded);
+            job_finish(j, s);
+            continue;
+        }
+        plat_mutex_lock(&X.lock);
+        xlate_workers_start_locked();
+        XWait *e = *wait_slot(j->r.key);
+        if (X.started == 1) {
+            if (e && e->urgent) {
+                j->next = X.head;
+                X.head = j;
+                if (!X.tail) X.tail = j;
+            } else {
+                j->next = NULL;
+                if (X.tail) X.tail->next = j;
+                else X.head = j;
+                X.tail = j;
+            }
+            plat_cond_signal(&X.work);
+            plat_mutex_unlock(&X.lock);
+            continue;
+        }
+        plat_mutex_unlock(&X.lock);
+        const GfxShader *s = translate(&j->r, j->stage, j->control, j->code, &j->a);
+        job_finish(j, s);
+    }
+    return;
+}
+
+// Caller holds X.lock.
+static void load_workers_start_locked(void) {
+    if (X.load_started) return;
+    int n = 0;
+    for (int i = 0; i < LOAD_WORKERS; i++) {
+        if (plat_thread_spawn(load_worker, NULL, "shader load", 0)) n++;
+    }
+    X.load_started = n ? 1 : -1;
+}
+
 const GfxShader *gfx_shader_get_async(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,
                                       const GfxShaderAnswers *a, int *pending) {
     *pending = 0;
@@ -2288,39 +2430,54 @@ static const GfxShader *get_async_one(Req r, int stage, const uint8_t *control, 
     if (w) return *pending = !failed, NULL;
     paths();
     if (!cache_dir[0]) return fail("no cache directory", NULL);
-    if (r.final && (s = request_disk_load(&r, r.key, r.iid))) return plat_inc64(&n_hits), mem_insert(s);
 
+    uint64_t origin = nvn2_origin(code);
     XJob *j = calloc(1, sizeof *j);
     XWait *e = calloc(1, sizeof *e);
     uint8_t *ctl = malloc(CONTROL_SIZE), *cd = malloc(r.length);
     plat_mutex_lock(&X.lock);
-    if (!X.started) {
-        int n = 0;
-        for (int i = 0; i < svc_runtime_limit(); i++) {
-            if (plat_thread_spawn(xlate_worker, NULL, "xlate", 0)) n++;
-        }
-        X.started = n ? 1 : -1;
-        if (n) rt_log("gfx_shader: graphics shaders are translated by %d background workers (DKB_XLATE_PROCS)", n);
-        else rt_log("gfx_shader: cannot start the translation workers; translating synchronously");
-    }
     XWait **slot = wait_slot(r.key);
     int raced = *slot != NULL;                             // another thread queued it between the checks
-    int queued = !raced && X.started == 1 && j && e && ctl && cd;
+    GfxShader *hit = !raced ? mem_find(r.key) : NULL;
+    if (hit) {
+        plat_mutex_unlock(&X.lock);
+        free(j), free(e), free(ctl), free(cd);
+        return shader_matches_request(hit, &r) ? (plat_inc64(&n_hits), hit) : fail("cached stage contract differs from request", NULL);
+    }
+    int workers_ok = 0;
+    if (!raced) {
+        if (r.final) {
+            load_workers_start_locked();
+            workers_ok = X.load_started == 1;
+        } else {
+            xlate_workers_start_locked();
+            workers_ok = X.started == 1;
+        }
+    }
+    int queued = !raced && workers_ok && j && e && ctl && cd;
     if (queued) {
         memcpy(ctl, control, CONTROL_SIZE), memcpy(cd, code, r.length);
-        *j = (XJob){.stage = stage, .r = r, .control = ctl, .code = cd, .a = *a};
+        *j = (XJob){.stage = stage, .r = r, .control = ctl, .code = cd, .a = *a, .origin = origin};
         j->r.c1 = cd + (r.length - r.c1_len);
         memcpy(e->key, r.key, 32);
         *slot = e;
-        if (X.tail) X.tail->next = j;
-        else X.head = j;
-        X.tail = j;
-        plat_cond_signal(&X.work);
+        if (r.final) {
+            if (X.load_tail) X.load_tail->next = j;
+            else X.load_head = j;
+            X.load_tail = j;
+            plat_cond_signal(&X.load_work);
+        } else {
+            if (X.tail) X.tail->next = j;
+            else X.head = j;
+            X.tail = j;
+            plat_cond_signal(&X.work);
+        }
     }
     plat_mutex_unlock(&X.lock);
     if (queued) return *pending = 1, NULL;
     free(j), free(e), free(ctl), free(cd);
     if (raced) return *pending = 1, NULL;
+    if (r.final && (s = request_disk_load(&r, r.key, r.iid))) return plat_inc64(&n_hits), mem_insert(s);
     return translate(&r, stage, control, code, a);         // no worker or out of memory
 }
 
@@ -2332,6 +2489,17 @@ const GfxShader *gfx_shader_await(int stage, const uint8_t *control, const uint8
     if (!pending || !req_init(&r, stage, control, code, code_size, NULL, a)) return s;
     uint64_t p0 = perf_begin();   // the wait counts as the render thread's translation time
     plat_mutex_lock(&X.lock);
+    XWait *w = *wait_slot(r.key);
+    if (w) w->urgent = 1;
+    for (XJob *j = X.load_head, *prev = NULL; j; prev = j, j = j->next)
+        if (!memcmp(j->r.key, r.key, 32)) {
+            if (prev) {
+                prev->next = j->next;
+                if (X.load_tail == j) X.load_tail = prev;
+                j->next = X.load_head, X.load_head = j;
+            }
+            break;
+        }
     for (XJob *j = X.head, *prev = NULL; j; prev = j, j = j->next)
         if (!memcmp(j->r.key, r.key, 32)) {                // queued: to the front, the worker takes it next
             if (prev) {
@@ -2341,7 +2509,6 @@ const GfxShader *gfx_shader_await(int stage, const uint8_t *control, const uint8
             }
             break;
         }
-    XWait *w;
     while ((w = *wait_slot(r.key)) && !w->failed) plat_cond_wait(&X.done, &X.lock);
     plat_mutex_unlock(&X.lock);
     perf_end(PERF_XLATE, p0);
@@ -2858,21 +3025,24 @@ static PlatMutex rec_io = PLAT_MUTEX_INIT;   // the record files: appends in ord
 void gfx_shader_record_flush(int force) {
     static volatile int64_t last;
     int64_t now = (int64_t)plat_now_ms();
-    if (!RC.on || (!force && now - last < 2000)) return;
+    if (!force && now - last < 2000) return;
     last = now;
-    // The files are written outside RC.lock, which the render thread takes to record a new answer.
-    plat_mutex_lock(&rec_io);
-    plat_mutex_lock(&RC.lock);
-    Bytes ans = RC.ans, prg = RC.prg;
-    RC.ans = (Bytes){0}, RC.prg = (Bytes){0};
-    uint64_t total = RC.pairs.n, added = RC.pairs_new;
-    plat_mutex_unlock(&RC.lock);
-    if (prg.n && !rec_append(RC.prg_path, "TOTKSPRG", PRG_VERSION, 0, &prg)) rt_log("gfx_shader: cannot write %s", RC.prg_path);
-    if (ans.n && !rec_append(RC.ans_path, "TOTKSANS", ANS_VERSION, ANS_REC, &ans)) rt_log("gfx_shader: cannot write %s", RC.ans_path);
-    plat_mutex_unlock(&rec_io);
-    if (ans.n) rt_log("gfx_shader: answers: %zu new records appended (%llu new this run, %llu recorded)", ans.n / ANS_REC,
-                      (unsigned long long)added, (unsigned long long)total);
-    free(ans.p), free(prg.p);
+    if (RC.on) {
+        // The files are written outside RC.lock, which the render thread takes to record a new answer.
+        plat_mutex_lock(&rec_io);
+        plat_mutex_lock(&RC.lock);
+        Bytes ans = RC.ans, prg = RC.prg;
+        RC.ans = (Bytes){0}, RC.prg = (Bytes){0};
+        uint64_t total = RC.pairs.n, added = RC.pairs_new;
+        plat_mutex_unlock(&RC.lock);
+        if (prg.n && !rec_append(RC.prg_path, "TOTKSPRG", PRG_VERSION, 0, &prg)) rt_log("gfx_shader: cannot write %s", RC.prg_path);
+        if (ans.n && !rec_append(RC.ans_path, "TOTKSANS", ANS_VERSION, ANS_REC, &ans)) rt_log("gfx_shader: cannot write %s", RC.ans_path);
+        plat_mutex_unlock(&rec_io);
+        if (ans.n) rt_log("gfx_shader: answers: %zu new records appended (%llu new this run, %llu recorded)", ans.n / ANS_REC,
+                          (unsigned long long)added, (unsigned long long)total);
+        free(ans.p), free(prg.p);
+    }
+    origin_flush();
 }
 
 // ---- preparation from record files: the answers met in play (DKB_TEST_PREPARE_SHADERS=1) or the seed that
@@ -3181,6 +3351,7 @@ static int prepare_nvn2(const char *path, const char *dir, int threads, int proc
     rt_log("%s", msg);
     printf("%s\n", msg);
     free(p.rec), free(buf);
+    origin_flush();
     return 0;
 }
 
