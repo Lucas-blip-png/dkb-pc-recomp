@@ -2799,9 +2799,10 @@ static void mirror_mode(int discrete, uint32_t vendor) {
 #else
     // Linux: on by default, except on NVIDIA's proprietary driver. The shadow copies were chosen for amdgpu, where
     // re-protecting imported memory invalidates the driver's userptr buffer at every submit (docs/building.md). With
-    // NVIDIA's driver the pools are imported as on Windows, and the shadow sync cost more than the imports: on 3.2.0 in a
-    // level of the first save (Ryzen 7 5700, RTX 3070), 4.2 ms a frame of the submitting thread's replay. Without it the
-    // mirror check (DKB_MEMORY=verify) found no page that differed from guest memory over 9.8 million compared.
+    // NVIDIA's driver the pools are imported as on Windows, and there the shadow sync cost more than the imports: about
+    // half of the submitting thread's replay, on the frame's critical path. A CPU write still clears its page's
+    // protection through the page tables, so the write watch sees it either way. Measurements and the mirror check
+    // (DKB_MEMORY=verify) are in docs/dkb-testing.md, DKB_SHADOW.
     shadow_on = sh && *sh ? strcmp(sh, "0") != 0 : !vk_caps.nvidia_prop;
 #endif
     if (shadow_on) rt_log("mem: shadow storage: CPU-visible pools are host-visible copies of guest memory, not imports%s",
