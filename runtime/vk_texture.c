@@ -1927,7 +1927,9 @@ static void write_back(Tex *e) {
             if (image_texels(e, &g, &r, buf, 0)) storage_texels(&e->t, &g, &r, buf, 1);
             free(buf);
         }
-    e->gpu_dirty = 0;
+    // The copy followed every submitted part. A render recorded into the submission still being recorded is not among
+    // them, so the storage did not get it: the texture stays GPU-dirty for a later read (as wb_record's tag).
+    if (e->gpu_fence <= vk_sync_issued()) e->gpu_dirty = 0;
 }
 
 // Mirrored textures overlapping [addr, addr+size) that the GPU wrote since their last write-back.
@@ -2086,8 +2088,11 @@ static int wb_record(Tex *e, const Region *g, const NVNcopyRegion *r, WbPend *p)
     uint64_t seq = vk_upload_seq();
     vk_upload_end();
     free(rg);
+    // The copy goes on the queue after every submitted part. When e's newest render was recorded into the submission
+    // still being recorded (the render thread may record one between a read's look at the writer fence and this
+    // call), the copy runs before that render: tagged 0, its landing leaves the texture GPU-dirty for a later copy.
     *p = (WbPend){.e = e, .g = *g, .r = *r, .sb = sb, .sa = sa, .stg = stg, .slice = slice, .ib = ib,
-                  .gen = e->gpu_gen, .gseq = e->gpu_seq, .seq = seq};
+                  .gen = e->gpu_gen, .gseq = e->gpu_fence > vk_sync_issued() ? 0 : e->gpu_seq, .seq = seq};
     return 1;
 }
 
@@ -2097,11 +2102,15 @@ static int wb_pending(const Tex *e) {   // a copy of e's newest render is alread
     return 0;
 }
 
-// The batch holding the copy of e's newest render already on its way (the newest of its regions'); 0: none.
-static uint64_t wb_pending_seq(const Tex *e) {
+// The batch holding the copy of e's newest render already on its way (the newest of its regions'), and in *pos the
+// last array index of those regions; 0: none.
+static uint64_t wb_pending_seq(const Tex *e, int *pos) {
     uint64_t s = 0;
     for (int i = 0; i < nwbp; i++)
-        if (wbp[i].e == e && wbp[i].gseq == e->gpu_seq && wbp[i].seq > s) s = wbp[i].seq;
+        if (wbp[i].e == e && wbp[i].gseq == e->gpu_seq) {
+            if (wbp[i].seq > s) s = wbp[i].seq;
+            *pos = i;
+        }
     return s;
 }
 
@@ -2114,9 +2123,10 @@ static uint64_t wb_pending_seq(const Tex *e) {
 // for that batch alone (wb_copies, wb_land), done about when its writer is, and the copy lands with
 // vk_texture_wb_poll's checks: a CPU write to the storage after the render keeps the CPU's bytes. The read still sees
 // the render it waited for, so this changes when the copy runs, not what the CPU reads. Eglantine does the same for
-// render targets a CPU read flagged (refs/eglantine texture_cache.h BindRenderTarget, PreemtiveDownload, landed at
-// the fence by PopAsyncFlushes). A range no read hit for AHEAD_IDLE guest submissions is dropped, and ranges and
-// targets over AHEAD_MAX bytes are left to the read.
+// render targets a CPU read flagged (refs/eglantine src/video_core/texture_cache/texture_cache.h:
+// TextureCache::GetFlushArea sets ImageViewFlagBits::PreemtiveDownload on the read's view, BindRenderTarget queues
+// the download when that view is unbound, PopAsyncFlushes lands it at the fence). A range no read hit for AHEAD_IDLE
+// guest submissions is dropped, and ranges and targets over AHEAD_MAX bytes are left to the read.
 #define AHEAD_N 16
 #define AHEAD_IDLE 600
 #define AHEAD_MAX (1u << 20)
@@ -2152,7 +2162,7 @@ void vk_texture_copy_ahead(uint64_t fence) {
     if (!__atomic_load_n(&nahead, __ATOMIC_ACQUIRE)) return;
     lock();
     ahead_subs++;
-    int first = nwbp;
+    int first = nwbp, n = 0;
     Tex *hit[64];
     for (int i = 0; i < AHEAD_N && RT_KNOB_ON(wb_ahead); i++) {
         if (!ahead[i].size) continue;
@@ -2162,18 +2172,26 @@ void vk_texture_copy_ahead(uint64_t fence) {
             continue;
         }
         if (owned_dirty(ahead[i].addr, ahead[i].size, NULL) == 0) continue;
-        int n = 0;
         for (int j = owned_lower(ahead[i].addr > max_owned ? ahead[i].addr - max_owned : 0);
              j < nowned && owned[j]->pub.addr < ahead[i].addr + ahead[i].size && n < 64; j++) {
             Tex *e = owned[j];
-            if (e->gpu_dirty && e->gpu_fence == fence && e->pub.addr + e->t.L.size > ahead[i].addr &&
+            int seen = 0;
+            for (int q = 0; q < n && !seen; q++) seen = hit[q] == e;   // ranges may overlap
+            if (!seen && e->gpu_dirty && e->gpu_fence == fence && e->pub.addr + e->t.L.size > ahead[i].addr &&
                 e->t.L.size <= AHEAD_MAX && wb_queueable(e) && !wb_pending(e))
                 hit[n++] = e;
         }
-        for (int j = 0; j < n; j++) {
-            int before = nwbp;
-            if (wb_queue(hit[j]) && nwbp > before) ahead_copies++;
+    }
+    // Oldest render first, as vk_texture_write_back sorts its hits: copies of targets that share storage land in
+    // array order (vk_texture_wb_poll), and the newer render must land last.
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0 && hit[j - 1]->gpu_seq > hit[j]->gpu_seq; j--) {
+            Tex *x = hit[j];
+            hit[j] = hit[j - 1], hit[j - 1] = x;
         }
+    for (int j = 0; j < n; j++) {
+        int before = nwbp;
+        if (wb_queue(hit[j]) && nwbp > before) ahead_copies++;
     }
     int queued = nwbp > first;
     if (queued) {   // one batch number for them all, as vk_texture_write_back_async does
@@ -2216,13 +2234,17 @@ static int wb_queue(Tex *e) {
     return 1;
 }
 
-void vk_texture_write_back_async(uint64_t addr, uint64_t size) {
+int vk_texture_wb_async_on(void) {
     if (wb_async < 0) {   // DKB_WB_ASYNC: 1 (default) asynchronous, 0 waited, ab switched with DKB_AB's blocks
         wb_async = rt_knob("WB_ASYNC", "1");
         rt_log("vk: deferred-read write-backs %s", wb_async == 2 ? "asynchronous in the B blocks (DKB_AB)"
                                                     : wb_async ? "asynchronous (DKB_WB_ASYNC=1)" : "waited for");
     }
-    if (!RT_KNOB_ON(wb_async)) {
+    return RT_KNOB_ON(wb_async);
+}
+
+void vk_texture_write_back_async(uint64_t addr, uint64_t size) {
+    if (!vk_texture_wb_async_on()) {
         vk_texture_write_back(addr, size);
         return;
     }
@@ -2387,9 +2409,18 @@ static uint64_t wb_copies(Tex **hit, int k) {
                wb_unlocked == 2 ? "ab" : wb_unlocked ? "1" : "0");
     }
     int on = RT_KNOB_ON(wb_unlocked) && wb_all_queueable(hit, k), first = nwbp;
+    // With DKB_WB_AHEAD on, a hit whose newest render is already being copied (vk_texture_copy_ahead) waits for that
+    // copy instead of queueing another. Copies land in array order and the hits go oldest render first, so the copies
+    // this call stands on must sit in the array in the hits' order: a reused copy only before this call queued a new
+    // one (the new ones go after every existing copy), and only past the copy reused for the hit before it. Otherwise
+    // the hit gets its own copy, or an older hit sharing its storage could land over a newer one.
+    int reuse = on && wb_ahead > 0 && RT_KNOB_ON(wb_ahead), last = -1;
     uint64_t ahead_seq = 0;   // the newest batch holding a copy of a hit's newest render queued earlier (copy_ahead)
     for (int i = 0; i < k; i++) {
-        uint64_t s = on ? wb_pending_seq(hit[i]) : 0;
+        int pos = -1;
+        uint64_t s = reuse && nwbp == first ? wb_pending_seq(hit[i], &pos) : 0;
+        if (s && pos <= last) s = 0;
+        if (s) last = pos;
         if (s) {
             if (s > ahead_seq) ahead_seq = s;
             ahead_used++;

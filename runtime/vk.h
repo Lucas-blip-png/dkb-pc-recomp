@@ -626,6 +626,7 @@ void vk_texture_write_back(uint64_t addr, uint64_t size);   // writes those imag
 // The replay's deferred-read write-back (DKB_WB_ASYNC, default on): copies recorded and submitted without waiting,
 // written to the storage by a later vk_texture_wb_poll once they completed. DKB_WB_ASYNC=0: vk_texture_write_back.
 void vk_texture_write_back_async(uint64_t addr, uint64_t size);
+int vk_texture_wb_async_on(void);                   // DKB_WB_ASYNC: vk_texture_write_back_async does not wait
 void vk_texture_wb_poll(void);                      // finishes the asynchronous write-backs whose copies completed
 // The submitting thread, once the guest submission of value fence is on the queue: queues the copies of the targets it
 // rendered that waited reads hit lately, behind it (DKB_WB_AHEAD).

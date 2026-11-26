@@ -549,13 +549,15 @@ static void vk_be_guest_written(uint64_t addr, uint64_t size) { vk_sync_start();
 // With the replay on the submitting thread (the default) the same reads come from the game's job threads while the
 // render thread records the submission that writes the target (3.2.0, a level of the first save: three reads a frame
 // took 4.7 ms of those threads a frame, 4.1 ms of it waiting for the GPU; the 128-byte ones found their writer being
-// recorded). There the copy must follow the writer in queue order, or it would read the target before that render and
-// clear gpu_dirty for content the storage never got: a read whose writer is submitted queues the copy at once
-// (vk_texture_write_back_async puts it after every submitted part), one whose writer is still being recorded leaves
-// it to the submitting thread, which queues it once that submission is on the queue (nowait_flush). Either way the
-// copy lands at a later vk_texture_wb_poll with the asynchronous write-back's checks: a CPU write to the storage after
-// the render keeps the CPU's bytes. A read whose writer has completed still waits for its copy: on the console the
-// bytes are in memory by then.
+// recorded). There the copy is queued behind the writer the read found: a read whose writer is submitted queues the
+// copy at once (vk_texture_write_back_async puts it after every submitted part), one whose writer is still being
+// recorded leaves it to the submitting thread, which queues it once that submission is on the queue (nowait_flush).
+// The render thread may record a newer render of the target in between; that copy then runs before it, and its
+// landing leaves the target GPU-dirty (vk_texture.c wb_record), so a later copy brings that render. The copy lands at
+// a later vk_texture_wb_poll with the asynchronous write-back's checks: a CPU write to the storage after the render
+// keeps the CPU's bytes. A read whose writer has completed still waits for its copy: on the console the bytes are in
+// memory by then. Not with DKB_WB_ASYNC=0 under this replay: vk_texture_write_back_async would wait, on the
+// submitting thread in nowait_flush, so such reads wait where they are, as before.
 #define NOWAIT_MAX 4096
 #define NOWAIT_SEEN 8
 
@@ -598,16 +600,19 @@ int vk_backend_selftest(void) {
 typedef struct { uint64_t addr, size, fence; } NowaitRead;
 static PlatMutex nw_lock = PLAT_MUTEX_INIT;
 static NowaitRead *nw_reads;
-static int nw_n, nw_cap;
+static int nw_n, nw_cap;   // nw_lock
 // The synchronous replay's reads of GPU-written storage (nw_lock), [0] since the last line, [1] over the run: calls,
 // the ones that waited for their write-back and that wait, the ones that went on without a wait, and of those the ones
 // left to their writer's submission.
 static uint64_t nw_calls[2], nw_waits[2], nw_ns[2], nw_free[2], nw_after[2];
 
+static int nowait_mode(void);
+
 // The submitting thread, once its submission is on the queue (vk_sync_issued): the reads deferred to it queue their
-// copies, now behind it.
+// copies, now behind it. nw_n is read under nw_lock: a read that took the lock before this one put its entry in the
+// list, and one that takes it after sees the submission's raised issued value and queues its copy itself.
 static void nowait_flush(void) {
-    if (!__atomic_load_n(&nw_n, __ATOMIC_ACQUIRE)) return;
+    if (!nowait_mode()) return;   // never on: nothing is ever deferred
     for (;;) {
         NowaitRead take[16];
         int k = 0;
@@ -616,8 +621,7 @@ static void nowait_flush(void) {
         for (int i = 0; i < nw_n && k < 16;) {
             if (nw_reads[i].fence > issued) { i++; continue; }
             take[k++] = nw_reads[i];
-            nw_reads[i] = nw_reads[nw_n - 1];
-            __atomic_store_n(&nw_n, nw_n - 1, __ATOMIC_RELEASE);
+            nw_reads[i] = nw_reads[--nw_n];
         }
         plat_mutex_unlock(&nw_lock);
         for (int i = 0; i < k; i++) vk_texture_write_back_async(take[i].addr, take[i].size);
@@ -637,8 +641,7 @@ static void nowait_sync(uint64_t addr, uint64_t size, uint64_t f) {
             if (!n) rt_fatal("vk: out of memory (deferred guest reads)");
             nw_reads = n, nw_cap = cap;
         }
-        nw_reads[nw_n] = (NowaitRead){addr, size, f};
-        __atomic_store_n(&nw_n, nw_n + 1, __ATOMIC_RELEASE);
+        nw_reads[nw_n++] = (NowaitRead){addr, size, f};
         nw_after[0]++, nw_after[1]++;
         plat_mutex_unlock(&nw_lock);
         return;
@@ -648,14 +651,19 @@ static void nowait_sync(uint64_t addr, uint64_t size, uint64_t f) {
     vk_texture_write_back_async(addr, size);
 }
 
-static int read_nowait(uint64_t addr, uint64_t size, uint64_t f) {
-    static int on = -1;   // DKB_NX2_READ_NOWAIT: 0 (default), 1, or ab with the A/B blocks
-    int enabled = __atomic_load_n(&on, __ATOMIC_ACQUIRE);
-    if (enabled < 0) {
-        enabled = rt_game_version ? 0 : rt_knob("NX2_READ_NOWAIT", "0");
-        __atomic_store_n(&on, enabled, __ATOMIC_RELEASE);
+// DKB_NX2_READ_NOWAIT: 0 (default), 1, or 2 (ab: on in the A/B blocks' B side); Bananza only.
+static int nowait_mode(void) {
+    static int on = -1;
+    int mode = __atomic_load_n(&on, __ATOMIC_ACQUIRE);
+    if (mode < 0) {
+        mode = rt_game_version ? 0 : rt_knob("NX2_READ_NOWAIT", "0");
+        __atomic_store_n(&on, mode, __ATOMIC_RELEASE);
     }
-    if (!RT_KNOB_ON(enabled) || size > NOWAIT_MAX) return 0;
+    return mode;
+}
+
+static int read_nowait(uint64_t addr, uint64_t size, uint64_t f) {
+    if (!RT_KNOB_ON(nowait_mode()) || size > NOWAIT_MAX) return 0;
     static PlatMutex m = PLAT_MUTEX_INIT;
     static NowaitSeen seen[NOWAIT_SEEN];
     static unsigned next;
@@ -689,7 +697,9 @@ static void vk_be_guest_read(uint64_t addr, uint64_t size) {
     if (!vk_texture_cpu_stale(addr, size)) return;
     vk_sync_start();
     if (!gfx_replay_async()) {
-        uint64_t f = vk_texture_dirty_fence(addr, size);
+        // The writer's fence is looked up only with DKB_NX2_READ_NOWAIT on (it takes the texture lock); and not with
+        // DKB_WB_ASYNC=0, whose write-back would wait anyway (see above).
+        uint64_t f = RT_KNOB_ON(nowait_mode()) && vk_texture_wb_async_on() ? vk_texture_dirty_fence(addr, size) : 0;
         if (f && vk_sync_fence_done() < f && read_nowait(addr, size, f)) {
             plat_mutex_lock(&nw_lock);
             nw_calls[0]++, nw_calls[1]++, nw_free[0]++, nw_free[1]++;
