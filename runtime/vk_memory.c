@@ -1979,7 +1979,9 @@ static void shadow_sync_pool(PoolRec *r) {
     if (run) shadow_copy(r, run, hi);
 }
 
-void vk_mem_shadow_sync(void) {
+// The pools resolved since the last call take the CPU's writes. A part's sync may take several calls (vk_sync.c
+// prologue_impl); vk_mem_shadow_sync_done ends it.
+void vk_mem_shadow_sync_pools(void) {
     if (!shadow_on) return;
     uint64_t t0 = qpc();
     plat_mutex_lock(&shadow_lock);
@@ -1991,10 +1993,18 @@ void vk_mem_shadow_sync(void) {
         s_syncs += (uint64_t)nstouch;
         nstouch = 0;
     }
-    s_syncs_done++;   // the part this sync precedes is submitted next: its writes are skipped from the next sync on
     s_ticks += qpc() - t0;
     plat_mutex_unlock(&shadow_lock);
 }
+
+void vk_mem_shadow_sync_done(void) {
+    if (!shadow_on) return;
+    plat_mutex_lock(&shadow_lock);
+    s_syncs_done++;   // the part this sync precedes is submitted next: its writes are skipped from the next sync on
+    plat_mutex_unlock(&shadow_lock);
+}
+
+void vk_mem_shadow_sync(void) { vk_mem_shadow_sync_pools(), vk_mem_shadow_sync_done(); }
 
 void vk_mem_gpu_pending(uint64_t addr, uint64_t size) {
     if (!shadow_on || !size) return;
