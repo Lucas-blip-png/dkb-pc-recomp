@@ -2954,6 +2954,25 @@ static void par_room(VkExec *ex) {
         if (depth < 1 || depth > PAR_DEFER_DEPTH) depth = 2;
     }
     while (pd_n >= depth) par_settle_front(ex, 1);
+    // DKB_PAR_HELD_WAIT (on by default; 0 as before; ab alternates with the A/B blocks): the slices of the pass ends
+    // still held are recorded before this pass is collected, and the pass ends stay held. A slice begins only once the
+    // slices of the passes before its own are recorded (par_ready), so with two pass ends held, a pass collected while
+    // the earlier one's slices were still being recorded had its own slices begin only after its end, while the walk
+    // went on, and thin stray triangles crossed the scene (#479, on RADV with an RX 7900 XTX and an RX 6800 XT).
+    // Waiting here, a pass's slices begin while it is collected, as with one pass end held. Center of the Divide
+    // (3.2.0, 4 replay threads), a recorded walk with a shot every second: no run of 17 had a stray triangle, against
+    // 6 of 11 without the wait; the replay took 8.0 ms a frame against 7.8.
+    static int held_wait = -1;
+    if (held_wait < 0) {
+        held_wait = rt_knob("PAR_HELD_WAIT", "1");
+        rt_log("vk: a sliced pass is collected %s (DKB_PAR_HELD_WAIT=%s)",
+               held_wait == 1   ? "once the held pass ends' slices are recorded"
+               : held_wait == 2 ? "once the held slices are recorded, in the B blocks"
+                                : "while held slices may still be recorded",
+               held_wait == 2 ? "ab" : held_wait ? "1" : "0");
+    }
+    if (pd_n && RT_KNOB_ON(held_wait))
+        par_wait_range(PDQ[pd_head].s0, PDQ[(pd_head + pd_n - 1) % PAR_DEFER_DEPTH].s1, kern_now_ns());
     if (pd_n && (PC.nslices + PAR_PASS_SLICES > PAR_MAX_SLICES || PC.nops > PAR_MAX_OPS / 2)) par_settle_all(ex);
     if (pd_n) return;
     if (par_unmerged) vk_exec_draw_slices_end(par_nworkers + 1), par_unmerged = 0;
