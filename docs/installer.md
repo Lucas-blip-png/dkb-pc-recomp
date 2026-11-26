@@ -298,7 +298,7 @@ and with `DKB_LAUNCHER_LOG` set it shows no window: its messages go to that file
 older, downgrade, offline, API fallback, mismatching digests), the download (good, tampered, truncated, interrupted,
 too long, cancelled), the unpack (good, members leaving the folder, wrong version, damaged zip), the switch of versions
 (confirmed, failed, slow start), the launcher's replacement and the window's settings, all with an injected opener and
-no network. `python -m installer.gui --selftest --shots DIR` draws the home and update screens in both languages.
+no network. `python -m installer.gui --selftest --shots DIR` draws the home and update screens in every language.
 `tests/launcher_e2e.py` (`launcher-e2e` in `tools/test.py`, tier 1: Windows, MSYS2 clang, under a minute) runs
 against a fake release server on 127.0.0.1. It does the first install of a release A with a `-DDKB_LAUNCHER_TEST`
 launcher for real, with a stub in place of Python and a junk `winhttp.dll` and `bcrypt.dll` beside the launcher,
@@ -392,9 +392,10 @@ python -m installer --base FILE --update FILE --keys FILE --lang CODE --dest DIR
   the merged RomFS (15.9 GiB) before it deletes them. The check computes the exact figure.
 - Window (`python -m installer.gui`, `installer/gui.py` draws, `installer/guilogic.py` decides): form, step list with
   progress, space line, collapsible log, Cancel (Ctrl+Break to the CLI's process group, then it waits for the exit),
-  finish screen with Open folder. English or Russian, chosen from the Windows display language, switchable in the
-  window; every sentence is an id in `installer/text/<en|ru>.json`. A folder with `totk-install.json` needs only the
-  folder. `--selftest [--shots DIR]` builds every screen in both languages and closes itself.
+  finish screen with Open folder. English, Russian or Chinese, chosen from the Windows display language (its primary
+  language id, so both Chinese ids select the Simplified catalog), switchable in the window; every sentence is an id
+  in `installer/text/<en|ru|zh>.json`. A folder with `totk-install.json` needs only the folder.
+  `--selftest [--shots DIR]` builds every screen in each language and closes itself.
   The look follows the in-game menu (bark browns, banana yellow, cream text, red and green accents) as a ttk theme on
   clam with a drawn banana-bunch header; no game art or fonts. Text colours keep at least 4.5:1 on their background.
 - `tests/installer_gui_test.py`: event model, form, catalogs, cancel, the self-closing window and one end-to-end run
