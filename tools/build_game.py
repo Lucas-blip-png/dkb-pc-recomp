@@ -909,6 +909,10 @@ def main():
             args.runtime_lib = None
         GEN_FLAGS.append('-march=' + march)
         RT_FLAGS.append('-march=' + march)
+        # FPCR.FZ is MXCSR.DAZ on x86 (rt_fpcr_sync), so the FP compares in simd_fp.h leave the flush to the hardware.
+        # Clang assumes IEEE denormals unless told otherwise and would fold `a == 0.0f` into a bit test that ignores DAZ.
+        GEN_FLAGS.append('-fdenormal-fp-math=dynamic')
+        RT_FLAGS.append('-fdenormal-fp-math=dynamic')
     if args.sysroot and not WIN:
         # Every compile and the link: the game then needs no newer glibc than the sysroot's (the Steam Runtime's)
         sysroot = ['--target=x86_64-linux-gnu', cmd_arg(f'--sysroot={flag_path(args.sysroot.resolve())}')]

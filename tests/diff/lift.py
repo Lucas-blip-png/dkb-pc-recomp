@@ -163,7 +163,7 @@ def main():
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
     ap.add_argument('--show', type=int, default=40)
-    ap.add_argument('--cflags', default='-march=x86-64-v3' if platform.machine().lower() in ('amd64', 'x86_64') else '')
+    ap.add_argument('--cflags', default='-march=x86-64-v3 -fdenormal-fp-math=dynamic' if platform.machine().lower() in ('amd64', 'x86_64') else '')
     ap.add_argument('--coverage', action='store_true',
                     help='only lift every distinct word and list the rejected ones (capstone "?" = undecodable data)')
     args = ap.parse_args()

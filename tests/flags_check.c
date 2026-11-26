@@ -93,6 +93,35 @@ static void one(uint64_t a, uint64_t b) {
     }
 }
 
+// ARM's FCMP NZCV from the operands' bits alone, with FPCR.FZ flushing denormal inputs to signed zero: the reference
+// check_fcmp compares against, so a host compare that skips the flush (the compiler folding a == 0.0f into a bit test
+// that ignores MXCSR.DAZ) cannot agree with itself and pass.
+static uint64_t ref_nzcv(uint64_t a, uint64_t b, int dbl, int fz) {
+    uint64_t sgn = dbl ? 1ull << 63 : 1ull << 31, expm = dbl ? 0x7ff0000000000000ull : 0x7f800000u;
+    uint64_t man = dbl ? 0x000fffffffffffffull : 0x007fffffu;
+    if (((a & expm) == expm && (a & man)) || ((b & expm) == expm && (b & man))) return 0x30000000ull;
+    if (fz && !(a & expm)) a &= sgn;
+    if (fz && !(b & expm)) b &= sgn;
+    int64_t ka = (a & ~sgn) ? ((a & sgn) ? -(int64_t)(a & ~sgn) : (int64_t)a) : 0;   // +0 and -0 are equal
+    int64_t kb = (b & ~sgn) ? ((b & sgn) ? -(int64_t)(b & ~sgn) : (int64_t)b) : 0;
+    return ka == kb ? 0x60000000ull : ka < kb ? 0x80000000ull : 0x20000000ull;
+}
+
+// FCMP Sn, #0.0 then B.EQ as the lifter emits it, the operand read through memory so the compiler cannot see its value
+// (the case that went wrong: x86 with FZ on and Sn a denormal gave EQ 0, ARM gives 1).
+__attribute__((noinline)) static int fold_eq_s(Cpu *c, const volatile uint32_t *m) {
+    c->v[1] = (u128)*m;
+    Flags F = {0};
+    F.nz = cmp_s(c, VSF32(1), 0.0f);
+    return fc_nz(&F, CC_EQ);
+}
+__attribute__((noinline)) static int fold_eq_d(Cpu *c, const volatile uint64_t *m) {
+    c->v[1] = (u128)*m;
+    Flags F = {0};
+    F.nz = cmp_d(c, VSF64(1), 0.0);
+    return fc_nz(&F, CC_EQ);
+}
+
 #if !defined(__aarch64__)
 static void check_fcmp(void) {
     static const uint32_t f32[] = {
@@ -113,6 +142,7 @@ static void check_fcmp(void) {
             for (size_t j = 0; j < sizeof f32 / sizeof *f32; j++) {
                 float a = fv_s(f32[i]), b = fv_s(f32[j]);
                 c.nzcv = cmp_s(&c, a, b);
+                if (c.nzcv != ref_nzcv(f32[i], f32[j], 0, fz)) bad("fcmp_s ref", fz, f32[i], f32[j], c.nzcv, ref_nzcv(f32[i], f32[j], 0, fz));
                 Flags f = {0};
                 ffcmp_s(&f, &c, a, b);
                 for (int cc = 0; cc < 14; cc++)
@@ -125,6 +155,7 @@ static void check_fcmp(void) {
             for (size_t j = 0; j < sizeof f64 / sizeof *f64; j++) {
                 double a = fv_d(f64[i]), b = fv_d(f64[j]);
                 c.nzcv = cmp_d(&c, a, b);
+                if (c.nzcv != ref_nzcv(f64[i], f64[j], 1, fz)) bad("fcmp_d ref", fz, f64[i], f64[j], c.nzcv, ref_nzcv(f64[i], f64[j], 1, fz));
                 Flags f = {0};
                 ffcmp_d(&f, &c, a, b);
                 for (int cc = 0; cc < 14; cc++)
@@ -132,6 +163,20 @@ static void check_fcmp(void) {
                         bad("fcmp_d", cc, f64[i], f64[j], fc_fcmp_d(&f, cc), cond(&c, cc));
                 if (fnz_fcmp_d(&f) != c.nzcv) bad("fcmp_d packed", fz, f64[i], f64[j], fnz_fcmp_d(&f), c.nzcv);
             }
+        }
+    }
+    for (int fz = 0; fz < 2; fz++) {
+        Cpu c = {.fpcr = fz ? FPCR_FZ : 0};
+        rt_fpcr_sync(&c);
+        for (size_t i = 0; i < sizeof f32 / sizeof *f32; i++) {
+            volatile uint32_t m = f32[i];
+            int want = ref_nzcv(f32[i], 0, 0, fz) == 0x60000000ull;
+            if (fold_eq_s(&c, &m) != want) bad("fcmp_s #0 b.eq", fz, f32[i], 0, !want, want);
+        }
+        for (size_t i = 0; i < sizeof f64 / sizeof *f64; i++) {
+            volatile uint64_t m = f64[i];
+            int want = ref_nzcv(f64[i], 0, 1, fz) == 0x60000000ull;
+            if (fold_eq_d(&c, &m) != want) bad("fcmp_d #0 b.eq", fz, f64[i], 0, !want, want);
         }
     }
     Cpu reset = {0};

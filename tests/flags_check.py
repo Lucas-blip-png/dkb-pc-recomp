@@ -3,6 +3,7 @@
 Usage: flags_check.py
 """
 import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +21,9 @@ def main():
     if os.name == 'nt' and MSYS_BIN.exists():
         env['PATH'] = str(MSYS_BIN) + os.pathsep + env.get('PATH', '')
     for opt in ('-O0', '-O1'):
-        subprocess.check_call([compiler(), opt, '-fno-strict-aliasing', '-I', str(ROOT / 'runtime'),
+        # As tools/build_game.py compiles on x86: -march for the FP lowering, and denormals left to MXCSR.DAZ.
+        x86 = ['-march=x86-64-v3', '-fdenormal-fp-math=dynamic'] if platform.machine().lower() in ('amd64', 'x86_64') else []
+        subprocess.check_call([compiler(), opt, *x86, '-fno-strict-aliasing', '-I', str(ROOT / 'runtime'),
                                str(ROOT / 'tests' / 'flags_check.c'), '-o', str(exe)], env=env)
         print(opt, end=': ', flush=True)
         if subprocess.run([str(exe)], env=env).returncode:

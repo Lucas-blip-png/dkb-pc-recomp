@@ -344,7 +344,7 @@ def main():
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
     ap.add_argument('--show', type=int, default=20)
     ap.add_argument('--patches', type=Path, help='patch table whose spin waits are emitted with their gates')
-    ap.add_argument('--cflags', default='-march=x86-64-v3' if platform.machine().lower() in ('amd64', 'x86_64') else '')
+    ap.add_argument('--cflags', default='-march=x86-64-v3 -fdenormal-fp-math=dynamic' if platform.machine().lower() in ('amd64', 'x86_64') else '')
     args = ap.parse_args()
     r = random.Random(args.seed)
     t0 = time.time()
