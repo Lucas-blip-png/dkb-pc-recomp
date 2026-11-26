@@ -33,6 +33,7 @@
 #include "vk.h"
 #include "vk_exec.h"
 #include "vk_spec.h"
+#include "vk_dlssg.h"
 
 #include "dlss_mv_spv.h"
 
@@ -66,7 +67,11 @@ typedef NgxResult (*PfnParams)(NgxParam **);
 typedef NgxResult (*PfnCreate)(VkDevice, VkCommandBuffer, uint32_t, NgxParam *, NgxHandle **);
 typedef NgxResult (*PfnEvaluate)(VkCommandBuffer, const NgxHandle *, const NgxParam *, void *);
 typedef NgxResult (*PfnRelease)(NgxHandle *);
-typedef NgxResult (*PfnShutdown)(VkDevice);
+// _nvngx.dll's Shutdown1 takes a second argument that NVIDIA's header leaves out (its static library passes it): an
+// out pointer through which the DLL stores how many NGX instances are left, unconditionally. Called with the
+// device alone it writes through whatever the second argument register holds (dkb.exe crashed in the D3D12 one
+// writing address 0), so every call passes the address of a scratch value.
+typedef NgxResult (*PfnShutdown)(VkDevice, unsigned *left);
 typedef NgxResult (*PfnDestroy)(NgxParam *);
 
 static HMODULE dll;
@@ -172,34 +177,52 @@ int vk_dlss_wanted(void) {
     return w && state >= 0;
 }
 
+// The driver's _nvngx.dll, found through the registry keys NVIDIA's header-only loader reads. Shared with the D3D12
+// side (vk_dlssg.cpp), so it is loaded once and never freed.
+void *vk_ngx_core(const char **why) {
+    static int tried;
+    static HMODULE core;
+    static const char *missing;
+    if (!tried) {
+        tried = 1;
+        wchar_t path[MAX_PATH + 16];
+        static const wchar_t *const keys[][2] = {
+            {L"System\\CurrentControlSet\\Services\\nvlddmkm\\Parameters\\NGXCore", L"NGXPath"},
+            {L"System\\CurrentControlSet\\Services\\nvlddmkm\\NGXCore", L"NGXPath"},
+            {L"SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore", L"FullPath"},
+        };
+        int found = 0;
+        for (int i = 0; i < 3 && !found; i++) {
+            DWORD size = MAX_PATH * sizeof(wchar_t);
+            found = RegGetValueW(HKEY_LOCAL_MACHINE, keys[i][0], keys[i][1], RRF_RT_REG_SZ, NULL, path, &size) == ERROR_SUCCESS;
+        }
+        if (!found) {
+            missing = "no NVIDIA NGX core in the registry (no NVIDIA driver?)";
+        } else {
+            wcscat(path, L"\\_nvngx.dll");
+            core = LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+            if (!core) missing = "the driver's _nvngx.dll does not load";
+        }
+    }
+    if (!core && why) *why = missing;
+    return core;
+}
+
 // Before the instance: finds _nvngx.dll and asks it for its extensions.
 static int load(void) {
     static int tried;
     if (tried) return dll != NULL;
     tried = 1;
-    wchar_t path[MAX_PATH + 16];
-    static const wchar_t *const keys[][2] = {
-        {L"System\\CurrentControlSet\\Services\\nvlddmkm\\Parameters\\NGXCore", L"NGXPath"},
-        {L"System\\CurrentControlSet\\Services\\nvlddmkm\\NGXCore", L"NGXPath"},
-        {L"SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore", L"FullPath"},
-    };
-    int found = 0;
-    for (int i = 0; i < 3 && !found; i++) {
-        DWORD size = MAX_PATH * sizeof(wchar_t);
-        found = RegGetValueW(HKEY_LOCAL_MACHINE, keys[i][0], keys[i][1], RRF_RT_REG_SZ, NULL, path, &size) == ERROR_SUCCESS;
-    }
-    if (!found) return fail("no NVIDIA NGX core in the registry (no NVIDIA driver?)");
-    wcscat(path, L"\\_nvngx.dll");
-    dll = LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
-    if (!dll) return fail("the driver's _nvngx.dll does not load");
+    const char *why = NULL;
+    dll = vk_ngx_core(&why);
+    if (!dll) return fail(why);
 #define GET(v, name) (v = (__typeof__(v))(void *)GetProcAddress(dll, name)) != NULL
     PfnRequired required;
     if (!(GET(required, "NVSDK_NGX_VULKAN_RequiredExtensions") && GET(ngx_init, "NVSDK_NGX_VULKAN_Init_Ext2") &&
           GET(ngx_caps, "NVSDK_NGX_VULKAN_GetCapabilityParameters") && GET(ngx_alloc, "NVSDK_NGX_VULKAN_AllocateParameters") &&
           GET(ngx_create, "NVSDK_NGX_VULKAN_CreateFeature1") && GET(ngx_eval, "NVSDK_NGX_VULKAN_EvaluateFeature") &&
           GET(ngx_release, "NVSDK_NGX_VULKAN_ReleaseFeature"))) {
-        FreeLibrary(dll);
-        dll = NULL;
+        dll = NULL;   // the core stays loaded for vk_dlssg.cpp
         return fail("_nvngx.dll lacks an export DLSS needs");
     }
     GET(ngx_shutdown, "NVSDK_NGX_VULKAN_Shutdown1");
@@ -268,7 +291,8 @@ static int init(void) {
     if (why[0]) {
         if (params && ngx_destroy) ngx_destroy(params);
         params = NULL;
-        if (ngx_shutdown) ngx_shutdown(c->device);
+        unsigned left;
+        if (ngx_shutdown) ngx_shutdown(c->device, &left);
         return fail(why);
     }
     state = 1;
@@ -300,7 +324,7 @@ static VkImageView view(VkImage img, VkFormat fmt, VkImageUsageFlags usage) {
 }
 
 // A w x h image of fmt in GENERAL, cleared to zero by commands recorded into cb (through the recorder, before it
-// drains). extra: usage besides sampling and the clear (storage for the motion vectors).
+// drains). extra: usage besides sampling and the clear (storage and copies for the motion vectors).
 static int zero_image(VkCommandBuffer cb, VkFormat fmt, uint32_t w, uint32_t h, VkImageUsageFlags extra, VkImage *img,
                       VmaAllocation *a, VkImageView *v) {
     VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt,
@@ -342,7 +366,9 @@ static void full_barrier(VkCommandBuffer cb) {
 static int inputs_images(VkCommandBuffer cb, uint32_t ow, uint32_t oh) {
     if (F.mv && F.depth && F.iw == ow && F.ih == oh) return 1;
     drop_inputs();
-    if (!zero_image(cb, VK_FORMAT_R16G16_SFLOAT, ow, oh, VK_IMAGE_USAGE_STORAGE_BIT, &F.mv, &F.mv_a, &F.mv_v) ||
+    // the motion vectors are also copied out, into the image DLSS Frame Generation shares with D3D12 (vk_dlssg.cpp)
+    if (!zero_image(cb, VK_FORMAT_R16G16_SFLOAT, ow, oh, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                    &F.mv, &F.mv_a, &F.mv_v) ||
         !zero_image(cb, VK_FORMAT_R32_SFLOAT, ow, oh, 0, &F.depth, &F.depth_a, &F.depth_v)) {
         drop_inputs();
         return 0;
@@ -767,6 +793,7 @@ int vk_temporal_inputs(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t ow, 
     t->temporal = temporal;
     if (temporal) {
         for (int i = 0; i < 16; i++) t->vp[i] = S.cam[12 + i], t->proj[i] = S.cam[28 + i];
+        memcpy(t->view, S.cam, sizeof t->view);
         double ci[16], m[16];
         if (prev && !fresh && !camera_cut(S.cam, J.prev_view) && inv4(t->vp, ci)) {
             for (int r = 0; r < 4; r++)
@@ -776,6 +803,7 @@ int vk_temporal_inputs(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t ow, 
                     m[r * 4 + k] = v;
                 }
             mv_pass(cb, zv, m, w, h, t->jx, t->jy);
+            memcpy(t->to_prev, m, sizeof t->to_prev);
             t->reset = 0;
         } else {
             mv_zero(cb);
@@ -973,7 +1001,8 @@ void vk_dlss_release(void) {   // device idle
         mv_release(c->device);
 #ifdef _WIN32
         if (params && ngx_destroy) ngx_destroy(params);
-        if (params && ngx_shutdown) ngx_shutdown(c->device);
+        unsigned left;
+        if (params && ngx_shutdown) ngx_shutdown(c->device, &left);
 #endif
     }
     memset(&F, 0, sizeof F);
@@ -991,6 +1020,7 @@ void vk_dlss_release(void) {   // device idle
 #ifndef _WIN32   // NGX is Windows-only here
 
 int vk_dlss_wanted(void) { return 0; }
+void *vk_ngx_core(const char **why) { if (why) *why = "NGX is Windows only"; return NULL; }
 int vk_dlss_instance_exts(const char **out, int max) { (void)out, (void)max; return 0; }
 int vk_dlss_device_exts(const char **out, int max) { (void)out, (void)max; return 0; }
 int vk_dlss_record(VkCommandBuffer cb, uint64_t fence, const VkTexImage *in, const VkTexImage *out) {

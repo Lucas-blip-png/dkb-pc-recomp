@@ -1082,10 +1082,12 @@ class Fsr4(Step):
 
 
 class Dlss(Step):
-    """NVIDIA's nvngx_dlss.dll next to dkb.exe (installer/dlss.py), only when the user asked for it and accepted NVIDIA's
-    license of the pinned release: --dlss accept (the window asks first), recorded as state['dlss'] = that release so a
-    later setup keeps it. --dlss off stops fetching it; files already there stay. A failed download warns and setup
-    goes on; the next setup tries again. DLSS needs an NVIDIA RTX GPU; setup does not check for one."""
+    """NVIDIA's nvngx_dlss.dll and nvngx_dlssg.dll next to dkb.exe (installer/dlss.py), only when the user asked for
+    them and accepted NVIDIA's license of the pinned release: --dlss accept (the window asks first), recorded as
+    state['dlss'] = that release so a later setup keeps them. --dlss off stops fetching them; files already there stay.
+    A failed download warns and setup goes on; the next setup tries again. DLSS needs an NVIDIA RTX GPU; setup does not
+    check for one. After a fetch it says whether the dlssg_for_sm86 enabler, which RTX 20 and 30 cards need for DLSS
+    Frame Generation and the user installs by hand, is in place (dlss.enabler)."""
     id = 'dkb_dlss'
 
     def key(self, ctx):
@@ -1119,6 +1121,12 @@ class Dlss(Step):
         except dlss.FetchError as error:
             ctx.reporter.warning('warn.dkb_dlss_failed', file=error.args[0], detail=error.args[1])
             return {'files': False}   # not current: the next setup tries again
+        state = dlss.enabler(ctx.dest)
+        warn = {'version_proxy': 'warn.dkb_dlssg_version_proxy', 'incomplete': 'warn.dkb_dlssg_incomplete'}.get(state)
+        if warn:
+            ctx.reporter.warning(warn)
+        else:
+            ctx.reporter.log(f'dlss: dlssg_for_sm86 enabler {state} (needed for DLSS Frame Generation on RTX 20 and 30 only)')
         return {'files': True, 'tag': dlss.TAG}
 
 

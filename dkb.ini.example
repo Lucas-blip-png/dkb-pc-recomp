@@ -236,11 +236,13 @@
 # The Display tab of the settings menu (F1) has this as Frame generation.
 # frame_gen = off
 # What makes the frames of frame_gen = 2x (experimental): builtin, the default, from the picture alone; fsr3, AMD FSR 3.1's
-# frame interpolation, which also uses the scene's depth and motion. fsr3 runs only while a temporal upscaler (upscaler =
+# frame interpolation, which also uses the scene's depth and motion; dlss (Windows only), NVIDIA's DLSS Frame Generation
+# from the same inputs, on an RTX 40 or newer, or on an RTX 20 or 30 with the dlssg_for_sm86 enabler beside dkb.exe
+# (docs/dkb-framegen.md). fsr3 and dlss run only while a temporal upscaler (upscaler =
 # dlss, fsr3 or fsr4) draws the 3D below the output size, at 2x, with the display's refresh over twice the game's rate; a
-# frame it cannot make (no depth or motion, a camera cut, the first frame after a gap) gets the built-in one, and the other
-# frame_gen values always use the built-in one, as does the game's own HDR picture (hdr_native), which AMD's passes do
-# not take. AMD's passes are given the picture copied before the game draws its HUD, so the HUD is not moved with the
+# frame they cannot make (no depth or motion, a camera cut, the first frame after a gap) gets the built-in one, and the other
+# frame_gen values always use the built-in one, as does the game's own HDR picture (hdr_native), which neither
+# takes. Both are given the picture copied before the game draws its HUD, so the HUD is not moved with the
 # scene. Changes while the game runs take effect at once.
 # The menu's Frame generation made by row shows while frame_gen is 2x.
 # frame_gen_by = builtin

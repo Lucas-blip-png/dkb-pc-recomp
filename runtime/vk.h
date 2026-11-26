@@ -162,6 +162,13 @@ typedef struct {
     // it (the game's format, a sampled view in GENERAL), for the frame without its HUD; NULL: none
     VkImageView picture;
     uint32_t picture_w, picture_h;
+    // for DLSS Frame Generation (vk_dlssg.cpp, frame_gen_by = dlss), as VkTemporalIn has them: the motion image
+    // itself (it is copied), the scene's projection and view, and this frame's clip space to the last one's
+    // (has_to_prev 0: no frame before)
+    VkImage motion_image;
+    float proj[16], view[12];
+    double to_prev[16];
+    int has_to_prev;
 } VkFiInputs;
 // CRT filters on the present (vk_crt.c): with DKB_CRT_FILTER = lottes_grille|lottes_tv|hyllian|zfast, records the
 // filter over the rectangle {x, y, w, h} of the swapchain image dst, which is in TRANSFER_DST and holds the scaled SDR
@@ -670,6 +677,8 @@ typedef struct {
     uint32_t depth_level, depth_layer;
     float proj[16];
     double vp[16];                // for vk_temporal_done
+    float view[12];               // the rows of the scene's view matrix [R | t]
+    double to_prev[16];           // this frame's clip space to the last one's, row-major; meaningful when reset is 0
 } VkTemporalIn;
 int vk_temporal_inputs(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t ow, uint32_t oh, int fresh, VkTemporalIn *t);
 void vk_temporal_done(const VkTemporalIn *t, uint32_t w, uint32_t h, uint32_t ow);

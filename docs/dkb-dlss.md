@@ -104,14 +104,17 @@ for a forward depth). A frame without a scene at the input size, or an unsupport
 upscaler; `dkb.log` gets `fsr3:` lines (the passes ready, the sizes, a summary every 1800 frames, and
 `fsr3: N frames, T temporal, R resets` at exit). RCAS is not used. The temporal inputs do not depend on NGX, so `fsr3` also builds and runs off Windows; only DLSS is Windows-only.
 
-## Fetching `nvngx_dlss.dll` with the setup
+## Fetching `nvngx_dlss.dll` and `nvngx_dlssg.dll` with the setup
 
 Tick "Download NVIDIA DLSS from NVIDIA" in the Bananza setup window (or run `python -m installer ... --dlss accept`; NVIDIA RTX only,
 the setup does not check for the GPU). The window first shows NVIDIA's license (`LICENSE.txt` of the pinned release of
 <https://github.com/NVIDIA/DLSS>, fetched from there) and fetches nothing unless you accept it. The step (`installer/dlss.py`,
-`dkb_dlss`) then downloads `lib/Windows_x86_64/rel/nvngx_dlss.dll` at the tag, checks it against its pinned size and SHA-256, and puts it
-next to `dkb.exe` with the license (`NVIDIA-DLSS-license.txt`). A later setup keeps it; `--dlss off` (untick) stops fetching it and leaves
-the file. A failed download only warns. Windows only, as DLSS here.
+`dkb_dlss`) then downloads `lib/Windows_x86_64/rel/nvngx_dlss.dll` and `lib/Windows_x86_64/rel/nvngx_dlssg.dll` (DLSS Frame
+Generation's, [dkb-framegen.md](dkb-framegen.md)) at the tag, checks each against its pinned size and SHA-256, and puts them next to
+`dkb.exe` with the license (`NVIDIA-DLSS-license.txt`). A later setup keeps them; `--dlss off` (untick) stops fetching them and leaves
+the files. A failed download only warns. After a fetch the step also says whether the dlssg_for_sm86 enabler is next to `dkb.exe`
+(`dlss.enabler`): it warns when the enabler is incomplete or uses `version.dll`, which `dkb.exe` never loads. Setup never fetches the
+enabler. Windows only, as DLSS here.
 
 ## FSR 4 (`upscaler = fsr4`, issue #270)
 

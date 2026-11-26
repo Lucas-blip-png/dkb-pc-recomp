@@ -1,0 +1,18 @@
+#version 450
+// The scene's depth as a colour image, for DLSS Frame Generation through D3D12 (runtime/vk_dlssg.cpp record). NGX's
+// D3D12 side reads the depth from an image both APIs share, and a depth image cannot be one of those here: Vulkan copies
+// no depth aspect into a colour image, and the game's depth format (D24 or D32, with or without stencil) is whatever
+// the scene was drawn with. So each texel's depth value, 0 at the near plane, is written as it is into an R32_SFLOAT
+// image of the render size.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D depth;
+layout(binding = 1, r32f) uniform writeonly image2D out_depth;
+layout(push_constant) uniform P {
+    uvec2 size;   // the render size: the part of the depth the scene covers
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(uvec2(p), pc.size))) return;
+    imageStore(out_depth, p, vec4(texelFetch(depth, p, 0).r, 0.0, 0.0, 0.0));
+}

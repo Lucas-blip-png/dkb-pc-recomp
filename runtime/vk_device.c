@@ -10,6 +10,7 @@
 #include "cfg.h"
 #include "host.h"
 #include "vk.h"
+#include "vk_dlssg.h"
 #include "platform/platform.h"
 
 static VkCtx g_vk;
@@ -373,7 +374,7 @@ static int create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[49];   // one extra slot for FSR 4's optional compute derivatives
+    const char *ext[51];   // one extra slot for FSR 4's optional compute derivatives
     uint32_t n_ext = 0;
     for (size_t i = 0; i < sizeof k_required_ext / sizeof *k_required_ext; i++) ext[n_ext++] = k_required_ext[i];
     // A portability implementation (MoltenVK) requires this one on every device it exposes; no feature of it is needed
@@ -515,6 +516,15 @@ static int create_device(void) {
                 ext[n_ext++] = dx[i];
         }
     }
+    // An NVIDIA GPU on Windows: external memory and semaphores from Win32 handles, which DLSS Frame Generation through
+    // D3D12 shares its images and fence with (vk_dlssg.cpp). Asked for always: frame_gen_by can be changed while the
+    // game runs, and the device is made once.
+    int dlssg_interop = 0;
+    if (g_vk.props.vendorID == 0x10de) {
+        vk_dlssg_device_exts(ep, ne, ext, &n_ext, 50);
+        dlssg_interop = listed(ext, n_ext, "VK_KHR_external_memory_win32") &&
+                        listed(ext, n_ext, "VK_KHR_external_semaphore_win32");
+    }
     free(ep);
     const VkPhysicalDeviceFeatures *h = &c->f2.features;
     const char *miss = NULL;
@@ -587,10 +597,16 @@ static int create_device(void) {
     if (g_vk.xfer_family != g_vk.gfx_family) vkGetDeviceQueue(g_vk.device, g_vk.xfer_family, 0, &g_vk.xfer_queue);
     else { g_vk.xfer_queue = g_vk.gfx_queue; g_vk.xfer_shared = 1; }
 
-    VkPhysicalDeviceExternalMemoryHostPropertiesEXT emh = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+    VkPhysicalDeviceIDProperties idp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+    VkPhysicalDeviceExternalMemoryHostPropertiesEXT emh = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT,
+                                                           .pNext = &idp};
     VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &emh};
     vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
     g_vk.min_imported_host_alignment = (uint32_t)emh.minImportedHostPointerAlignment;
+    // DLSS Frame Generation through D3D12 (vk_dlssg.cpp): with the enabler beside dkb.exe, one log line on whether its
+    // D3D12 side answers on this device's adapter
+    vk_dlssg_probe(idp.deviceLUID, idp.deviceLUIDValid, g_vk.props.vendorID);
+    vk_dlssg_device(g_vk.phys, g_vk.device, g_vk.gfx_family, idp.deviceLUID, idp.deviceLUIDValid, dlssg_interop);
     vk_caps_init(&g_vk);
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.device, .instance = g_vk.instance,
