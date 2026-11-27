@@ -374,7 +374,8 @@ static int create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[51];   // one extra slot for FSR 4's optional compute derivatives
+    enum { EXT_MAX = 51 };   // the last slot stays free for FSR 4's optional compute derivatives
+    const char *ext[EXT_MAX];
     uint32_t n_ext = 0;
     for (size_t i = 0; i < sizeof k_required_ext / sizeof *k_required_ext; i++) ext[n_ext++] = k_required_ext[i];
     // A portability implementation (MoltenVK) requires this one on every device it exposes; no feature of it is needed
@@ -521,7 +522,7 @@ static int create_device(void) {
     // game runs, and the device is made once.
     int dlssg_interop = 0;
     if (g_vk.props.vendorID == 0x10de) {
-        vk_dlssg_device_exts(ep, ne, ext, &n_ext, 50);
+        vk_dlssg_device_exts(ep, ne, ext, &n_ext, EXT_MAX - 1);
         dlssg_interop = listed(ext, n_ext, "VK_KHR_external_memory_win32") &&
                         listed(ext, n_ext, "VK_KHR_external_semaphore_win32");
     }

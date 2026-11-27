@@ -178,34 +178,40 @@ int vk_dlss_wanted(void) {
 }
 
 // The driver's _nvngx.dll, found through the registry keys NVIDIA's header-only loader reads. Shared with the D3D12
-// side (vk_dlssg.cpp), so it is loaded once and never freed.
-void *vk_ngx_core(const char **why) {
-    static int tried;
-    static HMODULE core;
-    static const char *missing;
-    if (!tried) {
-        tried = 1;
-        wchar_t path[MAX_PATH + 16];
-        static const wchar_t *const keys[][2] = {
-            {L"System\\CurrentControlSet\\Services\\nvlddmkm\\Parameters\\NGXCore", L"NGXPath"},
-            {L"System\\CurrentControlSet\\Services\\nvlddmkm\\NGXCore", L"NGXPath"},
-            {L"SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore", L"FullPath"},
-        };
-        int found = 0;
-        for (int i = 0; i < 3 && !found; i++) {
-            DWORD size = MAX_PATH * sizeof(wchar_t);
-            found = RegGetValueW(HKEY_LOCAL_MACHINE, keys[i][0], keys[i][1], RRF_RT_REG_SZ, NULL, path, &size) == ERROR_SUCCESS;
-        }
-        if (!found) {
-            missing = "no NVIDIA NGX core in the registry (no NVIDIA driver?)";
-        } else {
-            wcscat(path, L"\\_nvngx.dll");
-            core = LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
-            if (!core) missing = "the driver's _nvngx.dll does not load";
-        }
+// side (vk_dlssg.cpp), so it is loaded once and never freed. Today its callers run one at a time (load at instance
+// creation and vk_dlssg_probe at device creation on the boot thread, vk_dlssg.cpp start_on later on the present
+// thread); the one-time init keeps it right for any caller.
+static HMODULE ngx_core;
+static const char *ngx_core_missing;
+
+static BOOL CALLBACK find_ngx_core(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+    (void)once, (void)param, (void)ctx;
+    wchar_t path[MAX_PATH + 16];
+    static const wchar_t *const keys[][2] = {
+        {L"System\\CurrentControlSet\\Services\\nvlddmkm\\Parameters\\NGXCore", L"NGXPath"},
+        {L"System\\CurrentControlSet\\Services\\nvlddmkm\\NGXCore", L"NGXPath"},
+        {L"SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore", L"FullPath"},
+    };
+    int found = 0;
+    for (int i = 0; i < 3 && !found; i++) {
+        DWORD size = MAX_PATH * sizeof(wchar_t);
+        found = RegGetValueW(HKEY_LOCAL_MACHINE, keys[i][0], keys[i][1], RRF_RT_REG_SZ, NULL, path, &size) == ERROR_SUCCESS;
     }
-    if (!core && why) *why = missing;
-    return core;
+    if (!found) {
+        ngx_core_missing = "no NVIDIA NGX core in the registry (no NVIDIA driver?)";
+    } else {
+        wcscat(path, L"\\_nvngx.dll");
+        ngx_core = LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (!ngx_core) ngx_core_missing = "the driver's _nvngx.dll does not load";
+    }
+    return TRUE;   // a missing core is an answer too: it is not looked for again
+}
+
+void *vk_ngx_core(const char **why) {
+    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+    InitOnceExecuteOnce(&once, find_ngx_core, NULL, NULL);
+    if (!ngx_core && why) *why = ngx_core_missing;
+    return ngx_core;
 }
 
 // Before the instance: finds _nvngx.dll and asks it for its extensions.

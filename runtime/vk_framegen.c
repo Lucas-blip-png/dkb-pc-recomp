@@ -747,7 +747,7 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4], co
     // With frame_gen_by = dlss, NVIDIA's DLSS Frame Generation makes it from the same inputs (vk_dlssg.cpp). The flow
     // and synthesis passes below then run only for a frame neither made (the luma above always runs: the built-in
     // flow of a later frame reads it).
-    int by_amd = 0, by_nv = 0;
+    int by_amd = 0, by_nv = 0, nv_hudless = 0;
     const int dlss = vk_dlssg_wanted();
     // AMD's and NVIDIA's passes take an SDR picture, so a PQ history (the game's own HDR picture) goes to the built-in
     // interpolation.
@@ -781,7 +781,7 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4], co
                 memcpy(set.proj, fi->proj, sizeof set.proj);
                 memcpy(set.view, fi->view, sizeof set.view);
                 by_nv = vk_dlssg_record(cb, &set);
-                if (by_nv && set.hudless) S.hudless_used++;
+                nv_hudless = set.hudless != VK_NULL_HANDLE;   // counted once the made frame is sent, below
             } else {
                 by_amd = vk_fsr3fi_generate(cb, fi, S.hist[cur].view, S.hist[prev].view, hl, hl_prev, S.made.view, uw, uh);
                 if (by_amd && hl) S.hudless_used++;
@@ -792,7 +792,6 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4], co
                           "makes this frame", 0);
     }
     if (by_amd) S.made_n++, S.by_fsr++;
-    if (by_nv) S.made_n++, S.by_dlss++;
     if (any_made && !by_amd && !by_nv) {
         in[0] = (VkDescriptorImageInfo){S.nearest, S.luma_img[prev].view, G};
         in[1] = (VkDescriptorImageInfo){S.nearest, S.luma_img[cur].view, G};
@@ -831,7 +830,8 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4], co
     vkResetFences(c->device, 1, &S.fence);
     vk_queue_lock();
     // a DLSS frame: the D3D12 work and the copy of the made frame go out behind this submission
-    VkResult r = by_nv ? vk_dlssg_submit(c->gfx_queue, &si, S.fence) : vkQueueSubmit2(c->gfx_queue, 1, &si, S.fence);
+    int nv_made = 0;
+    VkResult r = by_nv ? vk_dlssg_submit(c->gfx_queue, &si, S.fence, &nv_made) : vkQueueSubmit2(c->gfx_queue, 1, &si, S.fence);
     vk_queue_unlock();
     if (r != VK_SUCCESS) {
         vk_device_fault_report(r);
@@ -847,6 +847,11 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4], co
     S.shown = cur;
     S.cur = prev;
     S.have_prev = 1;
+    if (by_nv && nv_made) S.made_n++, S.by_dlss++, S.hudless_used += nv_hudless;
+    // A DLSS frame whose D3D12 work or copy back did not go out left the made frame as it was, and the built-in
+    // passes did not run for it: the caller presents the game's frame alone (vk_backend.c), as for a frame with
+    // nothing to blend from. The route is given up then, so the next frames are the built-in interpolation's.
+    if (by_nv && !nv_made) return 0;
     if (!frames) return blend;
     // Auto and 3x to 8x: to the display thread, which starts with the first set
     plat_mutex_lock(&D.mu);

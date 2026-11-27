@@ -60,9 +60,10 @@ int vk_dlssg_record(VkCommandBuffer cb, const VkDlssgSet *set);
 // Under vk_queue_lock, in place of the caller's vkQueueSubmit2(queue, 1, si, fence) for the command buffer the set was
 // recorded into: that submission (fence signalled after it, as the caller's own) signals the shared fence too, the
 // D3D12 queue waits for it, evaluates and signals it again, and a second Vulkan submission waits for that and copies
-// the made frame into set->out. Returns the first submission's result. A failure after it gives the route up (out
-// keeps what it held). Without a recorded set it is the caller's submission alone.
-VkResult vk_dlssg_submit(VkQueue queue, const VkSubmitInfo2 *si, VkFence fence);
+// the made frame into set->out. Returns the first submission's result. *made: 1 when the copy into set->out was sent.
+// A failure on the way gives the route up and leaves *made 0 (out keeps what it held), so the caller shows the game's
+// frame alone. Without a recorded set it is the caller's submission alone.
+VkResult vk_dlssg_submit(VkQueue queue, const VkSubmitInfo2 *si, VkFence fence, int *made);
 // The feature, the shared images and the D3D12 device let go: Vulkan device idle, before it goes (vk_present.c).
 void vk_dlssg_release(void);
 

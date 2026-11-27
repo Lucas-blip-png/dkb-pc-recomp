@@ -33,6 +33,7 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 
+#include <atomic>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -215,8 +216,8 @@ struct State {
     VkPhysicalDeviceMemoryProperties mem{};
     LUID luid{};
     bool luid_ok = false, interop = false;
-    // started at the first set; dead: given up for the run (one log line says why)
-    bool started = false, ok = false, dead = false, ngx_on = false;
+    // started at the first set (given up: g_dead below)
+    bool started = false, ok = false, ngx_on = false;
     Ngx f{};
     ID3D12Device *device = nullptr;
     ID3D12CommandQueue *queue = nullptr;
@@ -251,9 +252,15 @@ struct State {
 };
 State S;
 
+// Given up for the run (one log line says why). Apart from State because two threads read it: the replay thread asks
+// vk_dlssg_wanted whether to note the inputs (vk_fsr3fi.c inputs_wanted), while the present thread gives up. It
+// guards no other data, so a relaxed load is enough.
+std::atomic<bool> g_dead{false};
+
 void give_up(const char *why) {
-    if (!S.dead) rt_log("dlssg: %s; DLSS Frame Generation is off for this run, the built-in interpolation makes the frames", why);
-    S.dead = true, S.ok = false;
+    if (!g_dead.exchange(true, std::memory_order_relaxed))
+        rt_log("dlssg: %s; DLSS Frame Generation is off for this run, the built-in interpolation makes the frames", why);
+    S.ok = false;
 }
 
 // The D3D12 queue past value (a CPU wait, 5 s at most). False when it is not: nothing it may still use is reset or
@@ -406,8 +413,10 @@ void vk_full_barrier(VkCommandBuffer cb) {
 
 // How a shared image changes hands in a Vulkan command buffer. Between the two APIs each rests in GENERAL, owned by
 // the external API: Vulkan acquires it before its writes or reads and releases it after them, so what one API wrote
-// is defined to the other. A fresh image (UNDEFINED, never shared yet) is only made GENERAL on an acquire.
-enum Hand { ACQUIRE, RELEASE };
+// is defined to the other. A fresh image (UNDEFINED, never shared yet) is only made GENERAL on an acquire. RELEASE
+// follows writes, which it makes available; RELEASE_READ follows reads alone, which leave nothing to make available,
+// so it orders them before D3D12's next use by its stage only.
+enum Hand { ACQUIRE, RELEASE, RELEASE_READ };
 void vk_hand(VkCommandBuffer cb, Shared *const *ims, int n, Hand hand) {
     VkImageMemoryBarrier2 b[5];
     for (int i = 0; i < n; i++) {
@@ -425,7 +434,7 @@ void vk_hand(VkCommandBuffer cb, Shared *const *ims, int n, Hand hand) {
                 x.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL, x.dstQueueFamilyIndex = S.family;
             }
         } else {
-            x.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+            x.srcAccessMask = hand == RELEASE ? VK_ACCESS_2_MEMORY_WRITE_BIT : VK_ACCESS_2_NONE;
             x.srcQueueFamilyIndex = S.family, x.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
         }
         x.image = ims[i]->image;
@@ -448,8 +457,8 @@ ID3D12GraphicsCommandList *next_list(int &slot) {
     slot = S.slot;
     S.slot = (S.slot + 1) % kSlots;
     if (!d3d12_wait(S.list_done[slot])) return nullptr;
-    S.alloc[slot]->Reset();
-    S.list[slot]->Reset(S.alloc[slot], nullptr);
+    if (FAILED(S.alloc[slot]->Reset()) || FAILED(S.list[slot]->Reset(S.alloc[slot], nullptr)))
+        return give_up("a D3D12 command list could not be reset"), nullptr;
     return S.list[slot];
 }
 
@@ -833,7 +842,7 @@ extern "C" void vk_dlssg_device(VkPhysicalDevice phys, VkDevice device, uint32_t
 }
 
 extern "C" int vk_dlssg_wanted(void) {
-    return S.vk && !S.dead && !strcmp(cfg_value("DKB_FRAME_GEN_BY"), "dlss");
+    return S.vk && !g_dead.load(std::memory_order_relaxed) && !strcmp(cfg_value("DKB_FRAME_GEN_BY"), "dlss");
 }
 
 extern "C" int vk_dlssg_record(VkCommandBuffer cb, const VkDlssgSet *set) {
@@ -954,54 +963,65 @@ extern "C" int vk_dlssg_record(VkCommandBuffer cb, const VkDlssgSet *set) {
     return 1;
 }
 
-extern "C" VkResult vk_dlssg_submit(VkQueue queue, const VkSubmitInfo2 *si, VkFence fence) {
+extern "C" VkResult vk_dlssg_submit(VkQueue queue, const VkSubmitInfo2 *si, VkFence fence, int *made) {
+    *made = 0;
     if (!S.pending) return vkQueueSubmit2(queue, 1, si, fence);
     S.pending = false;
     const int slot = S.pending_slot;
+    // The frame goes out without the shared fence's signal when the copy back cannot follow it: D3D12 would wait for
+    // that signal for ever. The made frame is then not written, and the caller shows the game's frame alone.
+    VkSemaphoreSubmitInfo sigs[8];   // the caller's signals and the shared fence's
+    if (si->signalSemaphoreInfoCount >= sizeof sigs / sizeof *sigs) {
+        give_up("the frame's submission signals more semaphores than the route has room for");
+        return vkQueueSubmit2(queue, 1, si, fence);
+    }
     // the copy back, recorded first (its buffer free again: its last run done)
     VkCommandBuffer cb = S.back[slot];
-    bool back_ok = true;
     if (S.back_done[slot]) {
         VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
         wi.semaphoreCount = 1, wi.pSemaphores = &S.back_sem, wi.pValues = &S.back_done[slot];
-        back_ok = vkWaitSemaphores(S.vk, &wi, 5000000000ull) == VK_SUCCESS;
+        if (vkWaitSemaphores(S.vk, &wi, 5000000000ull) != VK_SUCCESS) {
+            give_up("the copy back of an earlier frame did not finish in 5 s");
+            return vkQueueSubmit2(queue, 1, si, fence);
+        }
     }
-    if (back_ok) {
-        vkResetCommandPool(S.vk, S.pool[slot], 0);
-        VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(cb, &bi);
-        Shared *outs[1] = {&S.out};
-        vk_full_barrier(cb);   // the made frame's earlier reads (its last present) before the copy writes it
-        vk_hand(cb, outs, 1, ACQUIRE);
-        copy(cb, S.out.image, S.pending_out, S.out.w, S.out.h);
-        vk_hand(cb, outs, 1, RELEASE);
-        vk_full_barrier(cb);
-        back_ok = vkEndCommandBuffer(cb) == VK_SUCCESS;
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkResetCommandPool(S.vk, S.pool[slot], 0) != VK_SUCCESS || vkBeginCommandBuffer(cb, &bi) != VK_SUCCESS) {
+        give_up("the copy back's command buffer could not be begun");
+        return vkQueueSubmit2(queue, 1, si, fence);
     }
-    if (!back_ok) {   // the frame goes out without its signal: D3D12 would wait for it for ever
-        give_up("the copy back of an earlier frame did not finish in 5 s");
+    Shared *outs[1] = {&S.out};
+    vk_full_barrier(cb);   // the made frame's earlier reads (its last present) before the copy writes it
+    vk_hand(cb, outs, 1, ACQUIRE);
+    copy(cb, S.out.image, S.pending_out, S.out.w, S.out.h);
+    vk_hand(cb, outs, 1, RELEASE_READ);   // the copy only read the shared output
+    vk_full_barrier(cb);
+    if (vkEndCommandBuffer(cb) != VK_SUCCESS) {
+        give_up("the copy back's command buffer could not be ended");
         return vkQueueSubmit2(queue, 1, si, fence);
     }
     // the frame's own submission, which signals the shared fence at v_in after it
     const uint64_t v_in = S.fence_value + 1;
     VkSemaphoreSubmitInfo sig = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     sig.semaphore = S.shared_sem, sig.value = v_in, sig.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    VkSemaphoreSubmitInfo sigs[8];
     VkSubmitInfo2 own = *si;
-    uint32_t ns = own.signalSemaphoreInfoCount < 7 ? own.signalSemaphoreInfoCount : 7;
+    uint32_t ns = own.signalSemaphoreInfoCount;
     for (uint32_t i = 0; i < ns; i++) sigs[i] = own.pSignalSemaphoreInfos[i];
     sigs[ns++] = sig;
     own.signalSemaphoreInfoCount = ns, own.pSignalSemaphoreInfos = sigs;
     VkResult r = vkQueueSubmit2(queue, 1, &own, fence);
     if (r != VK_SUCCESS) return r;   // the caller reports it and turns frame generation off
     S.fence_value = v_in;
-    S.queue->Wait(S.fence, v_in);
+    // The D3D12 side. A refused wait leaves the list unrun (the slot's last run is still what list_done says). A
+    // refused signal leaves v_out never reached: the copy back, which would wait on it, is not sent, and
+    // vk_dlssg_release waits for v_out, then leaves the objects the list may still use to the process's end.
+    if (FAILED(S.queue->Wait(S.fence, v_in))) return give_up("the D3D12 queue refused to wait for the frame"), VK_SUCCESS;
     ID3D12CommandList *l = S.list[slot];
     S.queue->ExecuteCommandLists(1, &l);
     const uint64_t v_out = ++S.fence_value;
-    S.queue->Signal(S.fence, v_out);
     S.list_done[slot] = v_out;
+    if (FAILED(S.queue->Signal(S.fence, v_out))) return give_up("the D3D12 queue refused to signal the made frame"), VK_SUCCESS;
     // the copy back, behind the D3D12 work
     VkSemaphoreSubmitInfo wait = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     wait.semaphore = S.shared_sem, wait.value = v_out, wait.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -1020,6 +1040,7 @@ extern "C" VkResult vk_dlssg_submit(VkQueue queue, const VkSubmitInfo2 *si, VkFe
         give_up(line);
     } else {
         S.back_done[slot] = ++S.back_value;
+        *made = 1;
     }
     return VK_SUCCESS;
 }
@@ -1029,11 +1050,13 @@ extern "C" void vk_dlssg_release(void) {
     if (S.started && !d3d12_wait(S.fence_value)) {
         rt_log("dlssg: the D3D12 queue stayed busy at the release: its objects are left to the process's end");
         S = State{};
+        g_dead.store(false, std::memory_order_relaxed);
         return;
     }
     teardown();
     if (S.started) rt_log("dlssg: let go");
     S = State{};
+    g_dead.store(false, std::memory_order_relaxed);
 }
 
 #else
@@ -1054,7 +1077,8 @@ extern "C" int vk_dlssg_record(VkCommandBuffer cb, const VkDlssgSet *set) {
     (void)cb, (void)set;
     return 0;
 }
-extern "C" VkResult vk_dlssg_submit(VkQueue queue, const VkSubmitInfo2 *si, VkFence fence) {
+extern "C" VkResult vk_dlssg_submit(VkQueue queue, const VkSubmitInfo2 *si, VkFence fence, int *made) {
+    *made = 0;
     return vkQueueSubmit2(queue, 1, si, fence);
 }
 extern "C" void vk_dlssg_release(void) {}
