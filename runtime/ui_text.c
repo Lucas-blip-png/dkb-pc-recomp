@@ -121,6 +121,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_PERF_COUNTER] = "Counter",
     // printf format of the overlay line in FPS mode: the frame rate
     [UI_PERF_LINE_FPS] = "%.0f fps",
+    [UI_PERF_LINE_FPS_FG] = "%.0f fps (%.0f) FG",
     // the small label beside the number in Counter mode
     [UI_PERF_FPS_LABEL] = "FPS",
     [UI_MENU_RESOLUTION_GROUP] = "Resolution",
@@ -463,7 +464,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_RESET_CONFIRM] = "Reset every setting to its default?", [UI_MENU_RESET_YES] = "Reset",
     [UI_MENU_RESET_NO] = "Cancel",
 
-    [UI_MENU_OV_FPS] = "%.0f FPS", [UI_MENU_OV_FRAME_MS] = "%.1f ms", [UI_MENU_OV_GAME_PCT] = "game %.0f%%",
+    [UI_MENU_OV_FPS] = "%.0f FPS", [UI_MENU_OV_FPS_FG] = "%.0f (%.0f) FG", [UI_MENU_OV_FRAME_MS] = "%.1f ms", [UI_MENU_OV_GAME_PCT] = "game %.0f%%",
     [UI_MENU_OV_MAX_MS] = "max %.1f ms",
     [UI_MENU_OV_GPU] = "GPU", [UI_MENU_OV_CPU] = "CPU", [UI_MENU_OV_RAM] = "RAM", [UI_MENU_OV_VRAM] = "VRAM",
     [UI_MENU_OV_TEMP] = "Temperature", [UI_MENU_OV_POWER] = "Power", [UI_MENU_OV_CLOCK] = "Clock",
@@ -564,6 +565,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_PERF_OFF] = "Выкл.", [UI_MENU_PERF_FPS] = "FPS", [UI_MENU_PERF_FULL] = "Полный", [UI_MENU_PERF_BREAKDOWN] = "Разбивка",
     [UI_MENU_PERF_COUNTER] = "Счётчик",
     [UI_PERF_LINE_FPS] = "%.0f к/с",
+    [UI_PERF_LINE_FPS_FG] = "%.0f к/с (%.0f) FG",
     [UI_PERF_FPS_LABEL] = "к/с",
     [UI_MENU_RESOLUTION_GROUP] = "Разрешение",
     [UI_MENU_DISPLAY_OUTPUT] = "Вывод изображения",
@@ -922,7 +924,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_RESET_CONFIRM] = "Сбросить все настройки к значениям по умолчанию?", [UI_MENU_RESET_YES] = "Сбросить",
     [UI_MENU_RESET_NO] = "Отмена",
 
-    [UI_MENU_OV_FPS] = "%.0f FPS", [UI_MENU_OV_FRAME_MS] = "%.1f мс", [UI_MENU_OV_GAME_PCT] = "игра %.0f%%",
+    [UI_MENU_OV_FPS] = "%.0f FPS", [UI_MENU_OV_FPS_FG] = "%.0f (%.0f) FG", [UI_MENU_OV_FRAME_MS] = "%.1f мс", [UI_MENU_OV_GAME_PCT] = "игра %.0f%%",
     [UI_MENU_OV_MAX_MS] = "макс. %.1f мс",
     [UI_MENU_OV_GPU] = "GPU", [UI_MENU_OV_CPU] = "ЦП", [UI_MENU_OV_RAM] = "ОЗУ", [UI_MENU_OV_VRAM] = "Видеопамять",
     [UI_MENU_OV_TEMP] = "Температура", [UI_MENU_OV_POWER] = "Мощность", [UI_MENU_OV_CLOCK] = "Частота",

@@ -1453,6 +1453,19 @@ static void perf_gpu_once(const MenuTarget *t) {
                     (float)(vram >> 20));
 }
 
+extern "C" uint64_t vk_fg_made_total(void);
+
+// Made frames shown a second (vk_framegen.c), over the last half second or more; 0 while frame generation makes none.
+// The overlay then shows the frames on screen (the game's plus the made ones) with the game's own in brackets.
+static double fg_made_rate(uint64_t now) {
+    static uint64_t t0, n0;
+    static double rate;
+    uint64_t n = vk_fg_made_total();
+    if (!t0 || now - t0 > 2000000000ull) t0 = now, n0 = n, rate = 0;   // first call, or a stall: start again
+    else if (now - t0 >= 500000000ull) rate = (double)(n - n0) * 1e9 / (double)(now - t0), t0 = now, n0 = n;
+    return rate >= 1 ? rate : 0;
+}
+
 static void perf_tick(uint64_t now, const MenuTarget *t) {
     if (cfg_version() != g_perf_ver) {
         g_perf_ver = cfg_version();
@@ -1474,8 +1487,10 @@ static void perf_tick(uint64_t now, const MenuTarget *t) {
         g_perf_frames++;
         if (d > g_perf_max_ns) g_perf_max_ns = d;
         if (g_perf_win_ns >= 500000000ull) {
-            snprintf(g_perf_text, sizeof g_perf_text, g_perf_mode == 4 ? "%.0f" : menu_text(UI_PERF_LINE_FPS),
-                     g_perf_frames * 1e9 / g_perf_win_ns);
+            double fps = g_perf_frames * 1e9 / g_perf_win_ns, made = fg_made_rate(now);
+            if (g_perf_mode == 4) snprintf(g_perf_text, sizeof g_perf_text, "%.0f", fps + made);
+            else if (made > 0) snprintf(g_perf_text, sizeof g_perf_text, menu_text(UI_PERF_LINE_FPS_FG), fps + made, fps);
+            else snprintf(g_perf_text, sizeof g_perf_text, menu_text(UI_PERF_LINE_FPS), fps);
             g_perf_win_ns = g_perf_max_ns = 0;
             g_perf_frames = 0;
         }
@@ -1494,8 +1509,9 @@ static float perf_text_w(UiTextId fmt, float v) {
 }
 
 // A fixed column as wide as the widest of the formats (with their samples) and labels given.
-static void perf_column(const char *id, const PerfCol *cols, int n, const UiTextId *labels = nullptr, int nl = 0) {
-    float w = ImGui::CalcTextSize(menu_text(UI_MENU_OV_NONE)).x;
+static void perf_column(const char *id, const PerfCol *cols, int n, const UiTextId *labels = nullptr, int nl = 0,
+                        float min_w = 0) {
+    float w = fmaxf(min_w, ImGui::CalcTextSize(menu_text(UI_MENU_OV_NONE)).x);
     for (int i = 0; i < n; i++) w = fmaxf(w, perf_text_w(cols[i].fmt, cols[i].sample));
     for (int i = 0; i < nl; i++) w = fmaxf(w, ImGui::CalcTextSize(menu_text(labels[i])).x);
     ImGui::TableSetupColumn(id, ImGuiTableColumnFlags_WidthFixed, w);
@@ -1632,7 +1648,10 @@ static void perf_full_draw(const MenuTarget *t, float scale) {
         static const PerfCol c2[] = {{UI_MENU_OV_FMT_TEMP, 188}, {UI_MENU_OV_FMT_GB_OF, 888.8f}, {UI_MENU_OV_MAX_MS, 8888.8f}};
         static const PerfCol c3[] = {{UI_MENU_OV_FMT_POWER, 888}, {UI_MENU_OV_FMT_MHZ, 8888}, {UI_MENU_OV_GAME_PCT, 100},
                                      {UI_MENU_OV_GAME_GB, 888.8f}};
-        perf_column("##c0", c0, 1, labels, 4);
+        char fgb[64];   // the frame row with frame generation: "888 (888) FG", two numbers, so measured here
+        snprintf(fgb, sizeof fgb, menu_text(UI_MENU_OV_FPS_FG), 888.0, 888.0);
+        const double made = fg_made_rate(plat_now_ns());
+        perf_column("##c0", c0, 1, labels, 4, made > 0 ? ImGui::CalcTextSize(fgb).x : 0);
         perf_column("##c1", c1, 3);
         perf_column("##c2", c2, 3);
         perf_column("##c3", c3, 4);
@@ -1654,7 +1673,8 @@ static void perf_full_draw(const MenuTarget *t, float scale) {
         perf_cell(UI_MENU_OV_GAME_GB, perf_gb(s.ram_game_mb));
         ImGui::TableNextColumn();   // the frame row: no label, the rate in its place
         char b[64];
-        snprintf(b, sizeof b, menu_text(UI_MENU_OV_FPS), s.fps);
+        if (made > 0) snprintf(b, sizeof b, menu_text(UI_MENU_OV_FPS_FG), s.fps + made, (double)s.fps);
+        else snprintf(b, sizeof b, menu_text(UI_MENU_OV_FPS), s.fps);
         ImGui::TextColored(fps_c, "%s", b);
         perf_cell(UI_MENU_OV_FRAME_MS, s.frame_ms_avg);
         perf_cell(UI_MENU_OV_MAX_MS, s.frame_ms_max);
