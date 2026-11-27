@@ -40,9 +40,17 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_SPLASH_TIP_TABS] = "In the settings, Q and E switch between the tabs.",
     [UI_MENU_PAD_DEVICE] = "Controller Device",
     [UI_MENU_PAD_DEVICE_DESC] = "Choose which controller to use. Changes take effect immediately.\n\n"
-        "Newly connected controllers take over automatically. If the active controller disconnects, another available controller takes over.\n\n"
-        "Manual choices apply immediately and are saved for startup. Auto starts with the first available controller. Later connections can still take over.\n\n"
+        "With Co-op off, newly connected controllers can take over Player 1. If the active controller disconnects, another available controller takes over.\n\n"
+        "Manual choices apply immediately. Single-player and co-op save separate Player 1 assignments. "
+        "Auto starts with an available controller.\n\n"
         "Keyboard and mouse remain available.",
+    [UI_MENU_COOP] = "Co-op",
+    [UI_MENU_COOP_DESC] = "On: a second connected controller can play as Player 2.\n\n"
+        "Off: a newly connected controller can take over as Player 1. Reconnect a controller that is already connected, or select it under Controller Device.",
+    [UI_MENU_PAD2_DEVICE] = "Player 2 Controller",
+    [UI_MENU_PAD2_DEVICE_DESC] = "Auto uses an available controller. A manual assignment reserves that controller for Player 2 "
+        "when another controller can play as Player 1. Player 1 has priority if both assignments name the same controller.",
+    [UI_MENU_PAD2_NEEDS_COOP] = "Requires Co-op",
     [UI_MENU_PAD_SHORTCUTS] = "Controller shortcuts",
     [UI_MENU_PAD_SHORTCUTS_DESC] = "On: Plus + Minus or Guide/Home opens settings, L3 + R3 steps the performance overlay.\n\nOff: the controller has no shortcuts and every button goes to the game (useful on Steam Deck, whose own shortcuts use these buttons). Keyboard F1 still opens settings.",
     [UI_MENU_PAD_FULLSCREEN_HOLD] = "Fullscreen hold shortcut",

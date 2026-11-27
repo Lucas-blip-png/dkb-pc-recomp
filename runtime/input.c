@@ -497,6 +497,27 @@ static SDL_Gamepad *open_pad_locked(uint32_t id) {
     return opened;
 }
 
+static SDL_Gamepad *open_next_pad_locked(const InputPadDevice *devices, int count, uint32_t tried,
+                                         uint32_t excluded) {
+    for (int i = 0; i < count; i++) {
+        uint32_t id = devices[i].id;
+        if (id == tried || id == excluded) continue;
+        SDL_Gamepad *next = open_pad_locked(id);
+        if (next) return next;
+    }
+    return NULL;
+}
+
+// Keep a working Player 1. If it is temporarily occupying the saved Player 2 device, try every spare.
+static SDL_Gamepad *open_pad1_locked(const InputPadDevice *devices, int count, uint32_t wanted,
+                                    uint32_t current, uint32_t reserved) {
+    SDL_Gamepad *next = wanted ? open_pad_locked(wanted) : NULL;
+    if (next || (current && current != reserved)) return next;
+    next = open_next_pad_locked(devices, count, wanted, reserved);
+    if (!next && !current && reserved) next = open_pad_locked(reserved);
+    return next;
+}
+
 int input_pad_devices(InputPadDevice **devices) {
     plat_mutex_lock(&lock);
     if (!state) start();
@@ -556,6 +577,7 @@ static int pad_hd_claimed(void) { return 0; }
 static SDL_Gamepad *pad2;
 static int pad2_east_a;
 static uint64_t pad2_next_scan;
+static unsigned pad2_config_seen;
 
 // Under lock. Stop any remaining player 2 vibration before this gamepad changes roles.
 static void pad2_release(void) {
@@ -571,23 +593,22 @@ static void pad2_release(void) {
 // disconnections fall back, and an explicit preference applies at startup or when changed by the user.
 static void scan_pads(void) {
     pad_device_seen = cfg_version();
-    const char *preferred = cfg_value("DKB_PAD_DEVICE");
+    const int coop = cfg_bool("DKB_COOP");
+    const char *preferred = cfg_value(coop ? "DKB_COOP_PAD_DEVICE" : "DKB_PAD_DEVICE");
     InputPadDevice *devices;
     int n = devices_locked(&devices);
     uint32_t current = pad && SDL_GamepadConnected(pad) ? SDL_GetGamepadID(pad) : 0;
     if (!n && current) { free(devices); return; }   // do not interpret a failed snapshot as a topology change
-    pad_selection.keep = cfg_bool("DKB_COOP");   // a second gamepad joins as player 2 instead of taking player 1 over
-    uint32_t wanted = input_pad_choose(&pad_selection, devices, n, preferred, current);
+    pad_selection.keep = coop;
+    uint32_t wanted = input_pad_choose(&pad_selection, devices, n, preferred,
+                                      coop ? cfg_value("DKB_PAD2_DEVICE") : "auto", current);
     if (current && current == wanted) { free(devices); return; }
-    SDL_Gamepad *next = wanted ? open_pad_locked(wanted) : NULL;
+    SDL_Gamepad *next = open_pad1_locked(devices, n, wanted, current, pad_selection.reserved);
     if (!next && current) {   // a failed arrival must not discard a still-working controller
         pad_selection.automatic = 1;
         free(devices);
         return;
     }
-    if (!next)
-        for (int i = 0; i < n && !next; i++)
-            if (devices[i].id != wanted) next = open_pad_locked(devices[i].id);
     if (next && SDL_GetGamepadID(next) != wanted) pad_selection.automatic = 1;
     free(devices);
     if (pad != next) pad2_next_scan = 0;
@@ -979,22 +1000,32 @@ int input_pad_read(uint64_t *buttons, int32_t *lx, int32_t *ly) {
     return ok;
 }
 
-// Player 2 (coop = 1, ov_input.c): the first connected gamepad in SDL's order that is not player 1's. With no gamepad
-// on player 1 there is no player 2 either, so one gamepad always plays player 1. Under lock.
+// Player 2 uses a saved controller or the first eligible SDL gamepad in Auto. Player 1 always has priority. Under lock.
 static void pad2_scan(void) {
     SDL_JoystickID p1 = pad && SDL_GamepadConnected(pad) ? SDL_GetGamepadID(pad) : 0;
-    if (p1 && pad2 && SDL_GamepadConnected(pad2) && SDL_GetGamepadID(pad2) != p1) return;
-    pad2_release();
+    SDL_JoystickID current = pad2 && SDL_GamepadConnected(pad2) ? SDL_GetGamepadID(pad2) : 0;
+    if (!p1 || !current || current == p1) {
+        pad2_release();
+        current = 0;
+    }
     if (!p1) return;
+    unsigned version = cfg_version();
     uint64_t now = plat_now_ns() / 1000000u;
-    if (now < pad2_next_scan) return;
-    pad2_next_scan = now + RESCAN_MS;
+    if (pad2_config_seen == version && pad2_next_scan && (current || now < pad2_next_scan)) return;
+    pad2_config_seen = version;
     InputPadDevice *devices;
     int n = devices_locked(&devices);
-    uint32_t want = input_pad2_choose(devices, n, p1, 0);
+    const char *preferred = cfg_value("DKB_PAD2_DEVICE");
+    uint32_t want = input_pad2_choose(devices, n, p1, current, preferred);
+    if (want != current) {
+        pad2_release();
+        if (want) pad2 = open_pad_locked(want);
+        if (!pad2 && !strcmp(preferred, "auto"))
+            pad2 = open_next_pad_locked(devices, n, want, p1);
+    }
     free(devices);
-    if (want) pad2 = open_pad_locked(want);
-    if (!pad2) return;
+    pad2_next_scan = now + RESCAN_MS;
+    if (want == current || !pad2) return;
     pad2_east_a = SDL_GetGamepadButtonLabel(pad2, SDL_GAMEPAD_BUTTON_EAST) == SDL_GAMEPAD_BUTTON_LABEL_A;
     rt_log("input: player 2 gamepad \"%s\" (ID %u; player 1 is ID %u, its rumble goes to it, motion follows player 1)",
            SDL_GetGamepadName(pad2), (unsigned)SDL_GetGamepadID(pad2), (unsigned)p1);
@@ -1220,7 +1251,7 @@ int input_rumble(uint16_t low, uint16_t high, uint32_t ms) {
 int input_rumble2(uint16_t low, uint16_t high, uint32_t ms) {
     int ok = 0;
     plat_mutex_lock(&lock);
-    if (state == 1 && pad2 && pad && SDL_GamepadConnected(pad) &&
+    if (state == 1 && cfg_bool("DKB_COOP") && pad2 && pad && SDL_GamepadConnected(pad) &&
         SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad2), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false))
         ok = SDL_RumbleGamepad(pad2, low, high, ms);
     plat_mutex_unlock(&lock);

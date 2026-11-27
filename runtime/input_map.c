@@ -389,36 +389,54 @@ static int pad_list_has(const InputPadDevice *devices, int count, uint32_t id) {
 }
 
 uint32_t input_pad_choose(InputPadSelection *s, const InputPadDevice *devices, int count,
-                          const char *preferred, uint32_t current) {
+                          const char *preferred, const char *player2, uint32_t current) {
+    s->reserved = 0;
     uint32_t *ids = count ? malloc((size_t)count * sizeof *ids) : NULL;
     if (count && !ids) return pad_list_has(devices, count, current) ? current : devices[0].id;
+    // Keep a manual Player 2 assignment free when another pad can serve as Player 1.
+    // With only one pad connected, that pad can still play. An explicit Player 1 choice has priority.
+    uint32_t reserved = 0, saved = 0, fallback = 0;
+    int reserve = s->keep && count > 1 && strcmp(player2, "auto") && strcmp(player2, preferred);
+    for (int i = 0; i < count; i++) {
+        if (!strcmp(devices[i].key, preferred)) saved = devices[i].id;
+        if (reserve && !strcmp(devices[i].key, player2)) reserved = devices[i].id;
+        else if (!fallback) fallback = devices[i].id;
+    }
+    s->reserved = reserved;
+    int current_available = current != reserved && pad_list_has(devices, count, current);
+    int mode_changed = s->initialized && s->keep != s->keep_seen;
     uint32_t wanted = 0;
-    if (!s->initialized || s->force || strcmp(preferred, s->preferred)) {
-        // Initial inventory is a baseline, not a batch of new connections. An explicit menu choice wins
-        // over simultaneous arrivals and cancels a pending automatic takeover.
-        for (int i = 0; i < count; i++)
-            if (!strcmp(devices[i].key, preferred)) wanted = devices[i].id;
+    if (!s->initialized || s->force || mode_changed || strcmp(preferred, s->preferred)) {
+        // The startup inventory and mode changes are baselines, not new controller arrivals.
+        wanted = saved;
         s->automatic = !wanted;
-        if (!wanted && count) wanted = devices[0].id;
+        if (!wanted) wanted = mode_changed && current_available ? current : fallback;
         s->pending = wanted != current ? wanted : 0;
         snprintf(s->preferred, sizeof s->preferred, "%s", preferred);
         s->force = 0;
     } else {
-        if (s->pending == current || !pad_list_has(devices, count, s->pending)) s->pending = 0;
+        int keep_current = s->keep && current_available;
+        if (s->pending == current || s->pending == reserved || !pad_list_has(devices, count, s->pending) ||
+            (keep_current && s->automatic))
+            s->pending = 0;
         for (int i = 0; i < count; i++) {
             int known = 0;
             for (int j = 0; j < s->count; j++) if (devices[i].id == s->ids[j]) known = 1;
-            if (!known && (!(s->keep && pad_list_has(devices, count, current)) || !strcmp(devices[i].key, preferred))) {
+            if (!known && !keep_current && devices[i].id != reserved) {
                 // If several devices arrive in one poll, the last enumerated arrival wins.
                 s->pending = devices[i].id;
                 s->automatic = 1;
             }
         }
         // Retain the requested takeover until selected or disconnected; input.c caches actual failed opens.
-        if (s->pending) wanted = s->pending;
-        else if (pad_list_has(devices, count, current)) wanted = current;
+        if (reserved && current == reserved && saved) {
+            wanted = saved;
+            s->pending = wanted;
+            s->automatic = 0;
+        } else if (s->pending) wanted = s->pending;
+        else if (current_available) wanted = current;
         else {
-            if (count) wanted = devices[0].id;
+            wanted = fallback;
             s->automatic = 1;
         }
     }
@@ -427,11 +445,18 @@ uint32_t input_pad_choose(InputPadSelection *s, const InputPadDevice *devices, i
     s->ids = ids;
     s->count = count;
     s->initialized = 1;
+    s->keep_seen = s->keep;
     return wanted;
 }
 
-uint32_t input_pad2_choose(const InputPadDevice *devices, int count, uint32_t player1, uint32_t current2) {
+uint32_t input_pad2_choose(const InputPadDevice *devices, int count, uint32_t player1, uint32_t current2,
+                           const char *preferred) {
     if (!player1) return 0;
+    if (strcmp(preferred, "auto")) {
+        for (int i = 0; i < count; i++)
+            if (devices[i].id != player1 && !strcmp(devices[i].key, preferred)) return devices[i].id;
+        return 0;
+    }
     if (current2 != player1 && pad_list_has(devices, count, current2)) return current2;
     for (int i = 0; i < count; i++)
         if (devices[i].id != player1) return devices[i].id;
