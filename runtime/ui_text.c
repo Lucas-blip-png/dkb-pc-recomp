@@ -66,6 +66,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_TAB_DISPLAY] = "Display", [UI_MENU_TAB_GRAPHICS] = "Graphics",
     [UI_MENU_TAB_GAME] = "Game", [UI_MENU_TAB_SOUND] = "Sound",
     [UI_MENU_TAB_CONTROLS] = "Controls", [UI_MENU_TAB_MENU] = "Menu", [UI_MENU_TAB_ADVANCED] = "Advanced",
+    [UI_MENU_TAB_AMIIBO] = "Amiibo",
     [UI_MENU_CONTINUE] = "Continue", [UI_MENU_QUIT] = "Quit game",
     [UI_MENU_ON] = "On", [UI_MENU_OFF] = "Off", [UI_MENU_AUTO] = "Automatic", [UI_MENU_IS_DEFAULT] = "Default",
     [UI_MENU_AFTER_RESTART] = "Restart required", [UI_MENU_SET_BY_ENV] = "Locked by environment variable",
@@ -274,6 +275,22 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_ASSUME_FOCUS] = "Keep running in background",
     [UI_MENU_ASSUME_FOCUS_DESC] = "Keeps the game running while you use another window. Turn it off to pause when you switch away.\n\n"
                                   "Pausing during a load can prevent it from completing.",
+
+    [UI_MENU_AMIIBO_FOLDER] = "Amiibo folder",
+    [UI_MENU_AMIIBO_FOLDER_DESC] = "Which subfolder of your amiibo folder the list below shows.",
+    [UI_MENU_AMIIBO_TOP] = "Top folder",
+    [UI_MENU_AMIIBO] = "Amiibo at the reader",
+    [UI_MENU_AMIIBO_DESC] = "The amiibo the game finds when it asks you to scan one. Pick it, then use the game's amiibo "
+                            "option or talk to a character who asks for one; it is scanned each time the game looks.\n\n"
+                            "None: the game is told there is no NFC reader.",
+    [UI_MENU_AMIIBO_NONE] = "None",
+    [UI_MENU_AMIIBO_EMPTY] = "No amiibo files yet. Open the amiibo folder below and put your own tag dumps in it "
+                             "(.bin or Flipper .nfc), in subfolders if you like. They show up here within seconds.",
+    [UI_MENU_AMIIBO_OPEN] = "Amiibo files",
+    [UI_MENU_AMIIBO_OPEN_DO] = "Open folder",
+    [UI_MENU_AMIIBO_OPEN_DESC] = "Opens the folder your amiibo files are read from, so you can add or remove them. "
+                                 "The setup program's home screen can copy files or a whole folder into it too.\n\n"
+                                 "amiibo_dir in dkb.ini names another folder.",
 
     [UI_MENU_VOLUME] = "Volume", [UI_MENU_VOLUME_DESC] = "Adjusts the overall game volume. Set it to 0% to mute the game.",
     [UI_MENU_AUDIO_CHANNELS] = "Audio output",

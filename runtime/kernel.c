@@ -2938,6 +2938,15 @@ static uint32_t se_find(uint64_t ev) {
     return wh;
 }
 
+// The game destroyed the event at ev (nn::os::DestroySystemEvent closes its handles) and is about to create one there
+// again: the next kern_bind_system_event binds the new one.
+void kern_forget_system_event(uint64_t ev) {
+    plat_mutex_lock(&g_se_lock);
+    for (int i = 0; i < g_nse; i++)
+        if (g_se[i].ev == ev) g_se[i--] = g_se[--g_nse];
+    plat_mutex_unlock(&g_se_lock);
+}
+
 void kern_bind_system_event(Cpu *c, uint64_t ev, int autoclear) {
     if (se_find(ev)) return;
     if (!tcur || !c) rt_fatal("kern_bind_system_event(%#llx) on a host thread", (unsigned long long)ev);

@@ -76,6 +76,12 @@ area = "installer"
 cmd = ["{python314}", "tests/installer_gui_test.py"]
 
 [[test]]
+name = "installer-amiibo"
+tier = 0
+area = "installer"
+cmd = ["{python314}", "tests/installer_amiibo_test.py"]
+
+[[test]]
 name = "dkb-wide-layout"
 tier = 0
 area = "gfx"
@@ -702,6 +708,12 @@ name = "lq-fold-spirv"
 tier = 1
 area = "shaders"
 cmd = ["{python}", "tests/lq_fold_spirv_test.py", "--cc", "{cc}", "--spirv-val", "{spirv_val}", "--out", "{out}"]
+
+[[test]]
+name = "nfp-tag"
+tier = 1
+area = "os"
+cmd = ["{python}", "tests/nfp_tag_test.py", "--cc", "{cc}"]
 
 [[test]]
 name = "note-written"

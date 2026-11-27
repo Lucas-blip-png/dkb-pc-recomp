@@ -61,6 +61,9 @@ int menu_font_check(void);
 // ---- what the menu asks of the platform side (gfx_window_win.c, gfx_window_sdl.c)
 void gfx_window_apply_settings(void);     // DKB_FULLSCREEN or DKB_WINDOW_SIZE changed: the window follows
 void gfx_window_toggle_fullscreen(void); // any thread: post the same window-mode toggle as F11
+// any thread: a window that covers the monitor is minimised, so that a window the menu just had another program open
+// (plat_open_folder) is not left behind the game; a window that does not cover the monitor stays
+void gfx_window_step_aside(void);
 void gfx_window_request_close(void);      // as the window's close button: the process ends
 int gfx_cfg_window_mode(void);               // 0 windowed, 1 borderless, 2 fullscreen
 int gfx_cfg_fullscreen(void);                // the window covers the monitor: mode 1 or 2

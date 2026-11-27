@@ -195,6 +195,7 @@ struct RowView {
     int pill = 0;        // dk theme: the value sits in a green (1) or red (2) pill, a toggle's on / off
     float frac = -1;     // dk theme: a slider's position 0..1 drawn as a track with a grab; -1 none
     const char *status = nullptr;   // optional longer description-panel status; note remains concise on the row
+    bool button = false; // the value is the caption of a push button drawn where a choice row has its field
 };
 
 struct ChoiceList {
@@ -343,6 +344,16 @@ static int row(const char *key, UiTextId label, UiTextId desc, const RowView &v,
             ImVec4 clip(value_left + button_w, y0, right - button_w, y1);
             dl->AddText(font, fs, ImVec2(x, cy - fs * 0.5f), vc, v.value, nullptr, 0, &clip);
         }
+    } else if (v.button) {   // a push button as wide as a choice row's field, so the rows line up
+        float width = floorf(fminf(300 * g_scale, w * 0.47f)), round = 4 * g_scale;
+        float y0 = p.y + (h - field_height) * 0.5f, y1 = y0 + field_height;
+        value_left = right - width;
+        ImU32 bg = ImGui::GetColorU32(off ? ImGuiCol_FrameBg : hov || foc ? ImGuiCol_ButtonHovered : ImGuiCol_Button);
+        dl->AddRectFilled(ImVec2(value_left, y0), ImVec2(right, y1), bg, round);
+        dl->AddRect(ImVec2(value_left, y0), ImVec2(right, y1), off ? P->border_idle_off : P->border_idle, round);
+        ImVec2 size = ImGui::CalcTextSize(v.value);
+        dl->AddText(ImVec2((value_left + right - size.x) * 0.5f, (y0 + y1 - size.y) * 0.5f),
+                    off ? kGrey : ImGui::GetColorU32(ImGuiCol_Text), v.value);
     } else if (v.value[0]) {
         float vx = right - ImGui::CalcTextSize(v.value).x;
         if (P->dk && v.pill) {   // green for on, red for off; the text stays white for contrast
@@ -415,6 +426,12 @@ bool opt_toggle(const char *key, UiTextId label, UiTextId desc, bool inverted) {
 bool opt_button(const char *id, UiTextId label, UiTextId desc, const char *value) {
     RowView v = {value ? value : "", false, false, NULL};
     return row(id, label, desc, v) == 2;   // A or a click; left and right do nothing
+}
+
+bool opt_action(const char *id, UiTextId label, UiTextId desc, UiTextId caption, const char *note) {
+    RowView v = {menu_text(caption), false, false, note};
+    v.button = true;
+    return row(id, label, desc, v) == 2;
 }
 
 void opt_group(UiTextId title) {

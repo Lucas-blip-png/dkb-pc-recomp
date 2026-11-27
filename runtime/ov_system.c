@@ -1,6 +1,6 @@
 // Adapted from MacNativeGames games/totk/runtime/services.c (lines 208-302), applet_host.c, account.c, time_host.c and
 // shared_font.c @ b75be8cf (MIT, Copyright (c) 2026 MacNativeGames contributors).
-// System service overrides: nn::oe, applet, am, prepo, nfp, err, aoc, pctl, diag,
+// System service overrides: nn::oe, applet, am, prepo, err, aoc, pctl, diag (nn::nfp: ov_nfp.c),
 // account, time and pl, and the six observers. Nothing here talks to a Horizon service; each call is answered by the
 // host. Stub rule: queries and initialisation succeed with neutral values, data paths stop with a named fatal.
 //
@@ -26,7 +26,6 @@
 #include "ov.h"
 #include "platform/platform.h"
 
-#define NFP_R_DEVICE_NOT_FOUND 0x8073u     // nfp: no NFC reader on the host
 #define ACCOUNT_R_INVALID 0x7c67u          // MacNativeGames' result for an unknown user handle or uid
 #define ACCOUNT_R_REGISTRATION_REQUIRED 0x1907cu
 #define TIME_R_INVALID 0x74u
@@ -236,7 +235,7 @@ static void ov_resume_enabled(Cpu *c) { plat_xchg32(&notify_resume, (int32_t)(ar
 static void ov_operation_enabled(Cpu *c) { plat_xchg32(&notify_operation, (int32_t)(arg_x(c, 0) & 0xff)); }
 static void ov_performance_enabled(Cpu *c) { plat_xchg32(&notify_performance, (int32_t)(arg_x(c, 0) & 0xff)); }
 
-// ==== nn::oe, applet, am, prepo, nfp, err (applet_host.c)
+// ==== nn::oe, applet, am, prepo, err (applet_host.c)
 static PlatMutex lock = PLAT_MUTEX_INIT;
 static PlatCond message_cv = PLAT_COND_INIT;
 static uint32_t messages[32];
@@ -329,27 +328,6 @@ static void ov_report_save(Cpu *c) {   // Result PlayReport::Save() and Save(con
     ret_x(c, 0);
 }
 static void ov_result_ok(Cpu *c) { ret_x(c, 0); }   // RequestImmediateTransmission, AddInternetConnectionStatus
-
-// nn::nfp: no NFC reader
-static volatile int32_t nfp_state;
-static void ov_nfp_initialize(Cpu *c) { plat_xchg32(&nfp_state, 1); ret_x(c, 0); }
-static void ov_nfp_finalize(Cpu *c) { plat_xchg32(&nfp_state, 0); ret_x(c, 0); }
-static void ov_nfp_state(Cpu *c) { ret_x(c, (uint64_t)nfp_state); }
-// Result ListDevices(DeviceHandle *out, int *count, int max)
-static void ov_nfp_list(Cpu *c) {
-    int32_t *count = arg_p(c, 1);
-    if (count) *count = 0;
-    ret_x(c, NFP_R_DEVICE_NOT_FOUND);
-}
-// Result AttachAvailabilityChangeEvent(os::SystemEventType *event)
-static void ov_nfp_availability(Cpu *c) {
-    uint64_t ev = arg_x(c, 0);
-    if (!ev) rt_fatal("nn::nfp::AttachAvailabilityChangeEvent: null event");
-    kern_bind_system_event(c, ev, 0);
-    ret_x(c, 0);
-}
-static void ov_nfp_no_device(Cpu *c) { ret_x(c, NFP_R_DEVICE_NOT_FOUND); }
-static void ov_nfp_device_state(Cpu *c) { ret_x(c, 0); }   // DeviceState GetDeviceState(const DeviceHandle &): none
 
 // void err::ShowError(Result): the game's error dialog, logged
 static void ov_show_error(Cpu *c) {
@@ -905,20 +883,6 @@ HOST_OVERRIDE("_ZN2nn10streamplay21GetRequiredMemorySizeENS0_14StreamPlayTypeENS
 HOST_OVERRIDE("_ZN2nn5prepo10PlayReport4SaveERKNS_7account3UidE", ov_report_save);
 HOST_OVERRIDE("_ZN2nn5prepo28RequestImmediateTransmissionEv", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_", ov_result_ok);
-HOST_OVERRIDE("_ZN2nn3nfp10InitializeEv", ov_nfp_initialize);
-HOST_OVERRIDE("_ZN2nn3nfp8FinalizeEv", ov_nfp_finalize);
-HOST_OVERRIDE("_ZN2nn3nfp8GetStateEv", ov_nfp_state);
-HOST_OVERRIDE("_ZN2nn3nfp11ListDevicesEPNS0_12DeviceHandleEPii", ov_nfp_list);
-HOST_OVERRIDE("_ZN2nn3nfp29AttachAvailabilityChangeEventEPNS_2os15SystemEventTypeE", ov_nfp_availability);
-HOST_OVERRIDE("_ZN2nn3nfp14GetDeviceStateERKNS0_12DeviceHandleE", ov_nfp_device_state);
-HOST_OVERRIDE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeENS0_11MountTargetE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp9GetNpadIdEPjRKNS0_12DeviceHandleE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp19AttachActivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp21AttachDeactivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp14StartDetectionERKNS0_12DeviceHandleE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp13StopDetectionERKNS0_12DeviceHandleE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp12GetModelInfoEPNS0_9ModelInfoERKNS0_12DeviceHandleE", ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3err9ShowErrorENS_6ResultE", ov_show_error);
 
 HOST_OVERRIDE("nndiagStartup", ov_diag_startup);

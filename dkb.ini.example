@@ -380,6 +380,11 @@
 # The extracted RomFS folder the game reads in place of romfs/romfs.bin. The setup writes it when "Use the RomFS where it
 # is" is ticked (--romfs-in-place); the folder must then stay where it is. Default: unset, the packed romfs.bin.
 # romfs_dir =
+# amiibo (docs/amiibo.md): the tag file at the game's NFC reader, a dump of your own figure (.bin, or a Flipper Zero
+# .nfc). The menu's Amiibo tab (F1) sets it from the files of the amiibo folder. Default: unset, no NFC reader.
+# amiibo =
+# The folder the Amiibo tab lists tag files from. Default: the amiibo folder next to dkb.exe.
+# amiibo_dir =
 
 [diagnostics]
 # Experimental Switch 2 reads of up to 4 KiB without waiting; requires replay_async = 1. Opt-in only: its background

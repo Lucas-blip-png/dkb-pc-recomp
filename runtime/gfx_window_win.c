@@ -51,6 +51,7 @@ int gfx_window_vk_presentable(VkInstance inst, VkPhysicalDevice pd, uint32_t fam
 #define WND_STYLE WS_OVERLAPPEDWINDOW
 #define WM_APP_TOGGLE_FULLSCREEN (WM_APP + 3)
 #define WM_APP_SETTINGS (WM_APP + 1)
+#define WM_APP_STEP_ASIDE (WM_APP + 4)
 #define WM_APP_FULLSCREEN (WM_APP + 2)   // the fullscreen setting, held back until the window is first activated
 
 static WINDOWPLACEMENT g_saved_place = {sizeof g_saved_place};   // the window behind fullscreen (window thread)
@@ -164,6 +165,10 @@ void gfx_window_toggle_fullscreen(void) {
     if (g_hwnd) PostMessageW(g_hwnd, WM_APP_TOGGLE_FULLSCREEN, 0, 0);
 }
 
+void gfx_window_step_aside(void) {
+    if (g_hwnd) PostMessageW(g_hwnd, WM_APP_STEP_ASIDE, 0, 0);
+}
+
 void gfx_window_request_close(void) {
     if (g_hwnd) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
 }
@@ -245,6 +250,9 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_APP_SETTINGS:
         apply_settings(h);
+        return 0;
+    case WM_APP_STEP_ASIDE:
+        if (is_fullscreen(h)) ShowWindow(h, SW_MINIMIZE);
         return 0;
     case WM_APP_FULLSCREEN:
         if (cfg_fullscreen() && !is_fullscreen(h)) set_mode(h, gfx_cfg_window_mode());
