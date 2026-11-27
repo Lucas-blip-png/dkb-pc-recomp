@@ -62,6 +62,8 @@ int gfx_window_hdr10(void);    // gfx.h: the swapchain is HDR10 now (the CRT row
 // fs.h (romfs.c): romfs-patches-xbox was next to romfs-index.bin at start, and was loaded.
 int romfs_xbox_prompts_ready(void);
 int romfs_xbox_prompts_active(void);
+int romfs_prompt_layout(void);
+const char *romfs_prompt_style(void);
 extern const char rt_port_version[];
 extern const char rt_game_display[];
 }
@@ -160,6 +162,8 @@ static const struct { int bit; ImGuiKey key; } pad_keys[] = {
     {B_UP, ImGuiKey_GamepadDpadUp}, {B_RIGHT, ImGuiKey_GamepadDpadRight}, {B_DOWN, ImGuiKey_GamepadDpadDown},
 };
 static uint64_t pad_prev;   // buttons at the last frame; a button held when the menu opened counts once released
+static int pad_nav_layout = -1;
+static bool pad_face_wait_release;
 static int stick_dir = -1;  // the D-pad button the left stick holds, -1 none
 
 // The left stick moves the cursor as the D-pad does (ImGui's own stick handling only scrolls the page): past half way
@@ -176,6 +180,16 @@ static void pad_events(ImGuiIO &io, int reset) {
     uint64_t b;
     int32_t lx, ly;
     int have = input_pad_read(&b, &lx, &ly);
+    const int layout = input_pad_layout();
+    const uint64_t face = (1ull << B_A) | (1ull << B_B) | (1ull << B_X) | (1ull << B_Y);
+    if (reset) pad_face_wait_release = false;
+    else if (layout != pad_nav_layout && (pad_prev & face)) pad_face_wait_release = true;
+    pad_nav_layout = layout;
+    // A press that selected a new layout must release before it can act as a different menu button.
+    if (pad_face_wait_release) {
+        if (!(b & face)) pad_face_wait_release = false;
+        b &= ~face;
+    }
     if (have) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     else io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
     stick_dir = stick_to_dpad(lx, ly);
@@ -932,14 +946,17 @@ static void tab_sound(float scale) {
     opt_end();
 }
 
-// The note under the layout label. Xbox prompts (the Nintendo layout with the A/B and X/Y prompts swapped, romfs.c
-// overlay_init) change the buttons at once but the prompts only at the next start: "files missing" without
-// romfs-patches-xbox, "prompts change after restart" while the prompts in use differ from the choice. Automatic with a
-// gamepad connected: "in use: Xbox". NULL otherwise.
+static bool pad_layout_prompts_pending(void) {
+    const int boot_layout = romfs_prompt_layout();
+    return !rt_game_version && boot_layout >= 0 &&
+           boot_layout != input_pad_layout_pick(cfg_value("DKB_PAD_LAYOUT"), 0);
+}
+
+// Automatic shows the active mapping. In Tears of the Kingdom the combined Xbox option also reports its overlay state.
 static const char *pad_layout_note(void) {
     bool want = !strcasecmp(cfg_value("DKB_PAD_LAYOUT"), "xbox_prompts");
-    if (want && !romfs_xbox_prompts_ready()) return menu_text(UI_MENU_PAD_LAYOUT_PROMPTS_MISSING);
-    if (want != (romfs_xbox_prompts_active() != 0)) return menu_text(UI_MENU_PAD_LAYOUT_PROMPTS_RESTART);
+    if (rt_game_version && want && !romfs_xbox_prompts_ready()) return menu_text(UI_MENU_PAD_LAYOUT_PROMPTS_MISSING);
+    if (rt_game_version && want != (romfs_xbox_prompts_active() != 0)) return menu_text(UI_MENU_PAD_LAYOUT_PROMPTS_RESTART);
     int got = input_pad_layout();
     if (got < 0 || strcmp(cfg_value("DKB_PAD_LAYOUT"), "auto")) return nullptr;
     static char note[96];
@@ -1010,11 +1027,41 @@ static void row_controller_device(void) {
     free(values); free(names); free(display);
 }
 
-static void rows_controller(void) {
-    row_controller_device();
+static void rows_controller_layout(void) {
     static const UiTextId layout[] = {UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_PAD_LAYOUT_NINTENDO, UI_MENU_PAD_LAYOUT_XBOX,
                                       UI_MENU_PAD_LAYOUT_XBOX_PROMPTS};
-    opt_choice("DKB_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layout, 4, UI_MENU_PAD_LAYOUT_DESC, pad_layout_note());
+    if (rt_game_version) {
+        opt_choice("DKB_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layout, 4, UI_MENU_PAD_LAYOUT_DESC, pad_layout_note());
+        return;
+    }
+    const bool legacy = !strcasecmp(cfg_value("DKB_PAD_LAYOUT"), "xbox_prompts");
+    const char *style = cfg_value("DKB_PAD_PROMPTS");
+    static const char *const layouts[] = {"nintendo", "xbox"};
+    const char *layout_names[] = {menu_text(UI_MENU_PAD_LAYOUT_NINTENDO), menu_text(UI_MENU_PAD_LAYOUT_XBOX)};
+    const bool pending = pad_layout_prompts_pending();
+    const char *layout_note = pending ? menu_text(UI_MENU_PAD_LAYOUT_PROMPTS_RESTART) : pad_layout_note();
+    const char *layout_status = pending ? menu_text(UI_MENU_DKB_PAD_LAYOUT_RESTART_DETAIL) : nullptr;
+    const bool layout_changed = opt_choice_list("DKB_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layouts, layout_names, 2,
+                                                UI_MENU_DKB_PAD_LAYOUT_DESC, legacy ? 0 : -1, layout_note,
+                                                layout_status, menu_text(UI_MENU_AUTO));
+    if (layout_changed && legacy && !strcasecmp(style, "switch") && !cfg_from_env("DKB_PAD_PROMPTS")) {
+        cfg_set("DKB_PAD_PROMPTS", "xbox");   // keep the letter style when leaving the old combined setting
+        style = cfg_value("DKB_PAD_PROMPTS");
+    }
+
+    static const char *const styles[] = {"auto", "nintendo", "xbox", "playstation"};
+    const char *style_names[] = {menu_text(UI_MENU_AUTO), menu_text(UI_MENU_PAD_PROMPTS_NINTENDO),
+                                 menu_text(UI_MENU_PAD_PROMPTS_XBOX), menu_text(UI_MENU_PAD_PROMPTS_PLAYSTATION)};
+    int current = !strcasecmp(style, "switch") ? (legacy && !layout_changed ? 2 : 1) : -1;
+    const char *boot_style = romfs_prompt_style();
+    const bool restart = boot_style && strcasecmp(style, boot_style) != 0;
+    opt_choice_list("DKB_PAD_PROMPTS", UI_MENU_PAD_PROMPTS, styles, style_names, 4, UI_MENU_PAD_PROMPTS_DESC,
+                    current, nullptr, nullptr, nullptr, restart);
+}
+
+static void rows_controller(void) {
+    row_controller_device();
+    rows_controller_layout();
     opt_toggle("DKB_MOTION", UI_MENU_MOTION, UI_MENU_MOTION_DESC);
     opt_slider("DKB_RUMBLE_STRENGTH", UI_MENU_RUMBLE_STRENGTH, 0, 300, UI_MENU_RUMBLE_STRENGTH_DESC, 10, "%.0f %%");
     opt_slider("DKB_RUMBLE_CURVE", UI_MENU_RUMBLE_CURVE, 0.2f, 1.5f, UI_MENU_RUMBLE_CURVE_DESC, 0.05f, "%.2f");

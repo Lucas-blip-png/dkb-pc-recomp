@@ -290,15 +290,28 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_RUMBLE_TRIGGERS_DESC] = "Enables vibration in the triggers on supported Xbox controllers.",
     [UI_MENU_SWITCH2] = "Switch 2 controllers (Bluetooth)",
     [UI_MENU_SWITCH2_DESC] = "Joy-Con 2 and Pro Controller 2 over Bluetooth, with HD rumble. To pair one, hold its Sync button with the game open; after that any button reconnects it. Over USB they work without this setting. Applies at the next start.",
-    [UI_MENU_PAD_LAYOUT] = "Button layout",
-    [UI_MENU_PAD_LAYOUT_DESC] = "Automatic picks Nintendo for Nintendo-style controllers and Xbox otherwise.\nNintendo uses the right button for A.\n"
-                                "Xbox uses the bottom button for A.\nXbox prompts uses Nintendo positions with Xbox labels.\n\n"
-                                "The game still shows the original prompt for any button you remap.",
-    [UI_MENU_PAD_LAYOUT_AUTO] = "Automatic", [UI_MENU_PAD_LAYOUT_NINTENDO] = "Nintendo (A right)",
-    [UI_MENU_PAD_LAYOUT_XBOX] = "Xbox (A bottom)", [UI_MENU_PAD_LAYOUT_XBOX_PROMPTS] = "Xbox prompts (A right)",
+    [UI_MENU_PAD_LAYOUT] = "Button Layout",
+    [UI_MENU_PAD_LAYOUT_DESC] = "Choose the physical face-button layout. Automatic uses the Switch layout when the right "
+                                "button is labelled A and swaps A/B and X/Y otherwise.\n\n"
+                                "Switch layout puts A on the right and X at the top. Swap A/B and X/Y puts A at the bottom "
+                                "and X on the left while keeping the usual letter prompts.\n\n"
+                                "Switch layout + swapped letters keeps the Switch button positions and swaps A/B and X/Y "
+                                "in letter prompts after a restart. PlayStation symbols follow the layout at startup.",
+    [UI_MENU_PAD_LAYOUT_AUTO] = "Automatic", [UI_MENU_PAD_LAYOUT_NINTENDO] = "Switch layout",
+    [UI_MENU_PAD_LAYOUT_XBOX] = "Swap A/B and X/Y", [UI_MENU_PAD_LAYOUT_XBOX_PROMPTS] = "Switch layout + swapped letters",
     [UI_MENU_PAD_LAYOUT_IN_USE] = "in use: %s",
     [UI_MENU_PAD_LAYOUT_PROMPTS_MISSING] = "prompt files missing: run the setup again",
-    [UI_MENU_PAD_LAYOUT_PROMPTS_RESTART] = "prompts change after restart",
+    [UI_MENU_PAD_LAYOUT_PROMPTS_RESTART] = "Prompts change after restart",
+    [UI_MENU_DKB_PAD_LAYOUT_RESTART_DETAIL] = "Restart the game to update the on-screen button prompts to match the selected layout.",
+    [UI_MENU_PAD_PROMPTS] = "Button Prompt Style",
+    [UI_MENU_DKB_PAD_LAYOUT_DESC] = "Switch layout puts A on the right and X at the top. "
+                                    "Swap A/B and X/Y puts A at the bottom and X on the left. The controls change "
+                                    "immediately. On-screen prompts update after a restart.",
+    [UI_MENU_PAD_PROMPTS_DESC] = "Choose the on-screen button icons. Nintendo and Xbox use their respective letters. "
+                                "PlayStation uses symbols. Automatic detects PlayStation controllers at startup. "
+                                "All prompt styles take effect after a restart.",
+    [UI_MENU_PAD_PROMPTS_NINTENDO] = "Nintendo", [UI_MENU_PAD_PROMPTS_XBOX] = "Xbox",
+    [UI_MENU_PAD_PROMPTS_PLAYSTATION] = "PlayStation",
     [UI_MENU_STICK_DEADZONE] = "Stick dead zone",
     [UI_MENU_STICK_DEADZONE_DESC] = "Sets how far either stick must move before it registers. Raise it if the character or camera drifts.",
     [UI_MENU_PAD_BACKGROUND] = "Controller input in background",
@@ -741,18 +754,27 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_SWITCH2] = "Контроллеры Switch 2 (Bluetooth)",
     [UI_MENU_SWITCH2_DESC] = "Joy-Con 2 и Pro Controller 2 по Bluetooth, с HD-вибрацией. Чтобы подключить, удерживайте кнопку Sync при запущенной игре; потом любая кнопка подключает его снова. По USB они работают и без этой настройки. Применяется после перезапуска.",
     [UI_MENU_PAD_LAYOUT] = "Раскладка кнопок",
-    [UI_MENU_PAD_LAYOUT_DESC] = "Какая кнопка работает как A. Nintendo: правая, как на Switch. Xbox: нижняя, как "
-                                "подписано на контроллере Xbox (крест на контроллере PlayStation). Автоматически: "
-                                "Nintendo для контроллеров с подписями Nintendo, Xbox для остальных. Подсказки Xbox: "
-                                "A справа, как в Nintendo, а игра показывает надписи Xbox (B вместо A, A вместо B, Y "
-                                "вместо X, X вместо Y); подсказки меняются после перезапуска. Буквы записаны в файлах "
-                                 "игры, поэтому у кнопки, переназначенной на вкладке управления, на экране остаётся "
-                                 "прежняя буква.",
-    [UI_MENU_PAD_LAYOUT_AUTO] = "Автоматически", [UI_MENU_PAD_LAYOUT_NINTENDO] = "Nintendo (A справа)",
-    [UI_MENU_PAD_LAYOUT_XBOX] = "Xbox (A снизу)", [UI_MENU_PAD_LAYOUT_XBOX_PROMPTS] = "Подсказки Xbox (A справа)",
+    [UI_MENU_PAD_LAYOUT_DESC] = "Выберите расположение кнопок. Автоматический режим выбирает раскладку Switch, "
+                                "если на правой кнопке написано A, а в остальных случаях меняет местами A/B и X/Y.\n\n"
+                                "В раскладке Switch кнопка A справа, а X сверху. При перестановке A/B и X/Y кнопка A "
+                                "снизу, а X слева. Буквы в подсказках остаются прежними.\n\n"
+                                "«Switch + перестановка букв» сохраняет расположение кнопок Switch и после перезапуска "
+                                "меняет местами буквы A/B и X/Y в подсказках. Символы PlayStation учитывают раскладку при запуске.",
+    [UI_MENU_PAD_LAYOUT_AUTO] = "Автоматически", [UI_MENU_PAD_LAYOUT_NINTENDO] = "Раскладка Switch",
+    [UI_MENU_PAD_LAYOUT_XBOX] = "Поменять A/B и X/Y", [UI_MENU_PAD_LAYOUT_XBOX_PROMPTS] = "Switch + перестановка букв",
     [UI_MENU_PAD_LAYOUT_IN_USE] = "сейчас: %s",
     [UI_MENU_PAD_LAYOUT_PROMPTS_MISSING] = "нет файлов подсказок: запустите установку снова",
-    [UI_MENU_PAD_LAYOUT_PROMPTS_RESTART] = "подсказки сменятся после перезапуска",
+    [UI_MENU_PAD_LAYOUT_PROMPTS_RESTART] = "Подсказки сменятся после перезапуска",
+    [UI_MENU_DKB_PAD_LAYOUT_RESTART_DETAIL] = "Перезапустите игру, чтобы значки кнопок на экране соответствовали выбранной раскладке.",
+    [UI_MENU_PAD_PROMPTS] = "Стиль значков кнопок",
+    [UI_MENU_DKB_PAD_LAYOUT_DESC] = "В раскладке Switch кнопка A справа, а X сверху. "
+                                    "При перестановке A/B и X/Y кнопка A снизу, а X слева. Управление меняется сразу, "
+                                    "а подсказки обновляются после перезапуска.",
+    [UI_MENU_PAD_PROMPTS_DESC] = "Выберите значки кнопок в игре. Nintendo и Xbox используют свои буквы, а PlayStation — "
+                                "символы. Автоматический режим обнаруживает контроллеры PlayStation при запуске. "
+                                "Любой выбранный стиль применяется после перезапуска.",
+    [UI_MENU_PAD_PROMPTS_NINTENDO] = "Nintendo", [UI_MENU_PAD_PROMPTS_XBOX] = "Xbox",
+    [UI_MENU_PAD_PROMPTS_PLAYSTATION] = "PlayStation",
     [UI_MENU_STICK_DEADZONE] = "Мёртвая зона стиков",
     [UI_MENU_STICK_DEADZONE_DESC] = "Насколько нужно отклонить стик геймпада, чтобы игра это заметила. Увеличьте, если персонаж или камера двигаются сами.",
     [UI_MENU_PAD_BACKGROUND] = "Геймпад в фоне",

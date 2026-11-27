@@ -346,7 +346,8 @@
 # pad_layout = auto
 # Bananza: the button prompts for a PlayStation pad (cross, circle, square, triangle, L1 to R2, Options, Create;
 # docs/controls.md, "PlayStation button prompts"). auto takes them when a DualShock or DualSense pad is connected at
-# start, playstation always, switch never. The game reads its fonts at boot, so a change takes effect at the next start.
+# start, playstation always. nintendo and xbox select their respective letter styles. The old switch value keeps the
+# layout-based letter behavior. The game reads its fonts at boot, so a change takes effect at the next start.
 # pad_prompts = auto
 # Gamepad stick dead zone in percent of full deflection (0 to 50). Raise it for a stick that drifts: inside the circle
 # the stick reads centred, and the rest of its travel is scaled to start there.

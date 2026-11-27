@@ -48,8 +48,11 @@ bool opt_choice(const char *key, UiTextId label, const UiTextId *names, int n, U
                 const char *note = nullptr);
 // A choice over a list the caller builds (devices, window sizes): values[i] is written, names[i] shown; "" means the key
 // unset. cur: the index in effect, -1 to find cfg_value(key) in values (no match: the value shown as it is).
+// unlisted replaces the raw value when no choice matches.
+// show_restart controls the restart notice for a setting read at startup.
 bool opt_choice_list(const char *key, UiTextId label, const char *const *values, const char *const *names, int n,
-                     UiTextId desc, int cur = -1, const char *note = nullptr, const char *status = nullptr);
+                     UiTextId desc, int cur = -1, const char *note = nullptr, const char *status = nullptr,
+                     const char *unlisted = nullptr, bool show_restart = true);
 // A row that runs an action: true on A or a click. id: unique on the page and not a setting ("##copy_info"); value:
 // shown on the right ("" none).
 bool opt_button(const char *id, UiTextId label, UiTextId desc, const char *value = "");

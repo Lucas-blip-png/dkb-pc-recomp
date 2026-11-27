@@ -307,9 +307,11 @@ static int overlay_load(const char *dir, int optional) {
         if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
         char name[4096], sha[65], orig[65], hex[65];
         unsigned long long size = 0;
-        need(sscanf(line, "%4095[^\t]\t%llu\t%64[0-9a-f]\t%64[0-9a-f-]", name, &size, sha, orig) == 4 &&
-             strlen(sha) == 64 && (strlen(orig) == 64 || !strcmp(orig, "-")), "overlay manifest line");
-        need(romfs_path_valid_relative(name), "overlay path");
+        if (sscanf(line, "%4095[^\t]\t%llu\t%64[0-9a-f]\t%64[0-9a-f-]", name, &size, sha, orig) != 4 ||
+            strlen(sha) != 64 || (strlen(orig) != 64 && strcmp(orig, "-")))
+            BAD("RomFS overlay: malformed line in %s/manifest.tsv", dir);
+        if (!romfs_path_valid_relative(name))
+            BAD("RomFS overlay: invalid path in %s/manifest.tsv: %s", dir, name);
         uint64_t i = lower(name);
         int known = i < file_count && !strcmp(entry_name(entry(i)), name), add = !strcmp(orig, "-");
         if (!known && !add)
@@ -350,6 +352,7 @@ static int overlay_load(const char *dir, int optional) {
         if (noverlay - first <= 16)
             rt_log("RomFS overlay: %s (%llu bytes) %s", name, size, add ? "is added" : "replaces the original");
     }
+    if (ferror(m)) BAD("RomFS overlay: error reading %s/manifest.tsv", dir);
     fclose(m);
     if (noverlay - first > 16) rt_log("RomFS overlay: %zu files from %s (%zu not listed)", noverlay - first, dir,
                                       noverlay - first - 16);
@@ -476,6 +479,10 @@ int romfs_xbox_prompts_active(void) { return xbox_prompts_active; }
 // Font archives, the prompts are skipped and the mod's file stays (ps_prompts_init).
 static int ps_prompts_active;
 int romfs_ps_prompts_active(void) { return ps_prompts_active; }
+static int prompt_layout = -1;
+int romfs_prompt_layout(void) { return prompt_layout; }
+static const char *prompt_style;
+const char *romfs_prompt_style(void) { return prompt_style; }
 
 // Loads a Font-archive overlay (the PlayStation or Switch-letter prompts) next to the other overlays: 1 loaded, 0 failed
 // its check, -1 a mod or patch already replaces one of its archives (logged; the mod wins and nothing of the overlay stays).
@@ -553,12 +560,35 @@ static void keys_prompts_init(void) {
     if (ps_prompts_active) return;
     char spec[5], keys[5], dir[2100], manifest[2200];
     input_map_face_spec_cfg(input_pad_layout_pick(layout, 0), spec);
-    input_map_face_keys(spec, !strcasecmp(layout, "nintendo"), keys);
-    if (!strcmp(keys, "ABXY")) {   // the labels already match the Switch letters: nothing to load
+    const char *style = cfg_value("DKB_PAD_PROMPTS");
+    // Explicit letter styles choose the lettering independently of the layout. Automatic and older settings retain
+    // their original letter selection, including the combined xbox_prompts layout.
+    int nintendo_letters = !strcasecmp(style, "nintendo") ||
+                           (strcasecmp(style, "xbox") && !strcasecmp(layout, "nintendo"));
+    input_map_face_keys(spec, nintendo_letters, keys);
+    int original_letters = !strcmp(keys, "ABXY");
+    int swapped_letters = !strcmp(keys, "ABYX") || !strcmp(keys, "BAXY") || !strcmp(keys, "BAYX");
+    if (!strcasecmp(style, "xbox")) {
+        const char *xbox_keys = swapped_letters ? keys : "ABXY";
+        if (snprintf(dir, sizeof dir, "%s/romfs-patches-xbox-keys-%s", index_dir, xbox_keys) < (int)sizeof dir &&
+            snprintf(manifest, sizeof manifest, "%s/manifest.tsv", dir) < (int)sizeof manifest &&
+            plat_file_exists(manifest)) {
+            int loaded = font_overlay_load(dir);
+            if (loaded < 0) return;
+            if (loaded > 0) {
+                rt_log("RomFS overlay: Xbox button prompts (LB/RB/LT/RT; face letters %s)", xbox_keys);
+                if (!original_letters && !swapped_letters)
+                    rt_log("RomFS overlay: no face-letter overlay for bindings %s; using the original face letters", keys);
+                return;
+            }
+        }
+        rt_log("RomFS overlay: full Xbox prompts unavailable; keeping the face-letter prompts (run the setup again)");
+    }
+    if (original_letters) {   // the labels already match the Switch letters: nothing to load
         if (want_xbox) xbox_prompts_ready = xbox_prompts_active = 1;
         return;
     }
-    if (strcmp(keys, "ABYX") && strcmp(keys, "BAXY") && strcmp(keys, "BAYX")) {
+    if (!swapped_letters) {
         rt_log("RomFS overlay: pad_layout = %s and the bind_ lines put the letters %s on the glyphs A, B, X, Y; no prompt "
                "folder covers that, so the prompts name the Switch letters", layout, keys);
         return;
@@ -650,6 +680,8 @@ static void overlay_init(void) {
     for (int i = 0; i < 2; i++)
         if (dirs[i] && *dirs[i] && strcmp(dirs[i], "0")) overlay_load(dirs[i], 0);
     if (!rt_game_version) {
+        prompt_layout = input_pad_layout_pick(cfg_value("DKB_PAD_LAYOUT"), 0);
+        prompt_style = cfg_value("DKB_PAD_PROMPTS");
         ps_prompts_init();
         keys_prompts_init();
     }

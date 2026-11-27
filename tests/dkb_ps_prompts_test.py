@@ -129,6 +129,33 @@ class PsPromptsTest(unittest.TestCase):
         self.assertEqual(contours[0][2][1], (2635, 2065))
         self.assertEqual([op for op, _ in contours[1]], ['M', 'C', 'L'])
 
+    def test_xbox_labels_preserve_plates_and_face_permutations(self):
+        counts = {0xE0E4: 5, 0xE0E5: 6, 0xE0E6: 3, 0xE0E7: 4, 0xE0EF: 4, 0xE0F0: 4}
+        for keys in ('ABXY', 'ABYX', 'BAXY', 'BAYX'):
+            with self.subTest(keys=keys):
+                output = T.xbox_font(self.font, keys)
+                self.assertEqual(T.checksum(output), 0xb1b0afba)
+                self.assertEqual(T.xbox_font(self.font, keys), output)
+                _, cff, gid = read(output)
+                _, letters, letter_ids = read(T.keys_font(self.font, keys))
+                for code in CODES:
+                    if code not in counts:
+                        self.assertEqual(cff.charstrings[gid[code]], letters.charstrings[letter_ids[code]])
+                        continue
+                    width, actual = cff.glyph(gid[code])
+                    previous_width, previous = self.cff.glyph(self.gid[code])
+                    self.assertEqual(width, previous_width)
+                    self.assertEqual(actual[0], previous[0])
+                    self.assertEqual(len(actual), counts[code])
+                    left, right, bottom, top = T.bbox(actual[0])
+                    for contour in actual[1:]:
+                        x0, x1, y0, y1 = T.bbox(contour)
+                        self.assertTrue(left < x0 < x1 < right and bottom < y0 < y1 < top)
+                _, menu = cff.glyph(gid[0xE0EF])
+                _, view = cff.glyph(gid[0xE0F0])
+                self.assertEqual([T.area([p for _, p in c]) > 0 for c in menu[1:]], [False, False, False])
+                self.assertEqual([T.area([p for _, p in c]) > 0 for c in view[1:]], [False, True, False])
+
     def check_layout(self, layout):
         out = T.ps_font(self.font, layout)
         tables, cff, gid = read(out)

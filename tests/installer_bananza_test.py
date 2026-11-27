@@ -90,8 +90,8 @@ for size in a[a.index('--presets')+1:]:
 import hashlib, pathlib, sys
 a=sys.argv; out=pathlib.Path(a[a.index('--out')+1])
 assert out.is_relative_to(pathlib.Path(a[a.index('--installer-workspace')+1])/'build')
-opt='--keys' if '--keys' in a else '--layout'
-assert a[a.index(opt)+1] in ('xbox','nintendo','senw','eswn','ABYX','BAXY','BAYX')
+opt=next(opt for opt in ('--xbox-keys', '--keys', '--layout') if opt in a)
+assert a[a.index(opt)+1] in ('xbox','nintendo','senw','eswn','ABXY','ABYX','BAXY','BAYX')
 out.mkdir(parents=True); raw=('synthetic '+a[a.index(opt)+1]).encode(); (out/'resource.bin').write_bytes(raw)
 (out/'manifest.tsv').write_text('resource.bin\\t%d\\t%s\\t%s\\n' % (len(raw), hashlib.sha256(raw).hexdigest(), '0'*64))
 ''')
@@ -1136,7 +1136,7 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
         (self.romfs/'other.bin').write_bytes(b'a changed source')
         self.calls.clear()
         self.assertEqual(self.run_install()[0], 0)
-        self.assertEqual([step for step, _ in self.calls], ['dkb_data','lift','compile','dkb_shaders','dkb_shaders','dkb_shaders','dkb_wide']+['dkb_prompts']*7+['dkb_verify','dkb_verify'])
+        self.assertEqual([step for step, _ in self.calls], ['dkb_data','lift','compile','dkb_shaders','dkb_shaders','dkb_shaders','dkb_wide']+['dkb_prompts']*11+['dkb_verify','dkb_verify'])
 
     def test_source_mutation_during_pack_is_not_installed(self):
         def mutate(ctx, step, command):

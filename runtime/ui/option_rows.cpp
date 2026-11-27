@@ -81,7 +81,7 @@ static ImGuiID g_last_help;
 // disabled: the note of a row opt_disable_next greyed out, else NULL.
 static void offer_help(ImGuiID row, bool hovered, bool focused, const char *title, UiTextId desc,
                        const char *key, const CfgMeta *m, const char *disabled,
-                       bool is_default = false, const char *status = nullptr) {
+                       bool is_default = false, const char *status = nullptr, bool show_restart = true) {
     bool previous = row == g_last_help;
     if (!hovered && !focused && !previous && g_first.row) return;
     Desc d = {};
@@ -89,7 +89,7 @@ static void offer_help(ImGuiID row, bool hovered, bool focused, const char *titl
     d.title = title;
     d.body = menu_text(desc);
     bool from_env = cfg_from_env(key) != 0;
-    d.restart = !disabled && !from_env && m && !m->live;
+    d.restart = show_restart && !disabled && !from_env && m && !m->live;
     d.is_default = is_default && !disabled && !from_env;
     if (disabled)
         snprintf(d.requirement, sizeof d.requirement, "%s", disabled);
@@ -195,6 +195,7 @@ struct RowView {
     int pill = 0;        // dk theme: the value sits in a green (1) or red (2) pill, a toggle's on / off
     float frac = -1;     // dk theme: a slider's position 0..1 drawn as a track with a grab; -1 none
     const char *status = nullptr;   // optional longer description-panel status; note remains concise on the row
+    bool show_restart = true;
 };
 
 struct ChoiceList {
@@ -272,7 +273,8 @@ static int row(const char *key, UiTextId label, UiTextId desc, const RowView &v,
         }
     }
     const char *title = menu_text(label);
-    offer_help(ImGui::GetItemID(), hov, foc, title, desc, key, m, disabled, v.is_default, v.status ? v.status : v.note);
+    offer_help(ImGui::GetItemID(), hov, foc, title, desc, key, m, disabled, v.is_default, v.status ? v.status : v.note,
+               v.show_restart);
 
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImFont *font = ImGui::GetFont();
@@ -291,7 +293,7 @@ static int row(const char *key, UiTextId label, UiTextId desc, const RowView &v,
     if (off) {
         note = disabled ? disabled : menu_text(UI_MENU_SET_BY_ENV);
         note_color = P->off_note;
-    } else if (m && !m->live) {
+    } else if (v.show_restart && m && !m->live) {
         note = menu_text(UI_MENU_AFTER_RESTART);
         note_color = P->set_note;
     }
@@ -430,7 +432,7 @@ void opt_text(UiTextId text, bool warn) {
 }
 
 bool opt_choice_list(const char *key, UiTextId label, const char *const *values, const char *const *names, int n,
-                     UiTextId desc, int cur, const char *note, const char *status) {
+                     UiTextId desc, int cur, const char *note, const char *status, const char *unlisted, bool show_restart) {
     const CfgMeta *m = cfg_meta(key);
     const char *now = cfg_value(key);
     if (cur < 0)
@@ -440,8 +442,9 @@ bool opt_choice_list(const char *key, UiTextId label, const char *const *values,
     for (int i = 0; m && i < n; i++)
         if (!strcmp(values[i], m->def)) def = i;
     if (cur >= n) cur = -1;
-    RowView v = {cur >= 0 ? names[cur] : now, cur >= 0 && cur == def, false, note};
+    RowView v = {cur >= 0 ? names[cur] : unlisted ? unlisted : now, cur >= 0 && cur == def, false, note};
     v.status = status;
+    v.show_restart = show_restart;
     ChoiceList choices = {names, n, cur};
     int step = row(key, label, desc, v, &choices);
     int nv = choices.picked;

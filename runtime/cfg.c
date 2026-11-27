@@ -167,7 +167,7 @@ static const CfgMeta metas[] = {
     {"COOP", "1", "0|1", LIVE},   // ov_input.c: a second gamepad is player 2 (npad No.2, Pauline)
     // input.c pad_in_background: 0 drops the gamepads while another window is in front, as the keyboard always is
     {"PAD_BACKGROUND", "1", "0|1", LIVE},
-    {"PAD_DEVICE", "auto", NULL, LIVE}, {"PAD_FULLSCREEN_HOLD", "0", "0|1", LIVE}, {"PAD_SHORTCUTS", "1", "0|1", LIVE}, {"PAD_PROMPTS", "auto", "auto|switch|playstation", RESTART},
+    {"PAD_DEVICE", "auto", NULL, LIVE}, {"PAD_FULLSCREEN_HOLD", "0", "0|1", LIVE}, {"PAD_SHORTCUTS", "1", "0|1", LIVE}, {"PAD_PROMPTS", "auto", "auto|switch|nintendo|xbox|playstation", RESTART},
     {"STICK_DEADZONE", "8", "0..50", LIVE}, {"MOUSE_CAMERA", "0", "0|1", LIVE}, {"MOUSE_SENS", "1", "0..10", LIVE},
     {"MENU_LANG", "", "en|ru", LIVE}, {"MENU_THEME", "dk", "dk|classic", LIVE},
     // Advanced: scheduling

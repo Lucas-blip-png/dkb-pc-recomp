@@ -24,6 +24,8 @@ glyphs each Switch button's glyph shows, ABYX being A, B, then Y's glyph for X a
 game's own charstrings (the diamonds follow, as for --layout), so a player who swapped X and Y, or A and B, on a pad
 labelled with Switch letters (or an Xbox pad) sees the letter printed on the button that now does it.
 
+--xbox-keys takes the same permutation and adds LB, RB, LT, RT, Menu and View.
+
 The symbols are original drawings, made here from straight strokes and arcs. Only the plates and the L and R letters
 come from the user's own font, at install time. Output: <out>/Font/Font*.Nin_Ounce_NVN2.bfarc.zs and
 <out>/manifest.tsv (path, size, SHA-256, original SHA-256), under build/ or an installer workspace. Runs under the
@@ -176,6 +178,16 @@ def options_bars(n=3, length=1050, thick=210, gap=120):
         bar = [(CX - length / 2, y0), (CX + length / 2, y0), (CX + length / 2, y1), (CX - length / 2, y1)]
         out.append(poly(wind(jitter(bar, 14, seed=17 + k), False)))
     return out
+
+
+def view_windows():
+    """Xbox View: two overlapping windows, with only the exposed edges of the rear window."""
+    front = [(0, 0), (710, 0), (710, 500), (0, 500)]
+    inset = [(120, 120), (590, 120), (590, 380), (120, 380)]
+    rear = [(350, 600), (350, 790), (1080, 790), (1080, 230), (820, 230),
+            (820, 350), (960, 350), (960, 670), (470, 670), (470, 600)]
+    return [poly(wind([(CX + x - 540, CY + y - 395) for x, y in shape], i == 1))
+            for i, shape in enumerate((front, inset, rear))]
 
 
 def create_rays(thick=190):
@@ -624,6 +636,12 @@ def shifted(c, dx):
     return [(op, (a[0] + dx, a[1]) if op != 'C' else tuple((p[0] + dx, p[1]) for p in a)) for op, a in c]
 
 
+def shoulder_letter(contours):
+    inner = [c for c in contours if c is not plate_of(contours)]
+    z = min(inner, key=lambda c: bbox(c)[0])
+    return [c for c in inner if bbox(c)[0] > bbox(z)[1] - 40]   # L or R, with the R's counter
+
+
 def ps_font(font, layout):
     """The plain OpenType HardKey font with the PlayStation glyphs."""
     tables = sfnt_tables(font)
@@ -639,9 +657,7 @@ def ps_font(font, layout):
         width, cs = original[code]
         plate = plate_of(cs)
         _, src = original[source]
-        inner = [c for c in src if c is not plate_of(src)]
-        z = min(inner, key=lambda c: bbox(c)[0])
-        letter = [c for c in inner if bbox(c)[0] > bbox(z)[1] - 40]   # the L or R, with the R's counter
+        letter = shoulder_letter(src)
         lx0 = min(bbox(c)[0] for c in letter)
         lx1 = max(bbox(c)[1] for c in letter)
         ly0 = min(bbox(c)[2] for c in letter)
@@ -673,6 +689,47 @@ def keys_font(font, keys):
     for code, cs in new.items():
         cff.charstrings[gid[code]] = cs
     return sfnt_build(font, {**tables, b'CFF ': cff.build()})
+
+def xbox_font(font, keys):
+    """Keep the face-letter permutation and add Xbox labels for shoulders, triggers, Menu and View."""
+    tables = sfnt_tables(keys_font(font, keys))
+    cff = Cff(tables[b'CFF '])
+    gid = {code: cmap_lookup(tables[b'cmap'], code) for code in LABELS}
+    original = {code: cff.glyph(g) for code, g in gid.items()}
+    letter_b = [(0, 0), (.55, 0), (.68, .13), (.68, .39), (.59, .5), (.68, .61), (.68, .87),
+                (.55, 1), (0, 1)]
+    letter_t = [(0, .79), (.24, .79), (.24, 0), (.45, 0), (.45, .79), (.69, .79), (.69, 1), (0, 1)]
+    counters = [[(.2, y), (.47, y), (.47, y + .18), (.2, y + .18)] for y in (.18, .64)]
+    for code, (source, which) in LABELS.items():
+        width, contours = original[code]
+        plate = plate_of(contours)
+        left = shoulder_letter(original[source][1])
+        lx0 = min(bbox(c)[0] for c in left)
+        lx1 = max(bbox(c)[1] for c in left)
+        ly0 = min(bbox(c)[2] for c in left)
+        ly1 = max(bbox(c)[3] for c in left)
+        px0, px1, _, _ = bbox(plate)
+        height = ly1 - ly0
+        first_width = lx1 - lx0
+        second_start = first_width + height * .12
+        label_width = second_start + height * .69
+        scale = min(1.0, (px1 - px0) * .68 / label_width)
+        start = (px0 + px1 - label_width * scale) / 2
+
+        def point(p):
+            return (start + (p[0] - lx0) * scale, p[1])
+
+        first = [[(op, tuple(point(p) for p in arg) if op == 'C' else point(arg)) for op, arg in c] for c in left]
+        art = [letter_b, *counters] if which == 1 else [letter_t]
+        right = [poly(wind([(start + (second_start + x * height) * scale, ly0 + y * height)
+                            for x, y in shape], i > 0)) for i, shape in enumerate(art)]
+        cff.charstrings[gid[code]] = encode_charstring(width, [plate, *first, *right])
+    for code, art in ((0xE0EF, options_bars), (0xE0F0, view_windows)):
+        g = cmap_lookup(tables[b'cmap'], code)
+        width, contours = cff.glyph(g)
+        cff.charstrings[g] = encode_charstring(width, [plate_of(contours), *art()])
+    return sfnt_build(font, {**tables, b'CFF ': cff.build()})
+
 
 # ---------------------------------------------------------------------------------------------------- the archives
 
@@ -720,12 +777,13 @@ def sarc_replace(data, new):
     return bytes(out)
 
 
-def generate(romfs, out, layout, keys=None):
+def generate(romfs, out, layout, keys=None, xbox_keys=None):
     index = json.loads((romfs / 'index.json').read_text(encoding='utf-8'))
     if index.get('status') != 'pass':
         raise ValueError('the RomFS index has not passed its extraction check')
     files = index['files']
-    lines = ['# path\tsize\tsha256\toriginal_sha256 (tools/dkb_ps_prompts.py ' + (f'--keys {keys}' if keys else f'--layout {layout}') + ')']
+    mode = f'--xbox-keys {xbox_keys}' if xbox_keys else f'--keys {keys}' if keys else f'--layout {layout}'
+    lines = [f'# path\tsize\tsha256\toriginal_sha256 (tools/dkb_ps_prompts.py {mode})']
     outputs, made = [], {}
     with romfs_index.open_image(romfs, index) as image:
         def read(row):
@@ -758,7 +816,13 @@ def generate(romfs, out, layout, keys=None):
                 key, font = bfotf_unwrap(wrapped)
                 if font[:4] != b'OTTO':
                     raise ValueError(f'{row["path"]}:{FONT_MEMBER} is not a CFF OpenType font')
-                made[digest] = bfotf_wrap(wrapped[:4], key, keys_font(font, keys) if keys else ps_font(font, layout))
+                if xbox_keys:
+                    patched_font = xbox_font(font, xbox_keys)
+                elif keys:
+                    patched_font = keys_font(font, keys)
+                else:
+                    patched_font = ps_font(font, layout)
+                made[digest] = bfotf_wrap(wrapped[:4], key, patched_font)
             patched = zstd_compress(sarc_replace(sarc, {FONT_MEMBER: made[digest]}))
             outputs.append((row['path'], raw, patched))
     for path, raw, patched in outputs:
@@ -770,7 +834,7 @@ def generate(romfs, out, layout, keys=None):
     temporary = out / 'manifest.tsv.tmp'
     temporary.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     temporary.replace(out / 'manifest.tsv')   # the manifest last: an interrupted run leaves no valid overlay
-    print(f'{"Switch letters" if keys else "PlayStation prompts"} ({keys or layout + " layout"}): {len(outputs)} font archives in {out}')
+    print(f'{mode}: {len(outputs)} font archives in {out}')
 
 
 def main():
@@ -780,8 +844,10 @@ def main():
     ap.add_argument('--layout', default='xbox',
                     help='xbox: Switch A on the bottom button (cross); nintendo: on the right one (circle); or the '
                          'positions of A, B, X, Y as four letters of s e w n (senw: A south, B east, X north, Y west)')
-    ap.add_argument('--keys', help='instead of PlayStation symbols, a permutation of ABXY: the letter each of the A, B, X, Y '
-                                   'glyphs shows (ABYX swaps X and Y)')
+    letters = ap.add_mutually_exclusive_group()
+    letters.add_argument('--keys', help='instead of PlayStation symbols, a permutation of ABXY: the letter each of the A, B, X, Y '
+                                        'glyphs shows (ABYX swaps X and Y)')
+    letters.add_argument('--xbox-keys', help='a permutation of ABXY with Xbox shoulder, trigger, Menu and View icons')
     ap.add_argument('--installer-workspace', type=Path, help='owned installer workspace containing build staging')
     args = ap.parse_args()
     build = (Path(__file__).resolve().parents[1] / 'build').resolve()
@@ -796,11 +862,11 @@ def main():
         ap.error('game-derived overlays must be in a dedicated directory under build/')
     try:
         face_spec(args.layout)
-        if args.keys:
-            keys_spec(args.keys)
+        if args.keys or args.xbox_keys:
+            keys_spec(args.keys or args.xbox_keys)
     except ValueError as error:
         ap.error(str(error))
-    generate(args.romfs, out, args.layout, args.keys)
+    generate(args.romfs, out, args.layout, args.keys, args.xbox_keys)
 
 
 if __name__ == '__main__':
