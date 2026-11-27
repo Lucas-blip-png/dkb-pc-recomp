@@ -21,6 +21,12 @@ Requested in [#508](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/508).
 
 With **None** chosen (the default) the game is told there is no NFC reader, as before.
 
+The menu's Amiibo tab, and the row of the setup program:
+
+![The Amiibo tab of the menu: the folder button, the subfolder and the figure](images/amiibo-menu.png)
+
+![The setup form with the row that copies amiibo files into the game folder](images/amiibo-setup.png)
+
 | File | Contents |
 |---|---|
 | `.bin` | The tag's bytes: 540 (an NTAG215's 135 pages), or 532 or 572 as some tools write them |

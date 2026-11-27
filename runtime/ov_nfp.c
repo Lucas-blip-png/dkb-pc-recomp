@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // nn::nfp, the console's NFC figure (amiibo) library, answered from a tag dump of the player's own (#508).
 //
 // Bananza imports thirteen nn::nfp functions and no more: Initialize, Finalize, ListDevices, GetNpadId, GetDeviceState,
@@ -17,9 +18,10 @@
 // once the game unmounts it; the next time the game looks, it is tapped again. Unset, or with a file that is no
 // figure's tag, there is no NFC reader, as before: ListDevices reports no device and the game says so.
 //
-// The file formats, the test for a figure's tag and the ModelInfo bytes follow Longshot's host/nn_nfp.c
-// (GPL-3.0-or-later, Copyright (c) Longshot contributors) @ 86b3b9e4f; the code is ours. No tag dump belongs in the
-// repository: tests/nfp_tag_test.py builds a pretended tag in code.
+// The file formats, the test for a figure's tag and the tag bytes ModelInfo is made from are Longshot's
+// (https://git.magicbean.dev/MagicBeanDev/Longshot @ 86b3b9e4f0e198a74d5ff7afa9bbf717096a9c39, host/nn_nfp.c,
+// GPL-3.0-or-later, Copyright (C) 2026 the Longshot contributors), written again for the calls Bananza makes: none of
+// its lines is copied. No tag dump belongs in the repository: tests/nfp_tag_test.py builds a pretended tag in code.
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
