@@ -3427,6 +3427,72 @@ static VkPipelineCache warm_cache_new(void) {
     return c;
 }
 
+static int warm_nonempty_cb(const char *name, void *ctx) {
+    if (!strcmp(name, ".") || !strcmp(name, "..")) return 1;
+    *(int *)ctx = 1;
+    return 0;
+}
+
+static int warm_dir_nonempty(const char *path) {
+    int found = 0;
+    plat_file_list(path, "", warm_nonempty_cb, &found);
+    return found;
+}
+
+static int warm_local_cache_dir(char *out, size_t cap) {
+    if (vk_ctx()->props.vendorID == 0x10de) return plat_getenv("__GL_SHADER_DISK_CACHE_PATH", out, cap);
+#ifndef _WIN32
+    return plat_getenv("MESA_SHADER_CACHE_DIR", out, cap);
+#else
+    (void)out, (void)cap;
+    return 0;
+#endif
+}
+
+static void warm_stamp_format(char *buf, size_t cap, size_t n, uint64_t sig, int has_local_cache) {
+    const VkPhysicalDeviceProperties *pr = &vk_ctx()->props;
+    char uuid[VK_UUID_SIZE * 2 + 1];
+    for (int i = 0; i < VK_UUID_SIZE; i++) sprintf(uuid + i * 2, "%02x", pr->pipelineCacheUUID[i]);
+    snprintf(buf, cap, "v1 %zu %016llx %08x %08x %08x %d %d %s\n", n, (unsigned long long)sig, pr->vendorID, pr->deviceID,
+             pr->driverVersion, P.gpl ? 1 : 0, has_local_cache ? 1 : 0, uuid);
+}
+
+static int warm_prepared_meta(const char *dir, size_t *out_n, uint64_t *out_sig) {
+    char path[PLAT_PATH_MAX * 2 + 32];
+    snprintf(path, sizeof path, "%s/shader-prepared.bin", dir);
+    uint64_t size = 0;
+    uint8_t *f = plat_file_read(path, &size);
+    if (!f) return 0;
+    uint64_t sg = 1469598103934665603ull;
+    for (size_t i = 0; i < size; i++) sg = (sg ^ f[i]) * 1099511628211ull;
+    free(f);
+    *out_n = size >= 16 ? (size_t)(size - 16) / 36 : 0;
+    *out_sig = sg;
+    return 1;
+}
+
+static int warm_stamp_valid(const char *dir, size_t n, uint64_t sig) {
+    char ppath[PLAT_PATH_MAX * 2 + 32], spath[PLAT_PATH_MAX * 2 + 32];
+    snprintf(ppath, sizeof ppath, "%s/lib-warm.progress", dir);
+    if (plat_file_exists(ppath)) return 0;
+    snprintf(spath, sizeof spath, "%s/lib-warm.done", dir);
+    uint64_t ssz = 0;
+    uint8_t *sb = plat_file_read(spath, &ssz);
+    if (!sb) return 0;
+    char exp0[256], exp1[256];
+    warm_stamp_format(exp0, sizeof exp0, n, sig, 0);
+    warm_stamp_format(exp1, sizeof exp1, n, sig, 1);
+    int ok = 0;
+    if (ssz == strlen(exp0) && !memcmp(sb, exp0, ssz)) {
+        ok = 1;
+    } else if (ssz == strlen(exp1) && !memcmp(sb, exp1, ssz)) {
+        char cdir[PLAT_PATH_MAX * 2];
+        ok = warm_local_cache_dir(cdir, sizeof cdir) && warm_dir_nonempty(cdir);
+    }
+    free(sb);
+    return ok;
+}
+
 // Preparation: one prepared variant at a time into the driver's disk cache (private shader copy, nothing kept).
 // Uses a per-worker scratch VkPipelineCache reset every 256 variants so P.cache stays unbloated and compiler memory stays bounded.
 static void lb_warm_worker(void *arg) {
@@ -3474,6 +3540,8 @@ static void lb_warm_worker(void *arg) {
             char buf[64];
             int len = snprintf(buf, sizeof buf, "%zu %llu %zu\n", LB.n, (unsigned long long)LB.sig, LB.mark);
             plat_file_write_atomic(LB.prog_path, buf, (size_t)len);
+            printf("warm-shaders: %zu/%zu\n", (size_t)d, LB.n);
+            fflush(stdout);
         }
         plat_mutex_unlock(&LB.stat);
         if (d % 4000 == 0) lb_report("preparation progress");
@@ -3495,6 +3563,9 @@ static void lb_warm_prepared(const char *dir) {
     for (size_t i = 0; f && i < size; i++) sg = (sg ^ f[i]) * 1099511628211ull;
     free(f);
     if (!LB.e) return;
+    char done_path[PLAT_PATH_MAX * 2 + 32];
+    snprintf(done_path, sizeof done_path, "%s/lib-warm.done", dir);
+    plat_file_delete(done_path);
     LB.n = n, LB.idle = 0, LB.t0 = now_ms();
     // Resume: lib-warm.progress holds "count signature mark" of an interrupted run over this same list (the driver
     // cache keeps the variants below mark). A finished run deletes it, so the next run builds everything again.
@@ -3514,6 +3585,8 @@ static void lb_warm_prepared(const char *dir) {
         }
     }
     free(pf);
+    printf("warm-shaders: %zu/%zu\n", (size_t)LB.done, LB.n);
+    fflush(stdout);
     static const uint32_t no_pr[16], no_fs[4];
     lb_state(no_pr, no_fs);
     const char *te = cfg_get("DKB_LIB_PREBUILD_THREADS");
@@ -3532,7 +3605,13 @@ static void lb_warm_prepared(const char *dir) {
     if (!k) lb_warm_worker(NULL);
     for (int i = 0; i < k; i++) plat_thread_join(t[i]);
     lb_report("preparation done");
+    printf("warm-shaders: %zu/%zu\n", n, n);
+    fflush(stdout);
     plat_file_delete(LB.prog_path);
+    char cdir[PLAT_PATH_MAX * 2], sbuf[256];
+    int has_local = warm_local_cache_dir(cdir, sizeof cdir) && warm_dir_nonempty(cdir);
+    warm_stamp_format(sbuf, sizeof sbuf, n, LB.sig, has_local);
+    plat_file_write_atomic(done_path, sbuf, strlen(sbuf));
     free(LB.ok), LB.ok = NULL, LB.mark = 0;
     // with gpl off only compute variants are built: say so, rather than count the skipped ones as built
     if (LB.nolib)
@@ -3590,6 +3669,31 @@ int vk_pipeline_warm_shaders(void) {
     if (!plat_file_exists(prp)) {
         fprintf(stderr, "warm-shaders: no %s (tools/prepare_shaders.py writes it)\n", prp);
         return 1;
+    }
+    lb_warm_prepared(dir);
+    return 0;
+}
+
+int vk_pipeline_warm_shaders_if_needed(void) {
+    if (!ensure_init()) {
+        fprintf(stderr, "warm-shaders: no Vulkan device\n");
+        return 1;
+    }
+    char dir[PLAT_PATH_MAX * 2];
+    snprintf(dir, sizeof dir, "%s", P.cache_path);
+    char *cut = plat_last_sep(dir);
+    if (!cut) return 1;
+    *cut = 0;
+    size_t n = 0;
+    uint64_t sig = 0;
+    if (!warm_prepared_meta(dir, &n, &sig)) {
+        fprintf(stderr, "warm-shaders: no %s/shader-prepared.bin\n", dir);
+        return 3;
+    }
+    if (n == 0 || warm_stamp_valid(dir, n, sig)) {
+        printf("warm-shaders: up-to-date\n");
+        fflush(stdout);
+        return 0;
     }
     lb_warm_prepared(dir);
     return 0;

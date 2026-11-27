@@ -452,3 +452,4 @@ int probe_splash(void);                                    // vk_splash.c: the s
 int vk_pipeline_prepare_shaders(void);                     // vk_pipeline.c: --prepare-shaders (tools/prepare_shaders.py)
 int vk_pipeline_translate_shaders(void);                  // vk_pipeline.c: --translate-shaders (installer/bananza.py)
 int vk_pipeline_warm_shaders(void);                       // vk_pipeline.c: --warm-shaders (tools/build_game.py)
+int vk_pipeline_warm_shaders_if_needed(void);             // vk_pipeline.c: --warm-shaders-if-needed (launcher)

@@ -573,7 +573,7 @@ static int usage(const char *argv0) {
     fprintf(stderr, "usage: %s [--exefs DIR] [--romfs DIR] [--profile DIR] [--set KEY=VALUE ...] [--version] [--help] [--selftest | --probe-loader | "
                     "--probe-cfg | --probe-dpi | --probe-commit-later (Windows) | --probe-kernel | --probe-ipc | --probe-ipc-lifetime | --probe-services | --probe-fs | --probe-gfx-abi | "
                     "--probe-nvn | --probe-nvn-tex | --probe-window | --probe-shader | --probe-shader-geometry | --probe-vkmem | "
-                    "--probe-vkexec | --probe-vkgeometry | --probe-vkgeometry-passthrough | --probe-vkgeometry-passthrough-ordering | --probe-vkclear | --probe-vkcopy-astc | --probe-vkpool | --probe-vkreset | --probe-astc | --probe-movie | --probe-splash | --probe-aoc | --prepare-shaders | --translate-shaders | --warm-shaders | --boot |--seconds S [--shot PNG]]\n", argv0);
+                    "--probe-vkexec | --probe-vkgeometry | --probe-vkgeometry-passthrough | --probe-vkgeometry-passthrough-ordering | --probe-vkclear | --probe-vkcopy-astc | --probe-vkpool | --probe-vkreset | --probe-astc | --probe-movie | --probe-splash | --probe-aoc | --prepare-shaders | --translate-shaders | --warm-shaders | --warm-shaders-if-needed | --boot |--seconds S [--shot PNG]]\n", argv0);
     return 2;
 }
 
@@ -748,6 +748,7 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--prepare-shaders")) return gfx_shader_tool(GFX_TOOL_PREPARE_SHADERS);
     if (!strcmp(mode, "--translate-shaders")) return gfx_shader_tool(GFX_TOOL_TRANSLATE_SHADERS);
     if (!strcmp(mode, "--warm-shaders")) return gfx_shader_tool(GFX_TOOL_WARM_SHADERS);
+    if (!strcmp(mode, "--warm-shaders-if-needed")) return gfx_shader_tool(GFX_TOOL_WARM_SHADERS_IF_NEEDED);
     if (!strcmp(mode, "--boot")) { cfg.boot = 1; rt_boot(); return 0; }
     fprintf(stderr, "%s: unknown option '%s'\n", argv[0], mode);   // a mistyped or unsupported flag is named (#402)
     return usage(argv[0]);
