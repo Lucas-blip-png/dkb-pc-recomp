@@ -2438,7 +2438,7 @@ static const GfxShader *get_async_one(Req r, int stage, const uint8_t *control, 
     // A shader in the disk cache loads on the calling thread, so the draw that asks for it is not skipped for a frame.
     // DKB_SHADER_LOAD_QUEUE=1 sends the load to the load workers instead (the caller sees it pending).
     static int load_queue = -1;
-    if (load_queue < 0) load_queue = cfg_bool("DKB_SHADER_LOAD_QUEUE");
+    if (load_queue < 0) { const char *q = cfg_get("DKB_SHADER_LOAD_QUEUE"); load_queue = q && !strcmp(q, "1"); }
     int lq = r.final && load_queue;
     if (r.final && !lq && (s = request_disk_load(&r, r.key, r.iid))) return plat_inc64(&n_hits), mem_insert(s);
 

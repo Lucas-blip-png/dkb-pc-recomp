@@ -32,13 +32,10 @@ int nvn2_lower(const uint8_t *control, const uint8_t *code, const uint8_t **out_
     (void)out_code;
     return 0;
 }
-const char *cfg_get(const char *name) {
-    (void)name;
-    return NULL;
-}
-int cfg_bool(const char *name) {   // the queued disk load is on unless the test sets DKB_SHADER_LOAD_QUEUE=0
+const char *cfg_get(const char *name) {   // the queued disk load is on unless the test sets DKB_SHADER_LOAD_QUEUE=0
+    if (strcmp(name, "DKB_SHADER_LOAD_QUEUE")) return NULL;
     const char *v = getenv(name);
-    return !strcmp(name, "DKB_SHADER_LOAD_QUEUE") ? !v || strcmp(v, "0") : v && strcmp(v, "0");
+    return v && !strcmp(v, "0") ? "0" : "1";
 }
 void rt_log(const char *format, ...) {
     (void)format;
