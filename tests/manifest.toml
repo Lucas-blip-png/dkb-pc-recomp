@@ -577,6 +577,12 @@ area = "shaders"
 cmd = ["{python}", "tests/fsr3fi_bindings_test.py"]
 
 [[test]]
+name = "ngx-vtable"
+tier = 0
+area = "gfx"
+cmd = ["{python}", "tests/ngx_vtable_test.py"]
+
+[[test]]
 name = "temporal-idle"
 tier = 1
 area = "gfx"

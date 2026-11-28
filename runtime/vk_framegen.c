@@ -16,7 +16,10 @@
 // (vk_fsr3fi.c), over the depth and motion of the frame's temporal upscaler (vk_fg_record's fi); a frame it cannot
 // make gets the built-in one. AMD's passes are also given the game's frames without their HUD, so the HUD is not moved
 // with the scene: the upscaler's output is copied before the game draws its HUD into it (vk_fsr3fi_note_picture), and
-// shaders/fg_hudless.comp makes from that copy the frame as the window texture would hold it without the HUD.
+// shaders/fg_hudless.comp makes from that copy the frame as the window texture would hold it without the HUD. With
+// frame_gen_by = dlss, NVIDIA DLSS Frame Generation makes the 2x frame from the same inputs, on a D3D12 device of its
+// own (vk_dlssg.cpp); the frame's command buffer then goes out through vk_dlssg_submit, which copies the made frame
+// in after the D3D12 work.
 //
 // Auto and 3x to 8x (vk_fg_record returns 2), two threads as in Hookshot. A fixed multiplier m gives each game frame as
 // many frames as the display can show, m at most (fg_pace_fixed_frames): the made ones at t = k / n, then the game's own.
@@ -44,6 +47,7 @@
 //
 // Any failure turns the pass off for the session with one log line, and the present goes on as without it.
 #include "vk.h"
+#include "vk_dlssg.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -125,7 +129,7 @@ static struct {
     uint64_t last_at;     // when the previous job reached vk_fg_record; 0 = none
     int64_t interval;     // the game's frame interval, fg_pace_interval
     // the 5 s log
-    uint64_t t0, real, made_n, by_fsr, hudless_used, no_hist, hitch, over, crop, cut, late, set_waits;
+    uint64_t t0, real, made_n, by_fsr, by_dlss, hudless_used, no_hist, hitch, over, crop, cut, late, set_waits;
 } S;
 // S and the images are touched by vk_fg_record (the present thread) and vk_fg_release (the exit, under vk_present.c's g_pl
 // first: that order everywhere), so each holds this lock for its whole run; vk_fg_show copies what it needs and presents
@@ -350,7 +354,9 @@ static int ensure_images(VkCtx *c, uint32_t w, uint32_t h, int frames, int mode,
     uint32_t qw = (w + 3) / 4, qh = (h + 3) / 4, cw = (qw + 3) / 4, ch = (qh + 3) / 4;
     const VkImageUsageFlags work = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     int ok = 1;
-    if (!frames) ok = make_image(c, &S.made, f, w, h, work | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    // the 2x frame: written by the synthesis pass or AMD's, or copied in from DLSS Frame Generation's output
+    if (!frames)
+        ok = make_image(c, &S.made, f, w, h, work | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     // a set's frames are written by the synthesis pass or copied from the history, and blitted to the window
     for (int s = 0; s < SETS && ok; s++)
         for (int i = 0; i < frames && ok; i++)
@@ -446,8 +452,8 @@ static int pq_format_ok(VkCtx *c) {
 static int hudless_images(VkCtx *c, VkCommandBuffer cb) {
     if (S.hudless_img[1].img) return 1;
     for (int i = 0; i < 2; i++)
-        if (!make_image(c, &S.hudless_img[i], HIST_FMT, S.w, S.h,
-                        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) {
+        if (!make_image(c, &S.hudless_img[i], HIST_FMT, S.w, S.h,   // copied out for DLSS Frame Generation
+                        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
             free_image(c, &S.hudless_img[0]), free_image(c, &S.hudless_img[1]);
             return 0;
         }
@@ -484,13 +490,13 @@ static void log_stats(uint64_t now) {
                (double)S.made_n / s, (unsigned)S.no_hist, (unsigned)S.hitch, (unsigned)S.over, (unsigned)S.crop,
                (unsigned)S.set_waits);
     else
-        rt_log("fg: %.1f s: real %.1f fps, shown %.1f fps, made %u (by AMD FSR 3.1 %u, %u of them with the frames "
-               "without their HUD); skipped: no history %u, hitch %u, over refresh %u, crop %u; real cut short %u; "
-               "late >2 ms %u",
+        rt_log("fg: %.1f s: real %.1f fps, shown %.1f fps, made %u (by AMD FSR 3.1 %u, by DLSS Frame Generation %u; "
+               "%u of them with the frames without their HUD); skipped: no history %u, hitch %u, over refresh %u, "
+               "crop %u; real cut short %u; late >2 ms %u",
                s, (double)S.real / s, (double)(S.real + S.made_n) / s, (unsigned)S.made_n, (unsigned)S.by_fsr,
-               (unsigned)S.hudless_used, (unsigned)S.no_hist, (unsigned)S.hitch, (unsigned)S.over, (unsigned)S.crop,
+               (unsigned)S.by_dlss, (unsigned)S.hudless_used, (unsigned)S.no_hist, (unsigned)S.hitch, (unsigned)S.over, (unsigned)S.crop,
                (unsigned)S.cut, (unsigned)S.late);
-    S.t0 = now, S.real = S.made_n = S.by_fsr = S.hudless_used = S.no_hist = S.hitch = S.over = S.crop = S.cut = S.late = S.set_waits = 0;
+    S.t0 = now, S.real = S.made_n = S.by_fsr = S.by_dlss = S.hudless_used = S.no_hist = S.hitch = S.over = S.crop = S.cut = S.late = S.set_waits = 0;
 }
 
 // The display thread (Hookshot vk_framegen.cpp display_main): takes the sets in the order they were made and shows
@@ -745,12 +751,15 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4], co
     pass(cb, &S.luma, in, S.luma_img[cur].view, qw, qh, &luma_push, sizeof luma_push);
     // 2x with frame_gen_by = fsr3: AMD's interpolation makes the frame where the upscaler gave this frame's depth and
     // motion (vk_fsr3fi.c; a size that is not the 3D's shape, a first frame after a gap and a camera cut it refuses).
-    // The flow and synthesis passes below then run only for a frame it did not make (the luma above always runs: the
-    // built-in flow of a later frame reads it).
-    int by_amd = 0;
-    // AMD's passes take an SDR picture, so a PQ history (the game's own HDR picture) goes to the built-in interpolation.
+    // With frame_gen_by = dlss, NVIDIA's DLSS Frame Generation makes it from the same inputs (vk_dlssg.cpp). The flow
+    // and synthesis passes below then run only for a frame neither made (the luma above always runs: the built-in
+    // flow of a later frame reads it).
+    int by_amd = 0, by_nv = 0, nv_hudless = 0;
+    const int dlss = vk_dlssg_wanted();
+    // AMD's and NVIDIA's passes take an SDR picture, so a PQ history (the game's own HDR picture) goes to the built-in
+    // interpolation.
     S.hudless_ok[cur] = 0;   // set below when this frame's picture without its HUD is made
-    if (!frames && any_made && !pq && vk_fsr3fi_wanted()) {
+    if (!frames && any_made && !pq && (dlss || vk_fsr3fi_wanted())) {
         if (fi && fi->valid) {
             // The frame without its HUD (shaders/fg_hudless.comp), from the upscaled picture copied before the game
             // drew its HUD into it (vk_fsr3fi_note_picture). The game's last draw scales that picture to the whole
@@ -768,15 +777,29 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4], co
                 S.hudless_ok[cur] = 1;
                 if (S.hudless_ok[prev]) hl = S.hudless_img[cur].view, hl_prev = S.hudless_img[prev].view;
             }
-            by_amd = vk_fsr3fi_generate(cb, fi, S.hist[cur].view, S.hist[prev].view, hl, hl_prev, S.made.view, uw, uh);
-            if (by_amd && hl) S.hudless_used++;
+            if (dlss) {
+                // NVIDIA keeps the frame before itself: this frame's picture without its HUD is all it is given
+                VkDlssgSet set = {.color = S.hist[cur].img, .hudless = S.hudless_ok[cur] ? S.hudless_img[cur].img : VK_NULL_HANDLE,
+                                  .w = uw, .h = uh, .depth = fi->depth, .motion = fi->motion_image,
+                                  .rw = fi->render_width, .rh = fi->render_height,
+                                  .to_prev = fi->has_to_prev ? fi->to_prev : NULL,
+                                  .jitter = {fi->jitter[0], fi->jitter[1]}, .reset = fi->reset,
+                                  .sequence = fi->sequence, .out = S.made.img};
+                memcpy(set.proj, fi->proj, sizeof set.proj);
+                memcpy(set.view, fi->view, sizeof set.view);
+                by_nv = vk_dlssg_record(cb, &set);
+                nv_hudless = set.hudless != VK_NULL_HANDLE;   // counted once the made frame is sent, below
+            } else {
+                by_amd = vk_fsr3fi_generate(cb, fi, S.hist[cur].view, S.hist[prev].view, hl, hl_prev, S.made.view, uw, uh);
+                if (by_amd && hl) S.hudless_used++;
+            }
         } else
-            say(SAY_NOFI, "fg: frame_gen_by = fsr3 needs the depth and motion of a temporal upscaler (upscaler = dlss, "
-                          "fsr3 or fsr4, with the 3D drawn below the output size): the built-in interpolation makes this "
-                          "frame", 0);
+            say(SAY_NOFI, "fg: frame_gen_by = fsr3 or dlss needs the depth and motion of a temporal upscaler (upscaler "
+                          "= dlss, fsr3 or fsr4, with the 3D drawn below the output size): the built-in interpolation "
+                          "makes this frame", 0);
     }
     if (by_amd) S.made_n++, S.by_fsr++;
-    if (any_made && !by_amd) {
+    if (any_made && !by_amd && !by_nv) {
         in[0] = (VkDescriptorImageInfo){S.nearest, S.luma_img[prev].view, G};
         in[1] = (VkDescriptorImageInfo){S.nearest, S.luma_img[cur].view, G};
         pass(cb, &S.flow, in, S.flow_img[0].view, fw, fh, NULL, 0);
@@ -813,7 +836,9 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4], co
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = 1, .pCommandBufferInfos = &cbi};
     vkResetFences(c->device, 1, &S.fence);
     vk_queue_lock();
-    VkResult r = vkQueueSubmit2(c->gfx_queue, 1, &si, S.fence);
+    // a DLSS frame: the D3D12 work and the copy of the made frame go out behind this submission
+    int nv_made = 0;
+    VkResult r = by_nv ? vk_dlssg_submit(c->gfx_queue, &si, S.fence, &nv_made) : vkQueueSubmit2(c->gfx_queue, 1, &si, S.fence);
     vk_queue_unlock();
     if (r != VK_SUCCESS) {
         vk_device_fault_report(r);
@@ -829,6 +854,11 @@ static int record(VkImage src, VkFormat fmt, int w, int h, const int crop[4], co
     S.shown = cur;
     S.cur = prev;
     S.have_prev = 1;
+    if (by_nv && nv_made) S.made_n++, S.by_dlss++, S.hudless_used += nv_hudless;
+    // A DLSS frame whose D3D12 work or copy back did not go out left the made frame as it was, and the built-in
+    // passes did not run for it: the caller presents the game's frame alone (vk_backend.c), as for a frame with
+    // nothing to blend from. The route is given up then, so the next frames are the built-in interpolation's.
+    if (by_nv && !nv_made) return 0;
     if (!frames) return blend;
     // Auto and 3x to 8x: to the display thread, which starts with the first set
     plat_mutex_lock(&D.mu);

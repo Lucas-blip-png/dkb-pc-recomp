@@ -76,7 +76,20 @@ Bananza draws the upscale into a 3D-sized R11G11B10F picture, then draws the HUD
 
 The log says `fsr3fi: the upscaled picture is copied before the game's HUD` when the copies are made, and the 2x `fg:` line counts the made frames that used the frames without their HUD. With FSR 4 (a Windows build, `vk_fsr4.c`) and DLSS (`vk_dlss.c`) the copy is taken the same way, from the same output image; those two were compiled but not run on the machine this was written on.
 
-Log lines: `fsr3fi: AMD FSR 3.1 frame interpolation can run on this GPU` and `fsr3fi: 17 pass pipelines ready` once the setting is chosen on a capable device, `fsr3fi: making the 2x frames at WxH from RWxRH depth and motion` at the first frame it makes, and `by AMD FSR 3.1 N, K of them with the frames without their HUD` in the 2x `fg:` line (below), which counts the made frames AMD's passes made and those of them that had the frames without their HUD. `fg: frame_gen_by = fsr3 needs the depth and motion of a temporal upscaler ...` says once that a frame had none.
+Log lines: `fsr3fi: AMD FSR 3.1 frame interpolation can run on this GPU` and `fsr3fi: 17 pass pipelines ready` once the setting is chosen on a capable device, `fsr3fi: making the 2x frames at WxH from RWxRH depth and motion` at the first frame it makes, and `by AMD FSR 3.1 N, by DLSS Frame Generation D; K of them with the frames without their HUD` in the 2x `fg:` line (below), which counts the made frames AMD's passes made and those of them that had the frames without their HUD. `fg: frame_gen_by = fsr3 or dlss needs the depth and motion of a temporal upscaler ...` says once that a frame had none.
+
+## NVIDIA DLSS Frame Generation through D3D12 (`frame_gen_by = dlss`, experimental)
+
+NGX offers DLSS Frame Generation (DLSS-G) from the RTX 40 series on (NGX decides). This route makes the frames through NGX's D3D12 side, on a D3D12 device of its own on the same GPU, from images it shares with the Vulkan renderer. No NVIDIA file is shipped. NVIDIA's `nvngx_dlssg.dll`, which NGX looks for beside `dkb.exe` as it does for `nvngx_dlss.dll`, comes with the setup's NVIDIA DLSS download ([dkb-dlss.md](dkb-dlss.md)).
+
+`frame_gen_by = dlss` (Windows only, the menu's Made by row reads NVIDIA DLSS) makes the 2x frame this way. It takes the same inputs as AMD's (the temporal upscaler's depth and motion, the camera, the picture before the HUD), so it runs only under the same conditions as AMD's above, and a frame it cannot make gets the built-in one. `runtime/vk_dlssg.cpp` does it in these steps:
+
+- At device creation, on an NVIDIA GPU, `vk_device.c` enables `VK_KHR_external_memory_win32` and `VK_KHR_external_semaphore_win32` where the device has them (`vk_dlssg_device_exts`).
+- At the first frame with the setting chosen, it makes a D3D12 device on the Vulkan device's adapter (found by its LUID), a queue, three command lists, and the images both APIs share: the picture, the picture before the HUD, the depth (R32_SFLOAT, written from the scene's depth by `runtime/shaders/dlssg_depth.comp`, since a depth image cannot be shared here), the motion and the made frame. One timeline semaphore, the imported D3D12 fence, orders the two queues; a second one, Vulkan-only, orders the copy-back ring.
+- Each 2x frame, `vk_framegen.c` records the copies into the shared images in its own command buffer, and `vk_dlssg_record` sets NGX's parameters: the camera (projection in NGX's 0 to 1 depth, view, the clip-to-previous-clip matrix), the jitter, the motion scale and the reset flag. `vk_dlssg_submit` then submits that command buffer with a signal of the shared fence, the D3D12 queue waits for it, evaluates the feature and signals again, and a second Vulkan submission waits for that and copies the made frame into the frame generation pass's own image.
+- Any failure (an image or fence that cannot be shared, NGX refusing the feature, a queue that does not finish within 5 s) turns the route off for the run, logged once as `dlssg: <reason>; DLSS Frame Generation is off for this run, the built-in interpolation makes the frames`.
+
+Log lines: `dlssg: a D3D12 device on <GPU> (LUID H:L) makes the frames: NGX's D3D12 frame generation is available`, `dlssg: frame generation feature made for WxH from a RWxRH scene`, `dlssg: the first frame made by DLSS Frame Generation (...)`, every 3000 made frames how many had the picture before the HUD and how many reset the history, and `by DLSS Frame Generation N` in the 2x `fg:` line.
 
 ## Requirements
 
@@ -117,7 +130,7 @@ At 2x, every 5 seconds:
 
 - real: game frames per second.
 - shown: real plus made frames per second.
-- made: made frames in the period; by AMD FSR 3.1: those AMD's passes made (`frame_gen_by = fsr3`), the rest the built-in interpolation; K: those of M that had the frames without their HUD.
+- made: made frames in the period; by AMD FSR 3.1 and by DLSS Frame Generation: those AMD's passes (`frame_gen_by = fsr3`) and NVIDIA's feature (`frame_gen_by = dlss`) made, the rest the built-in interpolation; K: those of M that had the frames without their HUD.
 - skipped: made frames not produced, by reason (see above).
 - real cut short: the game's frame was flipped before its half-interval wait ended because a newer frame was already waiting.
 - late >2 ms: the game's frame flipped more than 2 ms after its due time.

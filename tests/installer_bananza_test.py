@@ -649,7 +649,8 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
             self.assertEqual(self.run_install()[0], 0)
             self.assertEqual(fetched, [self.dest])
             (self.dest / b.dlss.FILES[0][1]).unlink()   # a file gone: fetched again
-            self.assertEqual(self.run_install()[0], 0)
+            code, events = self.run_install()
+            self.assertEqual(code, 0, events)
             self.assertEqual(len(fetched), 2)
             self.options.dlss = 'off'
             self.assertEqual(self.run_install()[0], 0)

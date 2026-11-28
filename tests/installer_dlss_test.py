@@ -2,7 +2,8 @@
 
 The pinned table (LICENSE, FILES) is replaced by stand-ins. Checked: the license text comes back only with its pinned
 hash; fetch() puts the DLL and the license in place and installed() then holds; a DLL whose bytes differ is refused and
-leaves no file and no .part behind; the real table is one NVIDIA/DLSS release with a hash on every file.
+leaves no file and no .part behind; the real table is one NVIDIA/DLSS release with a hash on every file, DLSS's DLL and
+DLSS Frame Generation's.
 """
 import hashlib
 import http.server
@@ -86,7 +87,8 @@ class DlssTest(unittest.TestCase):
         self.pins.stop()
         self.assertTrue(dlss.REPO.startswith('https://raw.githubusercontent.com/NVIDIA/DLSS/'))
         self.assertIn(dlss.TAG, dlss.REPO)
-        self.assertEqual([name for _, name, _, _ in dlss.FILES], ['nvngx_dlss.dll'])
+        self.assertEqual([name for _, name, _, _ in dlss.FILES], ['nvngx_dlss.dll', 'nvngx_dlssg.dll'])
+        self.assertEqual({path.rsplit('/', 1)[0] for path, _, _, _ in dlss.FILES}, {'lib/Windows_x86_64/rel'})
         for _, _, size, sha in (dlss.LICENSE, *dlss.FILES):
             self.assertGreater(size, 0)
             self.assertEqual(len(sha), 64)

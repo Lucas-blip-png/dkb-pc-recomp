@@ -112,7 +112,7 @@ def main(argv=None):
                     help='Bananza: accept: fetch AMD FSR 4 (FidelityFX SDK, installer/fsr4.py) next to dkb.exe, having '
                          f'read and accepted AMD\'s license of that release, {fsr4.PAGE}; off: stop fetching it')
     ap.add_argument('--dlss', choices=('accept', 'off'),
-                    help='Bananza: accept: fetch NVIDIA DLSS (nvngx_dlss.dll, installer/dlss.py) next to dkb.exe, having '
+                    help='Bananza: accept: fetch NVIDIA DLSS (nvngx_dlss.dll and nvngx_dlssg.dll, installer/dlss.py) next to dkb.exe, having '
                          f'read and accepted NVIDIA\'s license of that release, {dlss.PAGE}; off: stop fetching it')
     ap.add_argument('--jobs', type=int, default=6, help='Bananza worker limit (default 6)')
     ap.add_argument('--no-update-check', action='store_true',

@@ -34,6 +34,7 @@
 #include "host.h"
 #include "platform/platform.h"
 #include "vk.h"
+#include "vk_dlssg.h"
 
 #include "fsr3_fi_disocclusion_mask_spv.h"
 #include "fsr3_fi_game_motion_vector_field_spv.h"
@@ -429,6 +430,12 @@ int vk_fsr3fi_wanted(void) {
     return !strcmp(cfg_value("DKB_FRAME_GEN_BY"), "fsr3") && capable() && !G.failed;
 }
 
+// The frame's inputs are noted for AMD's interpolation, or for DLSS Frame Generation (vk_dlssg.cpp), which takes the
+// same depth, motion and picture before the HUD.
+static int inputs_wanted(void) {
+    return vk_fsr3fi_wanted() || vk_dlssg_wanted();
+}
+
 // The sampler, the counters, the constants buffer and the pipelines, once per device.
 static int setup(void) {
     if (G.tried) return G.ok;
@@ -644,16 +651,19 @@ static uint64_t last_ns;   // when the previous frame was noted (nl), for the pa
 void vk_fsr3fi_note(const VkTemporalIn *t, uint32_t w, uint32_t h) {
     plat_mutex_lock(&nl);
     noted.valid = 0;   // a frame this does not take is not interpolated with the one before it
-    if (t && t->temporal && t->depth && t->mv && w && h && !strcmp(cfg_value("DKB_FRAME_GEN"), "2x") &&
-        vk_fsr3fi_wanted()) {
+    if (t && t->temporal && t->depth && t->mv && w && h && !strcmp(cfg_value("DKB_FRAME_GEN"), "2x") && inputs_wanted()) {
         float dtv[4];
         if (vk_fsr3_camera_factors(t->proj, dtv)) {
             const uint64_t now = kern_now_ns();
             noted = (VkFiInputs){.valid = 1, .depth = t->depth, .motion = t->mv, .render_width = w, .render_height = h,
                                  .tan_half_fov_x = dtv[2], .jitter = {t->jx, t->jy},
                                  .frame_ms = last_ns && now - last_ns < 250000000ull ? (float)(now - last_ns) / 1e6f : 16.667f,
-                                 .reset = t->reset, .sequence = ++note_count};
+                                 .reset = t->reset, .sequence = ++note_count, .motion_image = t->mv_image,
+                                 .has_to_prev = !t->reset};
             memcpy(noted.device_to_view_depth, dtv, sizeof dtv);
+            memcpy(noted.proj, t->proj, sizeof noted.proj);
+            memcpy(noted.view, t->view, sizeof noted.view);
+            memcpy(noted.to_prev, t->to_prev, sizeof noted.to_prev);
             last_ns = now;
         }
     }
@@ -716,7 +726,7 @@ static int pictures_for(uint32_t w, uint32_t h, VkFormat format) {
 }
 
 void vk_fsr3fi_note_picture(VkCommandBuffer cb, const VkTexImage *out) {
-    if (!out || !out->image || strcmp(cfg_value("DKB_FRAME_GEN"), "2x") || !vk_fsr3fi_wanted()) return;
+    if (!out || !out->image || strcmp(cfg_value("DKB_FRAME_GEN"), "2x") || !inputs_wanted()) return;
     plat_mutex_lock(&nl);
     if (noted.valid && pictures_for(out->width, out->height, out->format)) {
         const uint32_t slot = P.next++ % PICTURES;

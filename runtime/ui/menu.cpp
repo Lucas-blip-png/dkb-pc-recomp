@@ -712,8 +712,9 @@ static const char *present_note(void) {
 
 // Frame generation (vk_framegen.c, Bananza only): off, Auto (a frame for each of the display's refreshes) or a fixed
 // 2x to 8x, live; the names follow the order of cfg.c's list of values. It makes no frames in VSync (fifo) mode, which
-// the note under the value says while both are chosen. "Made by" (frame_gen_by, vk_fsr3fi.c) is shown at 2x only, the
-// one multiplier AMD's interpolation makes frames for; its note says what AMD's needs while it is chosen.
+// the note under the value says while both are chosen. "Made by" (frame_gen_by: vk_fsr3fi.c, vk_dlssg.cpp) is shown at
+// 2x only, the one multiplier AMD's interpolation and NVIDIA's DLSS Frame Generation make frames for; its note says what
+// they need while one is chosen. NVIDIA's is offered on Windows only, where its D3D12 route exists.
 static void rows_frame_gen(void) {
     static const UiTextId names[] = {UI_MENU_OFF, UI_MENU_AUTO, UI_MENU_FRAME_GEN_2X, UI_MENU_FRAME_GEN_3X,
                                      UI_MENU_FRAME_GEN_4X, UI_MENU_FRAME_GEN_5X, UI_MENU_FRAME_GEN_6X,
@@ -723,9 +724,14 @@ static void rows_frame_gen(void) {
     opt_choice("DKB_FRAME_GEN", UI_MENU_FRAME_GEN, names, 9, UI_MENU_FRAME_GEN_DESC,
                idle ? menu_text(UI_MENU_FRAME_GEN_VSYNC) : nullptr);
     if (!strcmp(mode, "2x")) {
-        static const UiTextId by[] = {UI_MENU_FRAME_GEN_BUILTIN, UI_MENU_FRAME_GEN_FSR3};
-        opt_choice("DKB_FRAME_GEN_BY", UI_MENU_FRAME_GEN_BY, by, 2, UI_MENU_FRAME_GEN_BY_DESC,
-                   !strcmp(cfg_value("DKB_FRAME_GEN_BY"), "fsr3") ? menu_text(UI_MENU_FRAME_GEN_BY_NEEDS) : nullptr);
+        static const UiTextId by[] = {UI_MENU_FRAME_GEN_BUILTIN, UI_MENU_FRAME_GEN_FSR3, UI_MENU_FRAME_GEN_DLSS};
+#ifdef _WIN32
+        const int n_by = 3;
+#else
+        const int n_by = 2;   // NVIDIA's route is D3D12 (vk_dlssg.cpp)
+#endif
+        opt_choice("DKB_FRAME_GEN_BY", UI_MENU_FRAME_GEN_BY, by, n_by, UI_MENU_FRAME_GEN_BY_DESC,
+                   strcmp(cfg_value("DKB_FRAME_GEN_BY"), "builtin") ? menu_text(UI_MENU_FRAME_GEN_BY_NEEDS) : nullptr);
     }
 }
 

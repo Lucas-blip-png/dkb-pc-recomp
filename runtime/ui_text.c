@@ -106,10 +106,13 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_FRAME_GEN_VSYNC] = "inactive with VSync",
     [UI_MENU_FRAME_GEN_BY] = "Frame generation made by",
     [UI_MENU_FRAME_GEN_BY_DESC] = "Built-in makes the frames from the picture alone. AMD FSR 3.1 also uses the scene's depth and motion "
-                                  "and an optical flow, which takes more GPU time. It makes the 2x frames only.\n\n"
-                                  "AMD's needs a temporal upscaler (DLSS, FSR 3.1 or FSR 4) with the 3D drawn below the output size; "
-                                  "a frame it cannot make gets the built-in one.",
+                                  "and an optical flow, which takes more GPU time. NVIDIA DLSS uses the same inputs with DLSS Frame Generation, "
+                                  "on an RTX 40 or newer (NGX decides; Windows only). "
+                                  "Both make the 2x frames only.\n\n"
+                                  "Both need a temporal upscaler (DLSS, FSR 3.1 or FSR 4) with the 3D drawn below the output size; "
+                                  "a frame they cannot make gets the built-in one.",
     [UI_MENU_FRAME_GEN_BUILTIN] = "Built-in", [UI_MENU_FRAME_GEN_FSR3] = "AMD FSR 3.1",
+    [UI_MENU_FRAME_GEN_DLSS] = "NVIDIA DLSS",
     [UI_MENU_FRAME_GEN_BY_NEEDS] = "needs DLSS, FSR 3.1 or FSR 4 with the 3D below the output size",
     [UI_MENU_MIRROR_BUDGET] = "Mirror memory limit",
     [UI_MENU_MIRROR_BUDGET_DESC] = "A ceiling on the video memory the copies of game memory (GPU memory mode: Mirror) take together, so that they leave room for textures on a small card. "
@@ -579,10 +582,13 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_FRAME_GEN_VSYNC] = "не работает с вертикальной синхронизацией",
     [UI_MENU_FRAME_GEN_BY] = "Кадры создаёт",
     [UI_MENU_FRAME_GEN_BY_DESC] = "Встроенный способ делает кадры только по картинке. AMD FSR 3.1 использует ещё глубину и движение сцены "
-                                  "и оптический поток, на что уходит больше времени видеокарты. Он делает только кадры режима 2x.\n\n"
-                                  "Для AMD нужен временной апскейлер (DLSS, FSR 3.1 или FSR 4), при котором 3D рисуется в разрешении ниже выходного; "
-                                  "кадр, который он не может сделать, получается встроенным способом.",
+                                  "и оптический поток, на что уходит больше времени видеокарты. NVIDIA DLSS берёт те же данные для DLSS Frame Generation "
+                                  "на RTX 40 и новее (решает NGX; только Windows). "
+                                  "Оба делают только кадры режима 2x.\n\n"
+                                  "Обоим нужен временной апскейлер (DLSS, FSR 3.1 или FSR 4), при котором 3D рисуется в разрешении ниже выходного; "
+                                  "кадр, который они не могут сделать, получается встроенным способом.",
     [UI_MENU_FRAME_GEN_BUILTIN] = "Встроенный", [UI_MENU_FRAME_GEN_FSR3] = "AMD FSR 3.1",
+    [UI_MENU_FRAME_GEN_DLSS] = "NVIDIA DLSS",
     [UI_MENU_FRAME_GEN_BY_NEEDS] = "нужен DLSS, FSR 3.1 или FSR 4 и 3D ниже выходного разрешения",
     [UI_MENU_MIRROR_BUDGET] = "Предел памяти зеркал",
     [UI_MENU_MIRROR_BUDGET_DESC] = "Ограничивает видеопамять, которую занимают все копии памяти игры (режим памяти GPU «Зеркало»), чтобы на небольшой видеокарте осталось место для текстур. "

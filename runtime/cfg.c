@@ -137,7 +137,7 @@ static const CfgMeta metas[] = {
     // vk_crt.c: a CRT look on the finished SDR picture (Hookshot's filters); lines: the virtual raster's
     {"CRT_FILTER", "off", "off|lottes_grille|lottes_tv|hyllian|zfast", LIVE}, {"CRT_LINES", "240", "240|480|720", LIVE},
     {"FRAME_GEN", "off", "off|auto|2x|3x|4x|5x|6x|7x|8x", LIVE},   // vk_framegen.c, experimental
-    {"FRAME_GEN_BY", "builtin", "builtin|fsr3", LIVE},   // vk_fsr3fi.c: AMD FSR 3.1's interpolation at 2x, opt-in
+    {"FRAME_GEN_BY", "builtin", "builtin|fsr3|dlss", LIVE},   // 2x, opt-in: AMD FSR 3.1 (vk_fsr3fi.c), NVIDIA DLSS-G (vk_dlssg.cpp)
     {"ASPECT", "fit", "fit|stretch", LIVE}, {"FOV", "100", "70..140", LIVE},
     {"ULTRAWIDE", "0", "0|1", RESTART},
     {"HUD_POSITION", "edges", "edges|centered", RESTART},

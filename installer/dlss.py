@@ -1,10 +1,12 @@
-"""NVIDIA DLSS for upscaler = dlss (docs/dkb-dlss.md): nvngx_dlss.dll, the DLSS model, fetched from NVIDIA's own
-repository (NVIDIA/DLSS) when the user asks for it and accepts NVIDIA's license, never shipped with this project.
+"""NVIDIA DLSS for upscaler = dlss (docs/dkb-dlss.md): nvngx_dlss.dll, the DLSS model, and nvngx_dlssg.dll, DLSS
+Frame Generation's, fetched from NVIDIA's own repository (NVIDIA/DLSS) when the user asks for them and accepts
+NVIDIA's license, never shipped with this project.
 
-runtime/vk_dlss.c loads nvngx_dlss.dll from the folder of dkb.exe (Windows only). The release is pinned (TAG) and so
-is each file's SHA-256, the license among them: the setup shows that text and asks the user to accept it before
-anything is fetched, and a new release means new hashes here and a new acceptance. The files are read from
-raw.githubusercontent.com at the tag, a public download that needs no login. The license is saved next to the DLL.
+runtime/vk_dlss.c loads nvngx_dlss.dll from the folder of dkb.exe (Windows only); NGX looks for nvngx_dlssg.dll in
+the same folder when frame generation is asked for (runtime/vk_dlssg.cpp). The release is pinned (TAG) and so is each
+file's SHA-256, the license among them: the setup shows that text and asks the user to accept it before anything is
+fetched, and a new release means new hashes here and a new acceptance. The files are read from
+raw.githubusercontent.com at the tag, a public download that needs no login. The license is saved next to the DLLs.
 The download and hash check are installer/fsr4.py's.
 """
 import hashlib
@@ -21,8 +23,9 @@ LICENSE = ('LICENSE.txt', 'NVIDIA-DLSS-license.txt', 26620,
 FILES = (
     ('lib/Windows_x86_64/rel/nvngx_dlss.dll', 'nvngx_dlss.dll', 58956912,
      'd00b5b0ab29c3ca101b70c3a5ecb3a01b7ef33766a3383a28a18623083e6123e'),
+    ('lib/Windows_x86_64/rel/nvngx_dlssg.dll', 'nvngx_dlssg.dll', 7506544,
+     '8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7'),
 )
-
 
 def license_text(repo=REPO):
     """NVIDIA's license of the pinned release as text, fetched and checked against its pinned SHA-256."""

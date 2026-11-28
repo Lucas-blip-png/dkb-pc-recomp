@@ -20,6 +20,7 @@
 #include "nvn_api.h"
 #include "ui/menu.h"
 #include "vk.h"
+#include "vk_dlssg.h"
 #include "platform/platform.h"
 
 #define FRAMES 2
@@ -839,6 +840,7 @@ void vk_present_release(void) {
         vk_smaa_release();
         vk_crt_release();
         vk_fg_release();
+        vk_dlssg_release();   // after frame generation's: nothing records a set once that is let go
         vk_fsr3fi_release();
         vk_color_release();
         vk_hdr_release();
