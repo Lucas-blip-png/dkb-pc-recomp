@@ -41,6 +41,7 @@ extern "C" {
 #include "perfmon.h"
 #include "platform/platform.h"
 #include "sysinfo.h"
+#include "ov.h"
 #include "ui/menu.h"
 #include "ui_text.h"
 #include "window_filter.h"
@@ -439,7 +440,7 @@ extern "C" void menu_vk_release(void) {
 // DKB_MENU_TEST_SET=<frame>:<key>=<value>[,<key>=<value>...][;<frame>:...]: cfg_set of each key (DKB_ prefix
 // optional) at that presented frame; changes live settings with no input, menu open or not. dkb.ini is written only by
 // the pseudo-key SAVE=1 (cfg_save, as a row change does; a failed write shows the menu's save note).
-enum { TAB_DISPLAY, TAB_GRAPHICS, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_MENU, TAB_ADVANCED, TAB_COUNT };
+enum { TAB_DISPLAY, TAB_GRAPHICS, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_AMIIBO, TAB_MENU, TAB_ADVANCED, TAB_COUNT };
 enum { TEST_PAGE_FRAMES = 30, TEST_SETS = 16 };
 struct TestSet { uint64_t frame; char key[64], value[64]; };
 static struct {
@@ -875,6 +876,14 @@ static void rows_display_output(void) {
     row_gpu();
 }
 
+// The folder in the file manager. A fullscreen game is minimised with it: the file manager's window opened behind the
+// game, and the button seemed to do nothing.
+static bool open_folder(const char *dir) {
+    if (!plat_open_folder(dir)) return false;
+    gfx_window_step_aside();
+    return true;
+}
+
 static bool settings_section(UiTextId title, const char *id, bool first = false) {
     if (!first) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2 * ImGui::GetStyle().ItemSpacing.y);
     char label[96];
@@ -924,6 +933,56 @@ static void tab_graphics(float scale, const MenuTarget &target) {
     if (settings_section(UI_MENU_RENDER_OPTIONS, "picture", true)) rows_render_options(target);
     if (settings_section(UI_MENU_COLOR, "color")) rows_color();
     if (settings_section(UI_MENU_HDR_GROUP, "hdr")) rows_hdr();
+    opt_end();
+}
+
+// The amiibo at the game's NFC reader (ov_nfp.c): a folder of the player's tag files, then a file of it.
+static void rows_amiibo(void) {
+    enum { MAXF = 512, MAXT = 1024 };
+    static const char *folders[MAXF + 1], *fnames[MAXF + 1], *paths[MAXT + 2], *names[MAXT + 2];   // +1 for "None", +1 for a file of another folder
+    int nf = ov_nfp_folders(folders, MAXF);
+    if (!nf) opt_text(UI_MENU_AMIIBO_EMPTY);
+    // The folder the files are looked for in, made on the way: the player drops tag files into it
+    // Under the label, only the end of the path (".../DKB/amiibo"): the whole path does not fit the row
+    const char *dir = ov_nfp_dir(), *tail = dir + strlen(dir);
+    for (int seps = 0; tail > dir; tail--)
+        if ((tail[-1] == '/' || tail[-1] == '\\') && (++seps == 2 || dir + strlen(dir) - tail > 26)) break;
+    char shown[48];
+    snprintf(shown, sizeof shown, "%s%.40s", tail > dir ? "..." : "", tail > dir ? tail - 1 : dir);
+    if (opt_action("##amiibo_open", UI_MENU_AMIIBO_OPEN, UI_MENU_AMIIBO_OPEN_DESC, UI_MENU_AMIIBO_OPEN_DO, shown)) {
+        plat_file_mkdir_p(ov_nfp_dir());
+        open_folder(ov_nfp_dir());
+    }
+    if (!nf) return;
+    char folder_buf[1024];   // a copy: the list ov_nfp_folders returned is rebuilt by the next library scan
+    snprintf(folder_buf, sizeof folder_buf, "%s", cfg_value("DKB_AMIIBO_FOLDER"));
+    const char *folder = folder_buf;
+    int cur = -1;
+    for (int i = 0; i < nf; i++) {
+        fnames[i] = *folders[i] ? folders[i] : menu_text(UI_MENU_AMIIBO_TOP);
+        if (!strcmp(folders[i], folder)) cur = i;
+    }
+    if (cur < 0) cur = 0, snprintf(folder_buf, sizeof folder_buf, "%s", folders[0]);   // the folder went, or none was chosen yet: the first one
+    // "" writes the key unset, which stands for the top folder; the others are written as they are
+    if (nf > 1) opt_choice_list("DKB_AMIIBO_FOLDER", UI_MENU_AMIIBO_FOLDER, folders, fnames, nf, UI_MENU_AMIIBO_FOLDER_DESC, cur);
+    paths[0] = "", names[0] = menu_text(UI_MENU_AMIIBO_NONE);
+    int nt = ov_nfp_tags(folder, paths + 1, names + 1, MAXT) + 1;
+    const char *now = cfg_value("DKB_AMIIBO");
+    int at = *now ? -1 : 0;
+    for (int i = 1; i < nt && at < 0; i++)
+        if (!strcmp(paths[i], now)) at = i;
+    if (at < 0) {   // a file of another folder, or one set by hand: shown by its name
+        const char *base = now;
+        for (const char *p = now; *p; p++)
+            if (*p == '/' || *p == '\\') base = p + 1;
+        paths[nt] = now, names[nt] = base, at = nt++;
+    }
+    opt_choice_list("DKB_AMIIBO", UI_MENU_AMIIBO, paths, names, nt, UI_MENU_AMIIBO_DESC, at);
+}
+
+static void tab_amiibo(float scale) {
+    opt_begin("##amiibo", scale);
+    rows_amiibo();
     opt_end();
 }
 
@@ -1269,7 +1328,7 @@ static void tab_advanced(float scale) {
     row_set_or_not("DKB_INPUT_RECORD", UI_MENU_INPUT_RECORD, UI_MENU_INPUT_RECORD_DESC, rec_path);
     if (opt_button("##open_log", UI_MENU_OPEN_LOG, UI_MENU_OPEN_LOG_DESC, action_value(log_note, UI_MENU_OPEN_LOG))) {
         char dir[512];
-        bool ok = sysinfo_log_folder(dir, sizeof dir) && plat_open_folder(dir);
+        bool ok = sysinfo_log_folder(dir, sizeof dir) && open_folder(dir);
         if (!ok) action_done(log_note, false);   // success shows as the opened folder
     }
     if (opt_button("##copy_info", UI_MENU_COPY_INFO, UI_MENU_COPY_INFO_DESC,
@@ -1374,7 +1433,8 @@ static void header_dk(float scale, const char *version) {
 }
 
 static const UiTextId kTabNames[TAB_COUNT] = {UI_MENU_TAB_DISPLAY, UI_MENU_TAB_GRAPHICS, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND,
-                                              UI_MENU_TAB_CONTROLS, UI_MENU_TAB_MENU, UI_MENU_TAB_ADVANCED};
+                                              UI_MENU_TAB_CONTROLS, UI_MENU_TAB_AMIIBO, UI_MENU_TAB_MENU,
+                                              UI_MENU_TAB_ADVANCED};
 static int g_tab;               // the tab shown
 static int g_tab_request = -1;  // select this tab at the next layout; -1 none
 static int g_focus_page = -1;   // this tab's first row takes the cursor once it is shown; -1 none
@@ -1436,6 +1496,7 @@ static void layout_menu(const MenuTarget &target, float scale, bool had_popup) {
             case TAB_GAME: tab_game(scale); break;
             case TAB_SOUND: tab_sound(scale); break;
             case TAB_CONTROLS: tab_controls(scale); break;
+            case TAB_AMIIBO: tab_amiibo(scale); break;
             case TAB_MENU: tab_menu(scale); break;
             case TAB_ADVANCED: tab_advanced(scale); break;
             }

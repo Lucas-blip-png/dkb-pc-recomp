@@ -31,7 +31,7 @@
 
 static SDL_Window *g_win;
 static uint32_t g_ev_base;               // SDL_RegisterEvents: the user events below
-enum { EV_RUN, EV_SETTINGS, EV_CLOSE, EV_TOGGLE_FULLSCREEN, EV_COUNT };
+enum { EV_RUN, EV_SETTINGS, EV_CLOSE, EV_TOGGLE_FULLSCREEN, EV_STEP_ASIDE, EV_COUNT };
 static PlatEvent g_video_ready = {.m = PLAT_MUTEX_INIT, .c = PLAT_COND_INIT, .manual = 1};   // SDL video is up
 static int g_video_ok;
 static PlatOnce g_thread_once = PLAT_ONCE_INIT;
@@ -148,6 +148,10 @@ void gfx_window_toggle_fullscreen(void) {
     if (g_win) post(EV_TOGGLE_FULLSCREEN);
 }
 
+void gfx_window_step_aside(void) {
+    if (g_win) post(EV_STEP_ASIDE);
+}
+
 void gfx_window_request_close(void) {
     if (g_win) post(EV_CLOSE);
 }
@@ -201,6 +205,10 @@ static void handle(const SDL_Event *e) {
     }
     if (e->type == g_ev_base + EV_TOGGLE_FULLSCREEN) {
         if (g_win) toggle_window_mode();
+        return;
+    }
+    if (e->type == g_ev_base + EV_STEP_ASIDE) {
+        if (g_win && is_fullscreen()) SDL_MinimizeWindow(g_win);
         return;
     }
     if (e->type == g_ev_base + EV_CLOSE) gfx_window_closed();

@@ -32,6 +32,7 @@ try:
 except ImportError:
     ImageGrab = None
 
+from . import amiibo
 from . import bananza
 from . import dlss
 from . import fsr4
@@ -226,6 +227,7 @@ class App:
         tk.Frame(root, height=4, bg=RED).pack(fill='x')   # the DK tie's red under the strip
         self.body = ttk.Frame(root, padding=PAD)
         self.body.pack(fill='both', expand=True)
+        self.amiibo_rows = []                      # (label, folder getter) of each amiibo row, for refresh_amiibo
         self.frames = {'form': self.build_form(), 'run': self.build_run(), 'finish': self.build_finish()}
         if launcher:
             self.run_args.setdefault('temp', launcher.temp)
@@ -401,6 +403,11 @@ class App:
             self.dlss_box.pack(anchor='w', pady=(8, 0))
         self.update_hint = ttk.Label(f, wraplength=620, justify='left')
         self.update_hint.pack(anchor='w', pady=(8, 0))
+        # Shown once the install folder holds an installation (refresh_form): the setup window opened by the Linux
+        # AppImage or the setup zip has no home screen, so the form is where the player finds it.
+        self.form_amiibo = None
+        if self.game == 'bananza':
+            self.form_amiibo = self.amiibo_row(f, lambda: self.vars['dest'].get().strip())
         self.form_error = ttk.Label(f, style='Err.TLabel', wraplength=620, justify='left')
         self.form_error.pack(anchor='w', pady=(8, 0))
         if self.game != 'bananza':
@@ -479,6 +486,8 @@ class App:
         self.home_text.pack(anchor='w', pady=(8, 0))
         self.home_tools = ttk.Label(f, wraplength=620, justify='left', foreground=MUTED)
         self.home_tools.pack(anchor='w', pady=(4, 0))
+        if self.game == 'bananza':
+            self.amiibo_row(f, lambda: self.settings.dest).pack(fill='x', pady=(10, 0))
         self.update_box = ttk.Frame(f)
         self.update_box.pack(fill='both', expand=True, pady=(14, 0))
         self.update_text = ttk.Label(self.update_box, wraplength=620, justify='left', style='Warn.TLabel')
@@ -531,6 +540,7 @@ class App:
         state = install_state(self.settings.dest)
         self.home_title.configure(text=self.cat('ui.home_ready' if state == 'ready' else 'ui.home_unfinished'))
         self.home_text.configure(text=self.cat('ui.home_text', dest=self.settings.dest))
+        self.refresh_amiibo()
         self.home_tools.configure(text=self.cat('ui.home_tools', version=self.layout.release, base=self.launcher.base))
         self.play_button.state(['!disabled' if state == 'ready' else 'disabled'])
         id, params = self.update_line
@@ -739,6 +749,49 @@ class App:
             return
         self.root.destroy()
 
+    # ---- amiibo files (Bananza) ----------------------------------------------------------------------------------
+
+    def amiibo_row(self, parent, dest):
+        """A row for the player's own amiibo tag files (installer/amiibo.py): how many the game folder holds, and
+        buttons that copy more in or open the folder. dest() gives the game folder at the time of the click; the caller
+        packs the row."""
+        row = ttk.Frame(parent)
+        text = ttk.Label(row, wraplength=300, justify='left')
+        text.pack(side='left')
+        self.button(row, 'dkb.ui.amiibo_open', lambda: self.open_amiibo(dest())).pack(side='right')
+        adders = (('dkb.ui.amiibo_add_folder', self.add_amiibo_folder),
+                  ('dkb.ui.amiibo_add_files', self.add_amiibo_files))
+        for id, act in adders:
+            self.button(row, id, lambda act=act: act(dest())).pack(side='right', padx=(0, 8))
+        self.amiibo_rows.append((text, dest))
+        return row
+
+    def refresh_amiibo(self):
+        for text, dest in self.amiibo_rows:
+            if dest():
+                text.configure(text=self.cat('dkb.ui.amiibo_count', n=amiibo.count(dest())))
+
+    def amiibo_done(self, dest, copied, skipped):
+        self.refresh_amiibo()
+        id = 'dkb.ui.amiibo_added' if copied or not skipped else 'dkb.ui.amiibo_none'
+        messagebox.showinfo(self.cat('ui.title'), self.cat(id, n=copied, skipped=skipped, folder=amiibo.folder(dest)))
+
+    def add_amiibo_files(self, dest):
+        types = [(self.cat('dkb.ui.type_amiibo'), '*.bin *.nfc'), (self.cat('ui.type_all'), '*.*')]
+        paths = filedialog.askopenfilenames(title=self.cat('dkb.ui.amiibo_add_files'), filetypes=types)
+        if paths and dest:
+            self.amiibo_done(dest, *amiibo.add_files(dest, paths))
+
+    def add_amiibo_folder(self, dest):
+        path = filedialog.askdirectory(title=self.cat('dkb.ui.amiibo_add_folder'), mustexist=True)
+        if path and dest:
+            self.amiibo_done(dest, *amiibo.add_folder(dest, path))
+
+    def open_amiibo(self, dest):
+        if dest:
+            amiibo.folder(dest).mkdir(parents=True, exist_ok=True)
+            self.open_path(str(amiibo.folder(dest)))
+
     def open_path(self, dest):
         if dest and Path(dest).is_dir():
             if os.name == 'nt':
@@ -865,6 +918,12 @@ class App:
                 self.vars['lang'].set(self.lang_label(recorded))
         else:
             self.update_hint.configure(text='')
+        if self.form_amiibo is not None:
+            if state is not None:
+                self.refresh_amiibo()
+                self.form_amiibo.pack(fill='x', pady=(8, 0), after=self.update_hint)
+            else:
+                self.form_amiibo.pack_forget()
         self.fit()
 
     def pick_file(self, name, pick_id):

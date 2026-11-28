@@ -37,7 +37,7 @@ static int save_ok = 1;                         // the last cfg_save_to wrote (o
 // Every name the runtime reads (and the patch sets in generated/), without the prefix. A file key outside this list is
 // logged as unknown. A new variable goes here too, or its ini key logs a harmless "unknown key" line.
 static const char *const known[] = {
-    "AB", "ANTILAG", "AP_FAULT", "AP_SAFE", "APP_POOL", "ASPECT", "ASPECT_PATCH", "ASSUME_FOCUS", "ASTC", "ASTC_BC", "ASTC_BC1", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_CHANNELS", "AUDIO_OFF", "AUDIO_PREFILL_MS",
+    "AB", "AMIIBO", "AMIIBO_DIR", "AMIIBO_FOLDER", "ANTILAG", "AP_FAULT", "AP_SAFE", "APP_POOL", "ASPECT", "ASPECT_PATCH", "ASSUME_FOCUS", "ASTC", "ASTC_BC", "ASTC_BC1", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_CHANNELS", "AUDIO_OFF", "AUDIO_PREFILL_MS",
     "BACKGROUND_WINDOW", "BIND_A", "BIND_B", "BIND_DOWN", "BIND_L", "BIND_LCLICK", "BIND_LEFT", "BIND_LSTICK_DOWN", "BIND_LSTICK_LEFT",
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
@@ -73,6 +73,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"COLOR_GAMMA", "display"}, {"HDR", "display"}, {"HDR_PEAK_NITS", "display"}, {"HDR_GAME_NITS", "display"},
     {"HDR_UI_NITS", "display"}, {"HDR_NATIVE", "display"},
     {"DEVICE_PROFILE", "display"}, {"ASSUME_FOCUS", "display"}, {"SPLASH", "display"},
+    {"AMIIBO", "files"}, {"AMIIBO_DIR", "files"}, {"AMIIBO_FOLDER", "files"},
     {"MENU_THEME", "menu"}, {"MENU_LANG", "language"}, {"LANG", "language"}, {"OPERATION_MODE", "language"},
     {"VOLUME", "audio"}, {"AUDIO_CHANNELS", "audio"},
     {"MOTION", "input"}, {"RUMBLE_STRENGTH", "input"}, {"RUMBLE_CURVE", "input"}, {"RUMBLE_TRIGGERS", "input"}, {"RUMBLE_HD", "input"}, {"RENHDRUM", "input"}, {"SWITCH2", "input"}, {"COOP", "input"}, {"COOP_PAD_DEVICE", "input"},
@@ -110,6 +111,8 @@ static const CfgMeta metas[] = {
     // Screen
     {"FULLSCREEN", "0", "0|1", LIVE}, {"CONSOLE", "1", "0|1", RESTART}, {"WINDOW_MODE", "windowed", "windowed|borderless|fullscreen", LIVE},
     {"WINDOW_SIZE", "1920x1080", NULL, LIVE},
+    // nn::nfp (ov_nfp.c): the tag file at the reader, the folder the menu lists tags from and the subfolder it shows
+    {"AMIIBO", "", NULL, LIVE}, {"AMIIBO_DIR", "", NULL, LIVE}, {"AMIIBO_FOLDER", "", NULL, LIVE},
     {"VK_PRESENT", "mailbox", "mailbox|fifo|immediate", LIVE}, {"HEADLESS", "", NULL, RESTART}, {"GPU_INDEX", "", NULL, RESTART},
     // The path of a Vulkan ICD JSON file ("~" expands) to use instead of the system's drivers; empty: the system's.
     // vk_driver_env.c sets VK_DRIVER_FILES from it before the loader runs.

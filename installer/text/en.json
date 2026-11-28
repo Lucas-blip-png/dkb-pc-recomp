@@ -323,5 +323,13 @@
  "dkb.ui.dlss_loading": "Fetching the license from NVIDIA's repository...",
  "dkb.ui.dlss_fetch_failed": "NVIDIA's license could not be fetched ({detail}). Check the connection and try again; you can read it at {url}.",
  "dkb.ui.dlss_accept": "I accept",
- "dkb.ui.dlss_decline": "Decline"
+ "dkb.ui.dlss_decline": "Decline",
+
+ "dkb.ui.amiibo_count": "Amiibo files in the game folder: {n}",
+ "dkb.ui.amiibo_add_files": "Add amiibo files...",
+ "dkb.ui.amiibo_add_folder": "Add a folder...",
+ "dkb.ui.amiibo_open": "Open amiibo folder",
+ "dkb.ui.type_amiibo": "amiibo tag files (.bin, .nfc)",
+ "dkb.ui.amiibo_added": "Copied {n} amiibo files into {folder} (skipped {skipped} that are not tag dumps). Choose one in the game: F1, Amiibo.",
+ "dkb.ui.amiibo_none": "None of these is an amiibo tag dump: a .bin of 540, 532 or 572 bytes, or a Flipper .nfc file ({skipped} skipped)."
 }

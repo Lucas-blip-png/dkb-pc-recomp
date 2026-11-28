@@ -323,5 +323,13 @@
  "dkb.ui.dlss_loading": "Загрузка лицензии из репозитория NVIDIA...",
  "dkb.ui.dlss_fetch_failed": "Не удалось загрузить лицензию NVIDIA ({detail}). Проверьте подключение и попробуйте снова; прочитать её можно по адресу {url}.",
  "dkb.ui.dlss_accept": "Принимаю",
- "dkb.ui.dlss_decline": "Отклонить"
+ "dkb.ui.dlss_decline": "Отклонить",
+
+ "dkb.ui.amiibo_count": "Файлов amiibo в папке игры: {n}",
+ "dkb.ui.amiibo_add_files": "Добавить файлы amiibo...",
+ "dkb.ui.amiibo_add_folder": "Добавить папку...",
+ "dkb.ui.amiibo_open": "Открыть папку amiibo",
+ "dkb.ui.type_amiibo": "Файлы меток amiibo (.bin, .nfc)",
+ "dkb.ui.amiibo_added": "Скопировано файлов amiibo: {n}, в {folder} (пропущено не являющихся дампами меток: {skipped}). Выберите один в игре: F1, Amiibo.",
+ "dkb.ui.amiibo_none": "Среди них нет дампов меток amiibo: .bin размером 540, 532 или 572 байта либо файл Flipper .nfc (пропущено: {skipped})."
 }

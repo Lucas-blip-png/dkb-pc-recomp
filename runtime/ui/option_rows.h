@@ -56,6 +56,8 @@ bool opt_choice_list(const char *key, UiTextId label, const char *const *values,
 // A row that runs an action: true on A or a click. id: unique on the page and not a setting ("##copy_info"); value:
 // shown on the right ("" none).
 bool opt_button(const char *id, UiTextId label, UiTextId desc, const char *value = "");
+// A row whose right side is a push button with the given caption; note is the small line under the label (NULL: none)
+bool opt_action(const char *id, UiTextId label, UiTextId desc, UiTextId caption, const char *note = nullptr);
 // lo..hi in steps of step (left and right held for a second go ten times as fast); fmt formats the value ("%.0f %%").
 // note: a short status under the label, as opt_choice's (NULL: none).
 bool opt_slider(const char *key, UiTextId label, float lo, float hi, UiTextId desc, float step = 1,
