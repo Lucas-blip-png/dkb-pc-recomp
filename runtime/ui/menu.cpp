@@ -324,7 +324,8 @@ static int vk_up(const MenuTarget *t) {
 }
 
 // Roboto Medium (Latin, Cyrillic, dashes and quotes) at 26 px per 1080 lines, with the glyphs of the Japanese, Korean
-// and Chinese language names merged in from a system font when there is one (each language is named in its own script).
+// and Chinese language names merged in from a system font when there is one (each language is named in its own script);
+// the Chinese catalog's own text comes from that font too, so the menu can switch language at any time.
 // Made again when the window height changes; the old texture goes after the queue is idle (CreateFontsTexture).
 static const ImWchar kRanges[] = {0x0020, 0x00FF, 0x0400, 0x052F, 0x2010, 0x2027, 0};
 static const struct { const char *lang; UiTextId name; } kCjk[] = {
@@ -392,7 +393,10 @@ static int fonts_up(float scale) {
         }
         merged++;
         ImFontGlyphRangesBuilder b;
-        b.AddText(ui_text_in("en", kCjk[i].name));
+        if (!strcmp(kCjk[i].lang, "zh-Hans"))
+            for (int id = 0; id < UI_TEXT_COUNT; id++) b.AddText(ui_text_in("zh-Hans", (UiTextId)id));
+        else
+            b.AddText(ui_text_in("en", kCjk[i].name));
         b.BuildRanges(&ranges[i]);
         ImFontConfig mc;
         mc.MergeMode = true;
@@ -971,7 +975,7 @@ static void row_controller_device(void) {
     const char **names = (const char **)malloc((size_t)(count + 2) * sizeof(char *));
     char (*display)[256] = (char (*)[256])calloc((size_t)(count + 1), 256);
     if (!values || !names || !display) { free(values); free(names); free(display); return; }
-    values[0] = "auto"; names[0] = "Auto";
+    values[0] = "auto"; names[0] = menu_text(UI_MENU_AUTO);
     const char *preferred = cfg_value("DKB_PAD_DEVICE");
     int found = !strcmp(preferred, "auto");
     for (int i = 0; i < count; i++) {
@@ -996,7 +1000,9 @@ static void row_controller_device(void) {
     int cur = 0;
     if (input_pad_automatic()) {
         if (connected) {
-            snprintf(display[count], sizeof display[count], "Auto: %.240s", info.name);
+            char auto_name[241];
+            snprintf(auto_name, sizeof auto_name, "%.240s", info.name);
+            snprintf(display[count], sizeof display[count], menu_text(UI_MENU_PAD_DEVICE_AUTO_FMT), auto_name);
             names[0] = display[count];
         }
     } else if (connected) {
@@ -1053,8 +1059,9 @@ static void tab_controls(float scale) {
 
 static void tab_menu(float scale) {
     opt_begin("##menu", scale);
-    static const UiTextId langs[] = {UI_MENU_MENU_LANG_AUTO, UI_MENU_LANGNAME_EN, UI_MENU_LANGNAME_RU};
-    opt_choice("DKB_MENU_LANG", UI_MENU_MENU_LANG, langs, 3, UI_MENU_MENU_LANG_DESC);
+    static const UiTextId langs[] = {UI_MENU_MENU_LANG_AUTO, UI_MENU_LANGNAME_EN, UI_MENU_LANGNAME_RU,
+                                     UI_MENU_LANGNAME_ZH_HANS};
+    opt_choice("DKB_MENU_LANG", UI_MENU_MENU_LANG, langs, 4, UI_MENU_MENU_LANG_DESC);
     static const UiTextId themes[] = {UI_MENU_THEME_DK, UI_MENU_THEME_CLASSIC};
     opt_choice("DKB_MENU_THEME", UI_MENU_THEME, themes, 2, UI_MENU_THEME_DESC);
     opt_end();

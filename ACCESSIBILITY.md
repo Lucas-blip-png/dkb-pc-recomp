@@ -33,7 +33,8 @@ Every one can also be set in `dkb.ini` next to `dkb.exe`; `dkb.ini.example` desc
 
 **Language**
 
-- Game language (`lang`) and settings menu language, English or Russian (`menu_lang`).
+- Game language (`lang`) and settings menu language, English, Russian or Chinese (`menu_lang`; Chinese follows the
+  system language for Simplified and Traditional alike).
 
 ## Known limitations
 
