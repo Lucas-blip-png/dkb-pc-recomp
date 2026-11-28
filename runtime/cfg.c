@@ -193,7 +193,7 @@ static const CfgMeta metas[] = {
     {"TEX_ALIAS", "1", "0|1", RESTART}, {"TEX_HASH", "1", "0|1", RESTART}, {"TEX_VRAM_PRESSURE", "90", "0..100", RESTART}, {"ASTC_BC", "0", "0|1", RESTART}, {"ASTC_BC1", "1", "0|1", RESTART}, {"ZSTD_NATIVE", "1", "0|1", RESTART}, {"ZSTD_CHECK", "0", "0|1", RESTART},
     // render fixes
     {"EXPERIMENTAL_GEOMETRY", "0", "0|1", RESTART}, {"NATIVE_GS", "1", "0|1", RESTART},
-    {"MVK_UPSCALE_BLIT", "1", "0|1", RESTART},
+    {"MVK_UPSCALE_BLIT", "1", "0|1", RESTART},   // on by default on MoltenVK only; 1 also on other GPUs (a blit in place of the game's upscaler)
     {"CUBEMAP_RATE", "0", "0..60", RESTART},   // vk_exec.c resolve_rt: the same for the 128x128 cubemap face passes
     {"SMAA_BYPASS", "0", "0|1", RESTART},   // vk_exec_draw.c smaa_bypass_draw: the game's SMAA passes become a copy
     {"TEX_UMA_HOST", "0", "0..2", RESTART},   // vk_texture.c create_tex: on an integrated GPU, textures may use the host heap

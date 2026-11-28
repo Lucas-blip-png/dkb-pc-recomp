@@ -5564,7 +5564,7 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
 
 // ---- dispatch and uniform buffer updates
 
-// WORKAROUND, MoltenVK only (DKB_MVK_UPSCALE_BLIT, on by default there, 0 turns it off):
+// WORKAROUND, MoltenVK (DKB_MVK_UPSCALE_BLIT, on by default there, 0 turns it off; 1 turns it on on any GPU):
 // Bananza's own compute upscaler (the dispatch that scales the graded frame to the output size) gives wrong results on
 // Metal. Its input is right; its output keeps a dim red channel, little green and blue, and blocks, so every scene is
 // dark red and blue. The cause is not found: fast math off (MVK_CONFIG_FAST_MATH_ENABLED=0), a write-only binding of the
@@ -5588,6 +5588,14 @@ static int mvk_upscale_cs(uint64_t h) {
            h == 0xbd63ebb7ee8d50eaull || h == 0x9bf9c9b0219fa9b4ull || h == 0xc714f7479e0e112bull;
 }
 
+// The upscaler's compute shaders by NVN 2 origin (from evolis-game's low-spec fork), which does not move with the
+// translator or the host's shader options the way the SPIR-V hash does.
+static int mvk_upscale_match(VkExec *ex, const GfxShader *cs) {
+    if (mvk_upscale_cs(gfx_shader_spirv_fnv(cs))) return 1;
+    uint64_t o = stage_origin(DC_OF(ex), ex->prog, NVN_STAGE_CS);
+    return o == 0xe27e4707534b74e8ull || o == 0x3582d55d1149d49bull;
+}
+
 // Whether the device can blit from format f with linear filtering (src) or into it (dst), optimal tiling.
 static int blit_ok(VkFormat f, int dst) {
     VkFormatProperties fp;
@@ -5601,11 +5609,13 @@ static int blit_ok(VkFormat f, int dst) {
 // then runs). The caller has already put a full barrier before it (vk_exec_barrier in op_dispatch) and puts one after.
 static int mvk_upscale_blit(VkExec *ex, const GfxShader *cs) {
     static int on = -1;
-    if (on < 0) on = vk_caps.moltenvk && cfg_bool("DKB_MVK_UPSCALE_BLIT");
+    // On by default on MoltenVK only; DKB_MVK_UPSCALE_BLIT=1 turns it on elsewhere too (from evolis-game's low-spec
+    // fork: a weak GPU runs the blit in place of the game's upscaler, trading its reconstruction for frame time).
+    if (on < 0) on = cfg_is_set("DKB_MVK_UPSCALE_BLIT") ? cfg_bool("DKB_MVK_UPSCALE_BLIT") : vk_caps.moltenvk;
     // The hash is kept with the shader (gfx_shader_spirv_fnv): a cache of the last shader alone missed on nearly every
     // dispatch, as dispatches alternate between compute shaders, and hashing the whole SPIR-V each time took about 12%
     // of the replaying thread on an M4.
-    if (!on || !mvk_upscale_cs(gfx_shader_spirv_fnv(cs))) return 0;
+    if (!on || !mvk_upscale_match(ex, cs)) return 0;
     uint64_t hs = ex->tex[NVN_STAGE_CS][0], hd = ex->img[NVN_STAGE_CS][1];
     view_t vs, vd;
     int hvs = 0, hvd = 0;
