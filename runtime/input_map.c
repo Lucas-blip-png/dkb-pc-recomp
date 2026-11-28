@@ -417,12 +417,12 @@ uint32_t input_pad_choose(InputPadSelection *s, const InputPadDevice *devices, i
     } else {
         int keep_current = s->keep && current_available;
         if (s->pending == current || s->pending == reserved || !pad_list_has(devices, count, s->pending) ||
-            (keep_current && s->automatic))
+            (keep_current && s->pending != saved))
             s->pending = 0;
         for (int i = 0; i < count; i++) {
             int known = 0;
             for (int j = 0; j < s->count; j++) if (devices[i].id == s->ids[j]) known = 1;
-            if (!known && !keep_current && devices[i].id != reserved) {
+            if (!known && (!keep_current || devices[i].id == saved) && devices[i].id != reserved) {
                 // If several devices arrive in one poll, the last enumerated arrival wins.
                 s->pending = devices[i].id;
                 s->automatic = 1;
