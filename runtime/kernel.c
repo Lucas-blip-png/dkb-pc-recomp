@@ -1289,11 +1289,17 @@ static void stall_dump(uint64_t idle_ns) {
             if (k) plat_sleep_ms(1);
             if (plat_intr_stop(o->hthr, &rip[k], &rsp)) plat_intr_resume(o->hthr, 0);
         }
-        uintptr_t b = plat_exe_base();
-        rt_log("stall:   host rip exe+%#llx, exe+%#llx (lifted code %d, %d); disable count %u, redirect pending %d",
-               (unsigned long long)(rip[0] - b), (unsigned long long)(rip[1] - b),
+        // The module each rip falls in (a stall inside a system library or driver shows its name, not a negative exe
+        // offset), and the host function the guest called when its pc sits in the host-function window (#575).
+        char mn[2][128] = {"?", "?"};
+        uintptr_t mb[2] = {0, 0};
+        for (int k = 0; k < 2; k++) plat_module_of((uintptr_t)rip[k], mn[k], sizeof mn[k], &mb[k]);
+        const char *hf = o->cur ? hostfn_name(o->cur->pc) : NULL;
+        rt_log("stall:   host rip %s+%#llx, %s+%#llx (lifted code %d, %d); disable count %u, redirect pending %d; "
+               "host function %s",
+               mn[0], (unsigned long long)(rip[0] - mb[0]), mn[1], (unsigned long long)(rip[1] - mb[1]),
                rip[0] >= g_gen_lo && rip[0] <= g_gen_hi, rip[1] >= g_gen_lo && rip[1] <= g_gen_hi,
-               o->tlr ? ap_tlr(o)[0] : 0, o->ap_pending);
+               o->tlr ? ap_tlr(o)[0] : 0, o->ap_pending, hf ? hf : "-");
     }
     rt_log("stall: asynchronous preemption: %llu interrupted, %llu given up there; refused %llu in a host call, %llu "
            "outside game code, %llu disabled, %llu failed, %llu in an exception's dispatch, %llu in a system call, %llu "

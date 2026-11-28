@@ -900,6 +900,17 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
     float *lr=m->output_scratch;
     memset(lr, 0, sizeof(float) * (size_t)oc * (size_t)frames);
     if (sink && sink->input_count >= 1 && sink->input_count <= 6) {
+        // DKB_AUDIO_DUMP=<file>: the device sink's mix as raw float32 frames of `oc` channels at the renderer's rate,
+        // before any volume (the player's, the device's, the final mix's), so it records with DKB_VOLUME=0 too. For
+        // audio bugs (#576): the file shows noise the ear reports, without playing it.
+        static FILE *dump;
+        static int dump_tried;
+        if (!dump_tried) {
+            dump_tried = 1;
+            const char *p = cfg_get("DKB_AUDIO_DUMP");
+            if (p && *p && !(dump = fopen(p, "wb"))) rt_log("audio: DKB_AUDIO_DUMP: cannot open %s", p);
+            if (dump) rt_log("audio: DKB_AUDIO_DUMP: writing the mix to %s (float32, %d channels, %d Hz)", p, oc, m->rate);
+        }
         const float gain = host_volume() * atomic_load(&device_volume) * (r->mixes[0].in_use ? r->mixes[0].volume : 1.0f);
         const float *ch[6] = {0};
         for (uint32_t c = 0; c < sink->input_count; c++) if (sink->inputs[c] >= 0 && sink->inputs[c] < m->nbuf) ch[c] = mixbuf(m, sink->inputs[c]);
@@ -918,7 +929,9 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
                 float x = s[c] * gain;
                 lr[oc * k + c] = x > 1 ? 1 : x < -1 ? -1 : x;
             }
+            if (dump) fwrite(s, sizeof(float), (size_t)oc, dump);
         }
+        if (dump) fflush(dump);   // the game is often closed by killing it
     } else if (!sink && !circular) report_once(m, 5, "no device sink in use", r->param.sink_count);
     level_note(r, m, lr, frames);
     output_push(m, lr, frames);

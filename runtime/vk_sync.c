@@ -975,6 +975,12 @@ static int fence_wait_impl(uint64_t value, uint64_t timeout_ns) {
             }
         }
         ok = done >= value;
+        // A wait of a second or more that runs out (#575: the main thread sat 5 s in nvnSyncWait) is logged with the
+        // fence values, to tell a fence the GPU never finished from one that was queued and never submitted.
+        if (!ok && timeout_ns >= 1000000000ull)
+            rt_log("vk: fence wait for %llu timed out after %.1f s (done %llu, issued %llu, reserved %llu)",
+                   (unsigned long long)value, (kern_now_ns() - t0) / 1e9, (unsigned long long)done,
+                   (unsigned long long)issued, (unsigned long long)reserved);
     }
     plat_mutex_unlock(&st_lock);
     return ok;

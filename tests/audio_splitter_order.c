@@ -19,6 +19,7 @@ void rt_fatal(const char *format, ...) {
     fprintf(stderr,"unexpected fatal: %s\n",fatal_message); exit(2);
 }
 static float host_volume(void) { return 1.0f; }
+static const char *cfg_get(const char *name) { (void)name; return NULL; }   // DKB_AUDIO_DUMP stays off
 static void level_note(AudioRenderer *r,Mixer *m,const float *lr,int frames) {
     (void)r;(void)m;(void)lr;(void)frames; // output metering has no routing effect
 }
