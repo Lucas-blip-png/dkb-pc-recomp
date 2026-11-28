@@ -68,7 +68,7 @@ typedef struct {
     int moltenvk;                      // the driver is MoltenVK (VK_DRIVER_ID_MOLTENVK)
     int radv;                          // Mesa's RADV (VK_DRIVER_ID_MESA_RADV)
     int nvidia_prop;                   // NVIDIA's proprietary driver (VK_DRIVER_ID_NVIDIA_PROPRIETARY)
-    int amd_slices;                    // a discrete AMD GPU on the proprietary driver, where sliced passes were measured (vk_exec.c par_threads)
+    int amd_slices;                    // a discrete AMD GPU on the proprietary driver or RADV, where sliced passes were measured (vk_exec.c par_threads)
 } VkCaps;
 extern VkCaps vk_caps;
 void vk_caps_driver(VkPhysicalDevice p);             // first, before vkCreateDevice: vk_caps.amd, amd_sc

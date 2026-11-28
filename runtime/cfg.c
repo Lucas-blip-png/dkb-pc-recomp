@@ -176,7 +176,7 @@ static const CfgMeta metas[] = {
     {"MENU_LANG", "", "en|ru|zh-Hans", LIVE}, {"MENU_THEME", "dk", "dk|classic", LIVE},
     // Advanced: scheduling
     {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "0", "0|1", RESTART},
-    {"REPLAY_THREADS", "", "0..16", RESTART},     // sliced passes (vk_exec.c par_threads): 0 off, else the recording threads; unset: 6 from 12 logical processors, 4 from 6, 3 from 4, on AMD only discrete GPUs on the proprietary driver (vk_caps.amd_slices), else 0
+    {"REPLAY_THREADS", "", "0..16", RESTART},     // sliced passes (vk_exec.c par_threads): 0 off, else the recording threads; unset: 6 from 12 logical processors, 4 from 6, 3 from 4, on AMD only discrete GPUs on the proprietary driver or RADV (vk_caps.amd_slices), else 0
     {"CALL_REF", "1", "0|1", RESTART},   // CallCommands of a recording without deferred records records an OP_CALL (nvn_api_cmd.c inline_recording)
     {"RESET_CPU_LIST", "1", "0|1|2", RESTART},   // indirect-reset pointer lists read from guest memory (vk_exec_draw.c vk_exec_reset_indirect)
     {"FREE_CORES", "0", "0|1", RESTART}, {"TIMER_1MS", "1", "0|1", RESTART}, {"REC_BATCH", "0", "0..64", RESTART},

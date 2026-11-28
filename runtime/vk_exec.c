@@ -2254,7 +2254,10 @@ static int par_nworkers;
 // #141), an RX 6650 XT with 4 (58.9 fps over 33 minutes, #141) and an RX 7800 XT with 8 (30 to 45 minutes, a steady 60
 // in Sublayer 200, #418). So every discrete AMD GPU on the proprietary driver takes the default (vk_caps.amd_slices).
 // Integrated AMD GPUs stay at 0: a Radeon 610M (issue #84) and a Radeon 890M in a ROG Xbox Ally X (Adrenalin 26.10.1,
-// issue #155) lost the device with them. AMDVLK and RADV stay at 0 until they are measured.
+// issue #155) lost the device with them. Discrete GPUs on RADV take the default too: set by hand, an RX 6800 XT
+// (Mesa 26.3.1) went from 67.0 to 77.5 fps with 4 threads (#479), an RX 9070 XT (Mesa, 3.2.0 Hilltop Layer) from 30 to
+// 39 fps with 4 (#570), and an RX 7900 XTX (Mesa 26.2.7) ran the #577 tests with 4, all without device loss. AMDVLK
+// and integrated GPUs on any driver (the Steam Deck among them) stay at 0.
 static int par_threads(void) {
     if (par_mode < 0) {
         const char *e = cfg_get("DKB_REPLAY_THREADS");
