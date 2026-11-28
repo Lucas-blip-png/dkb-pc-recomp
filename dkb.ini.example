@@ -382,9 +382,14 @@
 # romfs_dir =
 
 [diagnostics]
-# Experimental Switch 2 reads of up to 4 KiB without waiting; requires replay_async = 1. Opt-in only: its background
-# write-back can overwrite mapped CPU writes made after invalidate returns. Keep 0 for synchronous read-back.
+# Experimental Switch 2 reads of up to 4 KiB without waiting for a GPU write still in flight, with either replay. Opt-in
+# only: its background write-back can overwrite mapped CPU writes made after invalidate returns. Keep 0 for
+# synchronous read-back.
 # nx2_read_nowait = 0
+# Copies the render targets the CPU reads back every frame right behind the submission that rendered them, so a read
+# whose render has completed waits for that copy alone instead of the work queued since (docs/dkb-testing.md,
+# DKB_WB_AHEAD). Measured as a gain only together with nx2_read_nowait = 1.
+# wb_ahead = 0
 # Extra lines in the log, comma separated: svc, host, ipc, fs, gfx, perf, sched, audio, present or all. The menu's
 # Performance log sets perf (frame timings). Default: none.
 # trace = perf

@@ -8436,6 +8436,8 @@ static void upload_wait(uint64_t seq) {
     plat_rmutex_unlock(&cmd_lock);
 }
 
+void vk_upload_wait(uint64_t seq) { upload_wait(seq); }
+
 int vk_upload_done(uint64_t seq) {
     plat_once(&cmd_once, cmd_init, NULL);
     plat_rmutex_lock(&cmd_lock);
