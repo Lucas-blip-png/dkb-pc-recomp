@@ -40,6 +40,8 @@ static SDL_Gamepad *SDL_OpenGamepad(SDL_JoystickID id) {
 static const char *SDL_GetGamepadSerial(SDL_Gamepad *p) { return p->serial; }
 static void SDL_CloseGamepad(SDL_Gamepad *p) { p->closes++; assert(p->references-- > 0); }
 #define SDL_free free
+// input.c leaves out the controllers Steam hid; none here
+static SDL_JoystickID *gamepad_ids(int *n) { return SDL_GetGamepads(n); }
 
 #include "input.h"
 // The runner copies the production scanner block here, without the unrelated window/game runtime.
