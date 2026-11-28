@@ -335,6 +335,7 @@ static int pick_device(void) {
         }
     free(qp);
     rt_log("vk: using gpu %d: %s", best, g_vk.props.deviceName);
+    vk_caps_driver(g_vk.phys);   // the memory mode reads the driver (vk_caps.nvidia_prop: shadow storage on Linux)
     vk_mem_class_log(&g_vk.props, &g_vk.mem_props);
     return 1;
 }

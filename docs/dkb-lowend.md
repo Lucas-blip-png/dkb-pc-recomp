@@ -146,7 +146,7 @@ fault per page, 6.7 ms of CPU a frame. `vk_gpu_written_many` does a submission's
 
 Ruled out in the same scene: `DKB_REPLAY_THREADS` 2, 4 and 8 (46 to 48 fps), the generated code at `-O2` instead of
 `-O1` (46.7 and 47.4 against 46.8), `DKB_REPLAY_ASYNC=1` (32 fps: the game falls to two vsyncs a frame) and
-`DKB_SHADOW=0` (2 fps on Linux, as the shadow storage's comment says). What is left on the replaying thread is the
+`DKB_SHADOW=0` (2 fps on Linux with RADV, as the shadow storage's comment says). What is left on the replaying thread is the
 write-watch query before each submit, about 2.5 ms a frame over 530 MiB. Copying a GPU write back only when the CPU
 touches its pages would remove the rest of the write-back; the last table row is its upper bound here.
 

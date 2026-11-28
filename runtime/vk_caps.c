@@ -48,6 +48,7 @@ void vk_caps_driver(VkPhysicalDevice p) {
     vk_caps.amd_sc = drv.driverID == VK_DRIVER_ID_AMD_PROPRIETARY && strstr(drv.driverInfo, "shader compiler");
     vk_caps.moltenvk = drv.driverID == VK_DRIVER_ID_MOLTENVK;
     vk_caps.radv = drv.driverID == VK_DRIVER_ID_MESA_RADV;
+    vk_caps.nvidia_prop = drv.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
     // A discrete AMD GPU on AMD's proprietary driver: the AMD setups the replay threads were measured on (vk_exec.c
     // par_threads). The two that lost the device with them were integrated.
     vk_caps.amd_slices = vk_caps.amd && drv.driverID == VK_DRIVER_ID_AMD_PROPRIETARY &&

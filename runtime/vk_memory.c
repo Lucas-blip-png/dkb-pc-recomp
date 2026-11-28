@@ -1743,8 +1743,8 @@ static uint64_t page_hi(const PoolRec *r) { return (r->lo + r->size + 0xfff) & ~
 
 // ---------------------------------------------------------------- shadow storage
 // Where importing guest memory costs too much (Linux: re-protecting pages that amdgpu imported as a userptr
-// invalidates the buffer, about 1.3 ms per 16 MiB at the next submit, and the import's write pinning clears the
-// write watch), a CPU-visible pool gets a host-visible buffer of its own instead, at the offsets the import would have:
+// invalidates the buffer, about 1.3 ms per 16 MiB at the next submit; NVIDIA's proprietary driver does not pay it, see
+// mirror_mode), a CPU-visible pool gets a host-visible buffer of its own instead, at the offsets the import would have:
 // - CPU -> shadow: right before each submit (vk_mem_shadow_sync), the pools the replay resolved since the last one are
 //   queried for written pages; pages stamped after a pool's sgen are copied in by the CPU.
 // - GPU -> guest: the replay notes each GPU write into CPU-visible memory at record time (vk_mem_gpu_pending) and
@@ -1755,7 +1755,7 @@ static uint64_t page_hi(const PoolRec *r) { return (r->lo + r->size + 0xfff) & ~
 //   plant culling appends to buffers the game resets on the CPU before each use; skipping the reset left the shadow
 //   with the old list, the culling appended to it, and the write-back put the grown list back in guest memory each
 //   frame (the plant instance pools filled with repeats and the open ground lost its grass, issue #462).
-// DKB_SHADOW=1/0 forces the mode on or off; the default is on for Linux, off where importing is cheap (Windows, and
+// DKB_SHADOW=1/0 forces the mode on or off; the default is on for Linux except NVIDIA's proprietary driver (mirror_mode), off where importing is cheap (Windows, and
 // MoltenVK, which imports host memory without Linux's write-watch and page re-protection).
 typedef struct { uint64_t lo, hi, sync; } SRange;   // sync: s_syncs_done when the write was noted
 static PlatMutex shadow_lock = PLAT_MUTEX_INIT;   // after pool_lock; before gen_lock
@@ -2797,10 +2797,20 @@ static void mirror_mode(int discrete, uint32_t vendor) {
 #if defined(_WIN32) || defined(__APPLE__)
     shadow_on = sh && *sh && strcmp(sh, "0");
 #else
-    shadow_on = !sh || !*sh || strcmp(sh, "0");
+    // Linux: on by default, except on NVIDIA's proprietary driver. The shadow copies were chosen for amdgpu, where
+    // re-protecting imported memory invalidates the driver's userptr buffer at every submit (docs/building.md). With
+    // NVIDIA's driver the pools are imported as on Windows, and there the shadow sync cost more than the imports: about
+    // half of the submitting thread's replay, on the frame's critical path. A CPU write still clears its page's
+    // protection through the page tables, so the write watch sees it either way. Measurements and the mirror check
+    // (DKB_MEMORY=verify) are in docs/dkb-testing.md, DKB_SHADOW.
+    shadow_on = sh && *sh ? strcmp(sh, "0") != 0 : !vk_caps.nvidia_prop;
 #endif
     if (shadow_on) rt_log("mem: shadow storage: CPU-visible pools are host-visible copies of guest memory, not imports%s",
                           sh && *sh ? " (DKB_SHADOW)" : "");
+#if !defined(_WIN32) && !defined(__APPLE__)
+    else rt_log("mem: no shadow storage: CPU-visible pools are imported (%s)",
+                sh && *sh ? "DKB_SHADOW=0" : "the default on NVIDIA's proprietary driver; DKB_SHADOW=1 turns it on");
+#endif
     // The differential write-back needs shadow_on, so it is decided here. By default on NVIDIA, the one vendor it was
     // measured on; DKB_MIRROR_DIFF=1 or ab turns it on elsewhere, 0 off.
     mirror_diff_mode = vk_mirror_on && !shadow_on ? rt_knob("MIRROR_DIFF", vendor == 0x10de ? "1" : "0") : 0;

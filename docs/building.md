@@ -185,11 +185,19 @@ WAYLAND_DISPLAY=wayland-1 SDL_VIDEODRIVER=wayland` (the socket name is in `$XDG_
 
 Memory: on Windows the GPU imports guest memory and `GetWriteWatch` tracks the CPU's writes to it. On Linux,
 re-protecting imported memory invalidates the driver's userptr buffer on every submit (about 1.3 ms per 16 MiB on
-amdgpu), and importing pins the pages, which drops their write protection. Each CPU-visible pool therefore gets a
+amdgpu; NVIDIA's driver re-protects without that cost, so it keeps importing, see `vk_memory.c` `mirror_mode`). The
+pin faults each page once at import. Elsewhere each CPU-visible pool therefore gets a
 host-visible copy (shadow storage, `runtime/vk_memory.c`): the pages the CPU wrote go in before each submit, and the GPU's
 writes come back at its fence. In play that costs about 0.2 ms a frame and doubles the memory of those pools (about
 1.1 GB). `DKB_SHADOW=1` turns it on under Windows too. The Steam Deck's RADV has `VK_EXT_external_memory_host` as
 well: the shadow copies are chosen for the measured cost above, not for a missing extension.
+
+NVIDIA's proprietary driver imports the pools as on Windows, and there the shadow copies are off by default
+(`DKB_SHADOW=1` turns them on). On 3.2.0, in a level of the first save, they cost the submitting thread about
+4.2 ms a frame (2,100 pools, about 10 MiB copied in and 7 MiB back a frame), all inside the replay. Without them the
+replay went from 8.6-8.9 ms to 4.4-4.7 ms a frame and the scene held 60 fps (`docs/dkb-testing.md`, `DKB_SHADOW`). The
+write watch still sees every CPU write: a write clears the page's protection through the page tables whether or not
+the driver pinned the page, and `DKB_MEMORY=verify` found no mirror page that differed from guest memory.
 
 The Deck's GPU (Van Gogh) has no native ASTC, so its textures go through the compute decoder (`runtime/vk_astc.c`,
 `DKB_ASTC`) as on desktop AMD GPUs without it; frame times measured there include it.
