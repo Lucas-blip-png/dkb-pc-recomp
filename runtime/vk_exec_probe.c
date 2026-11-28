@@ -863,8 +863,10 @@ static int test_mirror(const GfxBackend *b, uint8_t *guest, int *bytes) {
     // 4: a uniform update through the mirror, reported at its fence (vk_gpu_written_into), is its page's newest write, so
     // the next sync leaves the page out (vk_memory.c mirror_sync). The probe then changes a guest byte of the page and
     // takes the write-watch bit itself, so no stamp records the change: a copy from the page reads the mirror's byte,
-    // and with DKB_MIRROR_OWN=0, which copies the page in again, the guest's.
-    int skip_own = RT_KNOB_ON(rt_knob("MIRROR_OWN", "1"));
+    // and with DKB_MIRROR_OWN=0, which copies the page in again, the guest's. So does shadow storage: there
+    // vk_gpu_written_into notes no write as the mirror's own (it reports through vk_gpu_written, which stamps the page
+    // as any guest write), so the next sync copies the page in whatever DKB_MIRROR_OWN says.
+    int skip_own = RT_KNOB_ON(rt_knob("MIRROR_OWN", "1")) && !vk_mem_shadow_on();
     memset(m + 0x5000, 0x21, 0x4000);
     static _Alignas(8) uint8_t ub[sizeof(p_update_ub) + 256];
     p_update_ub uh = {a + 0x5000, 256};
@@ -883,7 +885,8 @@ static int test_mirror(const GfxBackend *b, uint8_t *guest, int *bytes) {
     CHECK(xf_submit(b, stream, p), "fence_wait of the fifth mirror submission timed out");
     for (int i = 0; i < 256; i++) CHECK(m[0x6000 + i] == 0x42, "B2B of the updated bytes: byte %d is %02x", i, m[0x6000 + i]);
     CHECK(m[0x6900] == (skip_own ? 0x21 : 0x99), "B2B from a page the mirror wrote last read %02x, expected %02x (%s)",
-          m[0x6900], skip_own ? 0x21 : 0x99, skip_own ? "the sync copied the page in again" : "DKB_MIRROR_OWN=0");
+          m[0x6900], skip_own ? 0x21 : 0x99,
+          skip_own ? "the sync copied the page in again" : vk_mem_shadow_on() ? "shadow storage" : "DKB_MIRROR_OWN=0");
     // 5: a CPU write to the page after the sync of the submission that updates it, stamped before that update's fence
     // (here by a check as the texture cache makes), is newer than the mirror: the fence's stamp is not the mirror's own,
     // and the next sync copies the page, the CPU byte and the probe's unstamped one included.
