@@ -1198,6 +1198,23 @@ def nested_work(dest, temp, layout_temp):
     return bool(os.environ.get('APPIMAGE')) and not temp and not layout_temp
 
 
+def fix_temp_env(temp):
+    """Point TMP, TEMP and TMPDIR at <temp>/tmp when the inherited value is not an existing folder. Clang makes its
+    object files there and stops with "unable to make temporary file" otherwise: RecompLauncher 0.90 on Windows started
+    the setup that way and the check step failed at once. A valid value is kept, since nuget_needs_fallback moves NuGet
+    to the system temporary folder when the setup's own has spaces."""
+    names = ('TMP', 'TEMP') if os.name == 'nt' else ('TMPDIR',)
+    # An unset TMPDIR is fine on POSIX (/tmp); on Windows clang needs TMP or TEMP
+    ok = lambda n: os.path.isdir(os.environ[n]) if os.environ.get(n) else os.name != 'nt'
+    if all(ok(n) for n in names):
+        return
+    own = temp / 'tmp'
+    own.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        os.environ[n] = str(own)
+    tempfile.tempdir = None   # gettempdir() caches its first answer
+
+
 def work_folder(dest, temp, layout_temp):
     """The folder that holds this install's generated C, objects and logs, for a resolved dest."""
     raw_base = (temp or layout_temp or (dest if nested_work(dest, temp, layout_temp) else dest.parent) / NESTED).absolute()
@@ -1350,6 +1367,7 @@ def main(options):
         info = preflight(layout, options, dest, temp, rep)
         # All read-only validation succeeded. Logs and owned output may now be created.
         temp.mkdir(parents=True, exist_ok=True)
+        fix_temp_env(temp)
         write_owner(temp / OWNER, info['owner'])
         locks.append(lock_temp(temp))
         dest.mkdir(parents=True, exist_ok=True)

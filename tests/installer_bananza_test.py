@@ -249,6 +249,21 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
         self.layout = self.layout.__class__(**{**self.layout.__dict__, 'temp': None})
         return patch.dict(os.environ, {'APPIMAGE': '/tmp/DKB-Setup.AppImage'})
 
+    def test_a_missing_temp_folder_is_replaced_by_the_work_folder(self):
+        # RecompLauncher on Windows started the setup with TMP and TEMP naming no folder, and clang failed (#547)
+        names = ('TMP', 'TEMP') if os.name == 'nt' else ('TMPDIR',)
+        gone = str(self.dest.parent / 'no-such-folder')
+        with patch.dict(os.environ, dict.fromkeys(names, gone)):
+            b.fix_temp_env(self.dest)
+            for n in names:
+                self.assertEqual(os.environ[n], str(self.dest / 'tmp'))
+                self.assertTrue(os.path.isdir(os.environ[n]))
+            self.assertEqual(tempfile.gettempdir(), str(self.dest / 'tmp'))
+        tempfile.tempdir = None
+        with patch.dict(os.environ, dict.fromkeys(names, str(self.dest.parent))):   # a valid one is kept
+            b.fix_temp_env(self.dest / 'other')
+            self.assertEqual(os.environ[names[0]], str(self.dest.parent))
+
     def test_appimage_work_folder_lives_in_the_install_folder(self):
         with self.appimage_install():
             code, events = self.run_install()
