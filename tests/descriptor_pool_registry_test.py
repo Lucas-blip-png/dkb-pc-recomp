@@ -65,6 +65,7 @@ int plat_mutex_trylock_shared(PlatMutex *m) { return plat_mutex_trylock(m); }
 uint64_t kern_now_ns(void) { return 0; }
 void perf_lock_wait(int lock, uint64_t ns) { (void)lock; (void)ns; }
 const char *cfg_get(const char *key) { (void)key; return NULL; }   // DKB_LOCK_HOLDS: off
+int cfg_bool(const char *key) { (void)key; return 0; }   // DKB_TEX_FRAME_EPOCH: off
 void plat_cond_broadcast(PlatCond *c) { (void)c; }
 void plat_cond_wait(PlatCond *c, PlatMutex *m) { (void)c; (void)m; rt_fatal("unexpected fixture wait\n"); }
 '''
