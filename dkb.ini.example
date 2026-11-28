@@ -108,6 +108,11 @@
 # split_draws = 64
 # split_us = 1000
 
+# Low-spec options, all off by default (from evolis-game's low-spec fork; docs/dkb-lowend.md, "Low-spec options").
+# Render each shadow map one frame in N (2 to 60; 0 or 1 = every frame). The map keeps its last content in between, so
+# shadows lag by up to N frames. Applies from frame 120.
+# shadow_rate = 0
+
 # Vulkan.
 # Vulkan validation layer: checks every call and slows the game down a lot. Needs the layer installed (Vulkan SDK).
 # vk_validation = 0

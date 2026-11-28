@@ -5057,7 +5057,7 @@ fall:
 
 static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
     DrawCtx *const dc = DC_OF(ex);
-    if (ex->render_disabled) return 0;
+    if (ex->render_disabled || ex->skip_shadow) return 0;
     static int skip_all = -1;   // DKB_SKIP_DRAWS=1: drop every draw (bisecting GPU faults)
     if (skip_all < 0) skip_all = getenv("DKB_SKIP_DRAWS") != NULL;
     if (skip_all) return 0;

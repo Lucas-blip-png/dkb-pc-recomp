@@ -276,3 +276,13 @@ Recommended for a weak GPU: `scene_res = auto`, so the game's dynamic resolution
 output on each side, with the game's own upscaler (the default; DLSS and FSR were not measured here). `full` costs 2.3
 ms a frame of GPU time at 1920x1080 and 3.3 ms at 2560x1440. Each step up in output resolution costs about as much as
 `full` at the step below: keep the output at the monitor's size, and lower it before turning `full` on.
+
+## Low-spec options
+
+Four opt-in settings ported from evolis-game's low-spec fork of this runtime (`donkey-kong-bananza-pc-lowspec`, commit
+e78174cac4) and a profile that sets them for an integrated GPU. They all default to off. Each trades picture quality for
+frame time, so turn them on one at a time and compare.
+
+| Setting | Effect |
+| --- | --- |
+| `shadow_rate = N` (2 to 60) | Renders each shadow map one frame in N. Shadows lag by up to N frames; the fork ran 8 on an integrated GPU. |

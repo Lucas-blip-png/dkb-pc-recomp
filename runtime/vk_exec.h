@@ -59,6 +59,7 @@ typedef struct VkExec {
     VkExecTarget color[8], depth;        // resolved targets
     uint32_t pass_w, pass_h, pass_layers;            // render area and layer count of the open (or next) pass
     int pass_noatt;                                   // the pass has no attachment: its size follows the draws (vk_exec_noatt_dims)
+    int skip_shadow;                                  // the pass is left out this frame (DKB_SHADOW_RATE, DKB_CUBEMAP_RATE; resolve_rt)
     VkFormat pass_color[8], pass_depth, pass_stencil; // attachment formats of the pass (VkPipelineRenderingCreateInfo);
                                                       // VK_FORMAT_UNDEFINED: none
     uint32_t pass_ncolor, pass_samples;               // colorAttachmentCount and rasterization samples of the pass
