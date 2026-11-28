@@ -296,7 +296,7 @@ def main():
         except ValueError:
             ap.error('aspect must be WxH')
         # Wider than 16:9, or from 16:10 to 16:9 (the shapes runtime/dkb_wide.c accepts with Vert+).
-        if not (1280 <= w <= 7680 and 720 <= h <= 4320 and w % 2 == h % 2 == 0 and w * 9 != h * 16 and
+        if not (640 <= w <= 7680 and 360 <= h <= 4320 and w % 2 == h % 2 == 0 and w * 9 != h * 16 and
                 w * 10 >= h * 16):
             ap.error('aspect must be an even output resolution wider than 16:9 or from 16:10 to 16:9')
         parsed.append((w, h))
