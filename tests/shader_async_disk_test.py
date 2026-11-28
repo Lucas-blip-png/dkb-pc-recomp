@@ -85,8 +85,9 @@ class ShaderAsyncDiskTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def run_cmd(self, *cmd_args):
-        res = subprocess.run([str(self.exe), *cmd_args], capture_output=True, text=True, timeout=30)
+    def run_cmd(self, *cmd_args, env=None):
+        res = subprocess.run([str(self.exe), *cmd_args], capture_output=True, text=True, timeout=30,
+                             env=dict(os.environ, **env) if env else None)
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         return json.loads(res.stdout)
 
@@ -151,6 +152,22 @@ class ShaderAsyncDiskTest(unittest.TestCase):
         self.assertEqual(res['same_ptr'], 1)
         self.assertEqual(res['xlated'], 0)
         self.assertGreaterEqual(res['hits'], 2)
+
+    def test_get_async_loads_on_caller_unless_queue_knob_set(self):
+        cache = self.out / 'cache_sync_load'
+        cache.mkdir(parents=True, exist_ok=True)
+        code, ctl = make_code_and_control('sync_pack_hit')
+        cp, np = cache / 'code.bin', cache / 'ctl.bin'
+        cp.write_bytes(code)
+        np.write_bytes(ctl)
+        info = self.run_cmd('inspect-req', str(self.out / 'probe_sync'), str(cp), str(np))
+        key_b = bytes.fromhex(info['key'])
+        uname_b = bytes.fromhex(info['use_name'])
+        valid_use = struct.pack('<5I', USE_MAGIC, USE_VERSION, 3, 5, 1)
+        build_pack(cache / 'shader-cache.pack', [(1, key_b, MIN_SPV), (2, key_b, MIN_RES), (3, uname_b, valid_use)])
+        res = self.run_cmd('test-async-pack', str(cache), str(cp), str(np), env={'DKB_SHADER_LOAD_QUEUE': '0'})
+        self.assertEqual(res['pending1'], 0)
+        self.assertEqual(res['s1_null'], 0)
 
     def test_load_worker_hands_off_missing_spv_to_xlate_worker(self):
         cache = self.out / 'cache_fallback'

@@ -36,6 +36,10 @@ const char *cfg_get(const char *name) {
     (void)name;
     return NULL;
 }
+int cfg_bool(const char *name) {   // the queued disk load is on unless the test sets DKB_SHADER_LOAD_QUEUE=0
+    const char *v = getenv(name);
+    return !strcmp(name, "DKB_SHADER_LOAD_QUEUE") ? !v || strcmp(v, "0") : v && strcmp(v, "0");
+}
 void rt_log(const char *format, ...) {
     (void)format;
 }

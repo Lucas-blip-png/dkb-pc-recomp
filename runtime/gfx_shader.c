@@ -1848,8 +1848,9 @@ static const GfxShader *get_one(const Req *r, int stage, const uint8_t *control,
 // (gfx_spirv.c screen_uv_stage) need it there. An input id does not depend on the translator, so a new translator
 // keeps the table. A torn last record (a crash while appending) is ignored, and the next append overwrites it, so
 // records stay on 40-byte boundaries. note_origin records the origin of every stage it meets (the lowered code pointer
-// is only known there) in the shader and, for an input id not in the table yet, in the file: a shader shared by two
-// stages keeps the first one seen, and the file does not grow on later runs.
+// is only known there) in the shader and, for an input id not in the table yet, in a buffer: a shader shared by two
+// stages keeps the first one seen, and the file does not grow on later runs. The buffer reaches the file in
+// origin_flush, called from gfx_shader_record_flush, vk_pipeline_save and the end of prepare_nvn2.
 #define ORIGIN_SLOTS (1u << 16)
 typedef struct { uint8_t iid[32]; uint64_t origin; } OriginRec;
 static OriginRec *origin_tab;            // open addressing on the first 4 bytes of the id; origin 0 marks a free slot
@@ -1925,6 +1926,7 @@ static void note_origin(const GfxShader *s, const uint8_t *code) {
     if (s && !__atomic_load_n(&s->origin, __ATOMIC_RELAXED)) note_origin_val(s, nvn2_origin(code));
 }
 
+// Writes the buffered records at origin_good (overwriting a torn tail), or appends when the file was not read.
 static void origin_flush(void) {
     if (!cache_dir[0]) return;
     plat_mutex_lock(&origin_io);
@@ -1934,7 +1936,6 @@ static void origin_flush(void) {
     origin_pend = NULL, origin_pend_n = origin_pend_cap = 0;
     int use_good = origin_read;
     long good = origin_good;
-    if (n && use_good) origin_read = 0;
     plat_mutex_unlock(&origin_lock);
     if (n) {
         char path[PATH_CAP + 32];
@@ -1946,8 +1947,15 @@ static void origin_flush(void) {
             f = NULL;
         }
         if (f) {
-            fwrite(buf, 1, n, f);
-            fclose(f);
+            int ok = fwrite(buf, 1, n, f) == n;
+            ok = fclose(f) == 0 && ok;
+            // Only after a whole write: later flushes then append after it. A failed open or write leaves origin_read
+            // set, so the next flush retries "r+b" at origin_good and never appends after a torn tail.
+            if (ok && use_good) {
+                plat_mutex_lock(&origin_lock);
+                origin_read = 0;
+                plat_mutex_unlock(&origin_lock);
+            }
         }
     }
     free(buf);
@@ -2318,10 +2326,6 @@ static void note_failed(const uint8_t key[32]) {
 }
 
 static void job_finish(XJob *j, const GfxShader *s) {
-    if (s) {
-        note_origin_val(s, j->origin);
-        ans_note(&j->r, j->stage, j->control, j->code, &j->a, s);
-    }
     plat_mutex_lock(&X.lock);
     XWait **w = wait_slot(j->r.key), *e = *w;
     if (e && s) *w = e->next, free(e);
@@ -2431,6 +2435,13 @@ static const GfxShader *get_async_one(Req r, int stage, const uint8_t *control, 
     paths();
     if (!cache_dir[0]) return fail("no cache directory", NULL);
 
+    // A shader in the disk cache loads on the calling thread, so the draw that asks for it is not skipped for a frame.
+    // DKB_SHADER_LOAD_QUEUE=1 sends the load to the load workers instead (the caller sees it pending).
+    static int load_queue = -1;
+    if (load_queue < 0) load_queue = cfg_bool("DKB_SHADER_LOAD_QUEUE");
+    int lq = r.final && load_queue;
+    if (r.final && !lq && (s = request_disk_load(&r, r.key, r.iid))) return plat_inc64(&n_hits), mem_insert(s);
+
     uint64_t origin = nvn2_origin(code);
     XJob *j = calloc(1, sizeof *j);
     XWait *e = calloc(1, sizeof *e);
@@ -2446,7 +2457,7 @@ static const GfxShader *get_async_one(Req r, int stage, const uint8_t *control, 
     }
     int workers_ok = 0;
     if (!raced) {
-        if (r.final) {
+        if (lq) {
             load_workers_start_locked();
             workers_ok = X.load_started == 1;
         } else {
@@ -2461,7 +2472,7 @@ static const GfxShader *get_async_one(Req r, int stage, const uint8_t *control, 
         j->r.c1 = cd + (r.length - r.c1_len);
         memcpy(e->key, r.key, 32);
         *slot = e;
-        if (r.final) {
+        if (lq) {
             if (X.load_tail) X.load_tail->next = j;
             else X.load_head = j;
             X.load_tail = j;
@@ -2477,7 +2488,6 @@ static const GfxShader *get_async_one(Req r, int stage, const uint8_t *control, 
     if (queued) return *pending = 1, NULL;
     free(j), free(e), free(ctl), free(cd);
     if (raced) return *pending = 1, NULL;
-    if (r.final && (s = request_disk_load(&r, r.key, r.iid))) return plat_inc64(&n_hits), mem_insert(s);
     return translate(&r, stage, control, code, a);         // no worker or out of memory
 }
 
