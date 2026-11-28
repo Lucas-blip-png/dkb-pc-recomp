@@ -365,6 +365,10 @@ int probe_vkcopy_astc(void) {
         printf("probe-vkcopy-astc: requires DKB_ASTC=gpu DKB_ASTC_BC=0 DKB_REPLAY_ASYNC=0 DKB_SPLIT_DRAWS=0\n");
         return 1;
     }
+    // As --probe-vkexec (vk_exec_probe.c probe_vkexec): the probe submits streams it built itself (copy_case and
+    // t2t_case), not recording copies, and nvn_handle_ubo_list would read a copy_prefix in front of them that
+    // is not there (an access violation in vk_usnap_begin, #578). The uniform snapshot walks them.
+    cfg_set("DKB_USNAP_LIST", "0");
     uint64_t heap = 0;
     if (mem_set_heap_size(16ull << 20, &heap) || !heap) return 1;
     const CopyCase cases[] = {
