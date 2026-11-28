@@ -1575,6 +1575,36 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_OV_FMT_SHARP] = "%s，锐度 %d%%",
     [UI_MENU_OV_SCALE_NONE] = "无（1:1）",
     [UI_MENU_OV_SCALE_BILINEAR] = "双线性",
+    [UI_MENU_TAB_AMIIBO] = "amiibo",
+    [UI_MENU_AMIIBO] = "读卡器上的 amiibo",
+    [UI_MENU_AMIIBO_DESC] = "游戏要求扫描 amiibo 时找到的那一个。选好后，使用游戏中的 amiibo 选项或与要求 amiibo 的角色对话；"
+                            "游戏每次查找时都会扫描它。\n\n"
+                            "无：告诉游戏没有 NFC 读卡器。",
+    [UI_MENU_AMIIBO_EMPTY] = "还没有 amiibo 文件。打开下方的 amiibo 文件夹，把你自己的标签转储（.bin 或 Flipper .nfc）放进去，"
+                             "可以放在子文件夹中。几秒内就会出现在这里。",
+    [UI_MENU_AMIIBO_FOLDER] = "amiibo 文件夹",
+    [UI_MENU_AMIIBO_FOLDER_DESC] = "下方列表显示 amiibo 文件夹中的哪个子文件夹。",
+    [UI_MENU_AMIIBO_NONE] = "无",
+    [UI_MENU_AMIIBO_OPEN] = "amiibo 文件",
+    [UI_MENU_AMIIBO_OPEN_DESC] = "打开读取 amiibo 文件的文件夹，以便添加或删除文件。安装程序的主界面也可以把文件或整个文件夹复制进去。\n\n"
+                                 "可在 dkb.ini 中用 amiibo_dir 指定其他文件夹。",
+    [UI_MENU_AMIIBO_OPEN_DO] = "打开文件夹",
+    [UI_MENU_AMIIBO_TOP] = "顶层文件夹",
+    [UI_MENU_COOP] = "合作",
+    [UI_MENU_COOP_DESC] = "开：第二个已连接的手柄可以作为玩家 2 游玩。\n\n"
+                          "关：新连接的手柄可以接管玩家 1。重新连接已连接的手柄，或在“手柄设备”中选择它。",
+    [UI_MENU_DKB_PAD_LAYOUT_DESC] = "Switch 布局：A 在右，X 在上。交换 A/B 和 X/Y：A 在下，X 在左。操作立即改变，屏幕提示在重新启动后更新。",
+    [UI_MENU_DKB_PAD_LAYOUT_RESTART_DETAIL] = "重新启动游戏后，屏幕上的按键提示才会与所选布局一致。",
+    [UI_MENU_PAD2_DEVICE] = "玩家 2 手柄",
+    [UI_MENU_PAD2_DEVICE_DESC] = "自动：使用一个可用的手柄。手动指定时，只要还有别的手柄可作为玩家 1，就为玩家 2 保留该手柄。"
+                                 "两个设置指定同一手柄时，玩家 1 优先。",
+    [UI_MENU_PAD2_NEEDS_COOP] = "需要开启合作",
+    [UI_MENU_PAD_PROMPTS] = "按键提示样式",
+    [UI_MENU_PAD_PROMPTS_DESC] = "选择屏幕上的按键图标。Nintendo 和 Xbox 使用各自的字母，PlayStation 使用符号。"
+                                 "自动会在启动时识别 PlayStation 手柄。所有提示样式都在重新启动后生效。",
+    [UI_MENU_PAD_PROMPTS_NINTENDO] = "Nintendo",
+    [UI_MENU_PAD_PROMPTS_PLAYSTATION] = "PlayStation",
+    [UI_MENU_PAD_PROMPTS_XBOX] = "Xbox",
 };
 
 #define SWKBD_ONLY(name, ...) static const char *const name[UI_TEXT_COUNT] = {SWKBD(__VA_ARGS__)}
