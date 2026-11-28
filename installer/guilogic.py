@@ -11,6 +11,7 @@ import ctypes
 import json
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -347,6 +348,245 @@ def previous_version(base, own):
 
 def play_command(dest):
     return [str(Path(dest) / GAME_EXE)]
+
+
+WARM_PROGRESS_RE = re.compile(r'^warm-shaders:\s*(\d+)\s*/\s*(\d+)\s*$')
+
+
+def parse_warm_progress(line):
+    """'up-to-date', (done, total) from a --warm-shaders[-if-needed] stdout line, else None."""
+    s = line.strip()
+    if s == 'warm-shaders: up-to-date':
+        return 'up-to-date'
+    m = WARM_PROGRESS_RE.match(s)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return None
+
+
+def warm_command(dest, if_needed=True):
+    return [str(Path(dest) / GAME_EXE), '--warm-shaders-if-needed' if if_needed else '--warm-shaders']
+
+
+def translate_command(dest):
+    return [str(Path(dest) / GAME_EXE), '--translate-shaders']
+
+
+def libraries_failed(dest):
+    """True when setup recorded dkb_shaders.libraries = False (installer/bananza.py Shaders.run): the driver crashed
+    building the pipeline libraries, so the automatic warm is not retried. The record holds no driver information, so a
+    changed GPU or driver does not clear it; the player runs --warm-shaders by hand then."""
+    try:
+        state = statefile.load(Path(dest), 'dkb-install.json')
+    except statefile.StateError:
+        return False
+    record = (state or {}).get('steps', {}).get('dkb_shaders')
+    return isinstance(record, dict) and record.get('libraries') is False
+
+
+def needs_legacy_warm(dest):
+    """For an older dkb.exe without --warm-shaders-if-needed: True if lib-warm.progress remains (an interrupted warm)
+    and setup did not record dkb_shaders.libraries = False."""
+    p = Path(dest)
+    return (p / 'shader-prepared.bin').is_file() and (p / 'lib-warm.progress').is_file() and not libraries_failed(p)
+
+
+def can_translate_shaders(dest, layout):
+    """True when shader-prepared.bin is missing and extracted romfs/index.json + census tool exist to generate it."""
+    p = Path(dest)
+    return (p / 'romfs' / 'index.json').is_file() and layout is not None and (layout.tools / 'dkb_shader_census.py').is_file()
+
+
+def record_libraries_warmed(dest):
+    """Best-effort atomic update of dkb-install.json recording steps.dkb_shaders.libraries = True."""
+    p = Path(dest)
+    try:
+        state = statefile.load(p, 'dkb-install.json')
+        if not isinstance(state, dict):
+            return
+        record = state.get('steps', {}).get('dkb_shaders')
+        if isinstance(record, dict) and record.get('libraries') is not True:
+            record['libraries'] = True
+            statefile.save(p, state, 'dkb-install.json')
+    except (OSError, statefile.StateError):
+        pass
+
+
+def _kill_proc_tree(proc):
+    if proc.poll() is not None:
+        return
+    if os.name == 'nt':
+        subprocess.run(['taskkill', '/T', '/F', '/PID', str(proc.pid)], creationflags=CREATE_NO_WINDOW,
+                       capture_output=True)
+        if proc.poll() is None:
+            proc.kill()
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        proc.kill()
+
+
+def _run_precompile_proc(cmd, cwd, on_line=None, cancelled=None):
+    if cancelled is not None and cancelled.is_set():
+        return None, []
+    env = dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONUTF8='1', PYTHONUNBUFFERED='1')
+    group = {'creationflags': CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW} if os.name == 'nt' else {'start_new_session': True}
+    proc = subprocess.Popen(list(map(str, cmd)), cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8',
+                            errors='replace', bufsize=1, **group)
+    done = threading.Event()
+    if cancelled is not None:
+        def watch():
+            while not done.wait(0.1):
+                if cancelled.is_set():
+                    _kill_proc_tree(proc)
+                    return
+        threading.Thread(target=watch, daemon=True).start()
+    tail = []
+    try:
+        for line in proc.stdout:
+            s = line.rstrip()
+            if s:
+                tail = (tail + [s])[-10:]
+            if on_line:
+                on_line(line)
+        rc = proc.wait()
+    finally:
+        done.set()
+        if proc.stdout:
+            proc.stdout.close()
+    if cancelled is not None and cancelled.is_set():
+        return None, tail
+    return rc, tail
+
+
+def _run_warm(dest, if_needed, on_phase, on_progress, cancelled):
+    state = {'up_to_date': False, 'phase_sent': False}
+
+    def on_line(line):
+        parsed = parse_warm_progress(line)
+        if parsed == 'up-to-date':
+            state['up_to_date'] = True
+        elif isinstance(parsed, tuple):
+            if not state['phase_sent'] and on_phase:
+                state['phase_sent'] = True
+                on_phase('warm')
+            if on_progress:
+                on_progress(parsed[0], parsed[1])
+
+    rc, tail = _run_precompile_proc(warm_command(dest, if_needed=if_needed), dest, on_line=on_line, cancelled=cancelled)
+    return rc, tail, state['up_to_date']
+
+
+def _translate_and_warm(dest, layout, on_phase, on_progress, cancelled):
+    if not can_translate_shaders(dest, layout):
+        return ('ready', None)
+    dest_path = Path(dest)
+    try:
+        state = statefile.load(dest_path, 'dkb-install.json')
+    except statefile.StateError:
+        state = None
+    game = (state or {}).get('game') or 'dkb100'
+    pack = dest_path / 'seed-nvn2.bin'
+    try:
+        if on_phase:
+            on_phase('census')
+        if on_progress:
+            on_progress(None, None)
+        rc, tail = _run_precompile_proc(
+            [layout.python, layout.tools / 'dkb_shader_census.py', '--version', game, '--romfs',
+             dest_path / 'romfs', '--out', dest_path],
+            layout.root, cancelled=cancelled)
+        if rc is None:
+            return ('cancelled', None)
+        if rc != 0:
+            detail = '\n'.join(tail[-5:]) or f'exit code {rc}'
+            return ('failed', detail)
+
+        if on_phase:
+            on_phase('translate')
+        if on_progress:
+            on_progress(None, None)
+        rc, tail = _run_precompile_proc(translate_command(dest_path), dest_path, cancelled=cancelled)
+        if rc is None:
+            return ('cancelled', None)
+        if rc != 0:
+            detail = '\n'.join(tail[-5:]) or f'exit code {rc}'
+            return ('failed', detail)
+    finally:
+        pack.unlink(missing_ok=True)
+
+    pack_script = layout.tools / 'pack_shader_cache.py'
+    if pack_script.is_file() and (dest_path / 'shader-cache').is_dir():
+        if on_phase:
+            on_phase('pack')
+        if on_progress:
+            on_progress(None, None)
+        rc, _ = _run_precompile_proc([layout.python, pack_script, dest_path / 'shader-cache'], layout.root,
+                                     cancelled=cancelled)
+        if rc is None:
+            return ('cancelled', None)
+        if rc != 0:
+            return ('failed', f'pack_shader_cache.py exit code {rc}')
+
+    if libraries_failed(dest_path):
+        return ('ok', None)
+    if on_phase:
+        on_phase('warm')
+    if on_progress:
+        on_progress(None, None)
+    rc, tail, _ = _run_warm(dest_path, if_needed=False, on_phase=None, on_progress=on_progress, cancelled=cancelled)
+    if rc is None:
+        return ('cancelled', None)
+    if rc != 0:
+        detail = '\n'.join(tail[-5:]) or f'exit code {rc}'
+        return ('failed', detail)
+    record_libraries_warmed(dest_path)
+    return ('ok', None)
+
+
+def run_precompile(dest, layout=None, on_phase=None, on_progress=None, cancelled=None):
+    """Ensure shaders and driver pipeline libraries in dest are precompiled before launch.
+
+    Returns one of ('ready', None), ('ok', None), ('cancelled', None), or ('failed', detail).
+    """
+    dest_path = Path(dest)
+    try:
+        if (dest_path / 'shader-prepared.bin').is_file():
+            if libraries_failed(dest_path):
+                return ('ready', None)
+            rc, tail, up_to_date = _run_warm(dest_path, if_needed=True, on_phase=on_phase, on_progress=on_progress,
+                                             cancelled=cancelled)
+            if rc is None:
+                return ('cancelled', None)
+            if rc == 0:
+                if not up_to_date:
+                    record_libraries_warmed(dest_path)
+                return ('ready' if up_to_date else 'ok', None)
+            if rc == 2 and any('unknown option' in line for line in tail):
+                if needs_legacy_warm(dest_path):
+                    if on_phase:
+                        on_phase('warm')
+                    if on_progress:
+                        on_progress(None, None)
+                    rc2, tail2, _ = _run_warm(dest_path, if_needed=False, on_phase=None, on_progress=on_progress,
+                                              cancelled=cancelled)
+                    if rc2 is None:
+                        return ('cancelled', None)
+                    if rc2 == 0:
+                        record_libraries_warmed(dest_path)
+                        return ('ok', None)
+                    detail = '\n'.join(tail2[-5:]) or f'exit code {rc2}'
+                    return ('failed', detail)
+                return ('ready', None)
+            if rc == 3:
+                return _translate_and_warm(dest_path, layout, on_phase, on_progress, cancelled)
+            detail = '\n'.join(tail[-5:]) or f'exit code {rc}'
+            return ('failed', detail)
+        return _translate_and_warm(dest_path, layout, on_phase, on_progress, cancelled)
+    except OSError as e:
+        return ('failed', str(e))
 
 
 # ---- events -> state ---------------------------------------------------------------------------------------------

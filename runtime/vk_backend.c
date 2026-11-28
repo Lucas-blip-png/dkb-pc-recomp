@@ -747,7 +747,8 @@ static void vk_be_cpu_synced(uint64_t fence) {
 // ---- host side of GfxBackend
 static int vk_be_shader_tool(int tool) {
     return tool == GFX_TOOL_PREPARE_SHADERS ? vk_pipeline_prepare_shaders()
-         : tool == GFX_TOOL_TRANSLATE_SHADERS ? vk_pipeline_translate_shaders() : vk_pipeline_warm_shaders();
+         : tool == GFX_TOOL_TRANSLATE_SHADERS ? vk_pipeline_translate_shaders()
+         : tool == GFX_TOOL_WARM_SHADERS_IF_NEEDED ? vk_pipeline_warm_shaders_if_needed() : vk_pipeline_warm_shaders();
 }
 
 static const GfxExecFrame *vk_be_exec_frame(void) { return &vk_exec_frame; }

@@ -164,7 +164,7 @@ typedef struct {
                                                                // their pass, in-pass barriers, pass restarts, layout
                                                                // transitions
 } GfxExecFrame;
-enum { GFX_TOOL_PREPARE_SHADERS, GFX_TOOL_TRANSLATE_SHADERS, GFX_TOOL_WARM_SHADERS };   // GfxBackend.shader_tool
+enum { GFX_TOOL_PREPARE_SHADERS, GFX_TOOL_TRANSLATE_SHADERS, GFX_TOOL_WARM_SHADERS, GFX_TOOL_WARM_SHADERS_IF_NEEDED };   // GfxBackend.shader_tool
 enum { GFX_SPLASH_START, GFX_SPLASH_GUEST };                                            // GfxBackend.splash
 typedef struct {
     const char *name;
