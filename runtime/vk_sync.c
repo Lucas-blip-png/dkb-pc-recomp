@@ -648,9 +648,18 @@ static VkCommandBuffer prologue_for(VkCtx *c, uint64_t fence, uint32_t upto) {
 }
 static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) { return prologue_for(c, fence, UINT32_MAX); }
 
+// DKB_SHADOW_RESYNC (on by default; 0 as before): the shadow storage is synced a second time once the part's mirror
+// copies are recorded (prologue_impl).
+static int shadow_resync(void) {
+    static int on = -1;
+    if (on < 0) on = rt_knob("SHADOW_RESYNC", "1") != 0;
+    return on;
+}
+
 static VkCommandBuffer prologue_impl(VkCtx *c, uint64_t fence, uint32_t upto) {
-    vk_mem_shadow_sync();   // shadow storage: the CPU's writes go in before the part is submitted
+    vk_mem_shadow_sync_pools();   // shadow storage: the CPU's writes go in before the part is submitted
     if (!vk_mem_mirror_pending_for(upto)) {
+        vk_mem_shadow_sync_done();
         vk_mem_mirror_part_done(upto);
         return VK_NULL_HANDLE;
     }
@@ -662,6 +671,15 @@ static VkCommandBuffer prologue_impl(VkCtx *c, uint64_t fence, uint32_t upto) {
     vkBeginCommandBuffer(cb, &bi);
     int pair = ts_open(cb);
     vk_mem_mirror_prologue(cb, fence, upto);
+    // The copies just recorded go from the shadow to the mirrors, and the GPU reads the shadow when it runs them. A
+    // thread recording slices of a held pass (vk_exec.c par_defer) may resolve a pool after the sync above and queue
+    // its pages, or its new mirror's first fill, before the copy list was taken: the mirror then got the shadow's old
+    // bytes for them and the pages counted as uploaded, and stray triangles crossed the scene with two pass ends held
+    // (#479). The list is closed now, so a second sync covers the pools resolved since the first one. Center of the Divide (3.2.0, 4
+    // replay threads, a recorded walk with a shot every second): no run of 5 had a stray triangle against 3 of 3
+    // without it.
+    if (shadow_resync()) vk_mem_shadow_sync_pools();
+    vk_mem_shadow_sync_done();
     ts_close(cb, pair, fence, NULL);
     vkEndCommandBuffer(cb);
     return cb;

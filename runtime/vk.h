@@ -402,7 +402,9 @@ void vk_mem_mirror_prologue(VkCommandBuffer cb, uint64_t fence, uint32_t upto); 
 // Shadow storage (vk_memory.c): vk_sync.c calls vk_mem_shadow_sync right before each submit; the replay notes every GPU
 // write into CPU-visible memory at record time (vk_mem_gpu_pending) and reports it at the fence with vk_gpu_written,
 // which copies the bytes back into guest memory before telling the texture cache (vk_guest_written).
-void vk_mem_shadow_sync(void);
+void vk_mem_shadow_sync(void);         // vk_mem_shadow_sync_pools, then vk_mem_shadow_sync_done
+void vk_mem_shadow_sync_pools(void);   // the pools resolved since the last call take the CPU's writes
+void vk_mem_shadow_sync_done(void);    // the part these syncs precede is submitted next
 void vk_mem_gpu_pending(uint64_t addr, uint64_t size);
 void vk_gpu_written(uint64_t addr, uint64_t size);
 // One range of a submission's GPU writes: {address, size, buffer the GPU wrote or VK_NULL_HANDLE}.
