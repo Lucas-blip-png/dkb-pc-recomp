@@ -70,6 +70,7 @@ int main(void) {
     s = (InputPadSelection){.keep = 1};
     assert(input_pad_choose(&s, d, 1, "xbox", "auto", 0) == 6);
     assert(input_pad_choose(&s, d, 3, "xbox", "auto", 6) == 8);
+    assert(input_pad_choose(&s, d, 3, "xbox", "auto", 6) == 8);   // keep the request until the open succeeds
     free(s.ids);
     // Two pads with the same name and GUID differ by instance id only: player 2 is the other one, and keeps it.
     InputPadDevice twin[2] = {device(10, "pro:n1"), device(11, "pro:n2")};
@@ -77,17 +78,23 @@ int main(void) {
     assert(input_pad2_choose(twin, 2, 10, 11, "auto") == 11 && input_pad2_choose(twin, 2, 11, 10, "auto") == 10);
     assert(input_pad2_choose(twin, 2, 10, 10, "auto") == 11);   // never player 1's own pad
     assert(input_pad2_choose(twin, 1, 10, 0, "auto") == 0 && input_pad2_choose(twin, 2, 0, 0, "auto") == 0);
-    // A manual Player 2 key picks only its own pad, never Player 1's, and none when it is absent.
-    InputPadDevice duo[2] = {device(20, "xbox"), device(21, "dualsense")};
-    assert(input_pad2_choose(duo, 2, 20, 0, "dualsense") == 21);
-    assert(input_pad2_choose(duo, 2, 21, 0, "dualsense") == 0);
-    assert(input_pad2_choose(duo, 1, 20, 0, "dualsense") == 0);
-    // In co-op a saved Player 2 key is kept free while another pad can serve Player 1; alone, that pad still plays.
+
+    InputPadDevice coop[3] = {device(20, "saved-p2"), device(21, "spare"), device(22, "arrival")};
+    // The saved Player 2 pad can play alone, then moves to Player 2 when a spare connects.
     s = (InputPadSelection){.keep = 1};
-    assert(input_pad_choose(&s, duo, 2, "auto", "dualsense", 0) == 20 && s.reserved == 21);
+    assert(input_pad_choose(&s, coop, 1, "auto", "saved-p2", 0) == 20 && !s.reserved);
+    assert(input_pad_choose(&s, coop, 2, "auto", "saved-p2", 20) == 21 && s.reserved == 20);
+    assert(input_pad2_choose(coop, 2, 21, 0, "saved-p2") == 20);
+    // A further arrival must not take either slot while both assigned pads are connected.
+    assert(input_pad_choose(&s, coop, 3, "auto", "saved-p2", 21) == 21 && !s.pending);
+    assert(input_pad2_choose(coop, 3, 21, 20, "saved-p2") == 20);
+    assert(input_pad2_choose(coop + 1, 2, 21, 0, "saved-p2") == 0);
     free(s.ids);
+
+    // If both players prefer the same device, an explicit Player 1 choice takes priority.
     s = (InputPadSelection){.keep = 1};
-    assert(input_pad_choose(&s, duo + 1, 1, "auto", "dualsense", 0) == 21 && !s.reserved);
+    assert(input_pad_choose(&s, coop, 2, "saved-p2", "saved-p2", 0) == 20 && !s.reserved);
+    assert(input_pad2_choose(coop, 2, 20, 0, "saved-p2") == 0);
     free(s.ids);
     puts("controller selection: startup, arrivals, fallback, explicit choices, pending opens, topology stability and co-op passed");
     return 0;
