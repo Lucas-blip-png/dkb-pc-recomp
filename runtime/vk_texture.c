@@ -1658,12 +1658,22 @@ const VkTexImage *vk_texture_by_id_locked(const dpool_ref *pool, int id, view_t 
     // Bindings of one submit share one check, answered from the submit's write-watch snapshot (guest writes during a
     // replay race the GPU read on hardware too). After one check an entry is either uploaded or never uploads (not
     // mirrored, GPU-owned or no CPU layout), so a slot that checked its entry in this submit has nothing left to do.
-    if (e && s->cepoch != submit_epoch) {
-        if (!e->uploaded || e->checked != submit_epoch) {
+    // DKB_TEX_FRAME_EPOCH=1 (from evolis-game's low-spec fork; off by default): an entry that is already uploaded is
+    // checked once per presented frame, not once per submit (the epoch is the frame count, with the top bit set so it
+    // never equals a submit epoch). A guest write to a texture after its first check in a frame shows a frame later.
+    static int frame_ep = -1;
+    if (frame_ep < 0) frame_ep = cfg_bool("DKB_TEX_FRAME_EPOCH");
+    uint32_t ep = frame_ep && e && e->uploaded
+                      ? (uint32_t)((__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1u) | 0x80000000u)
+                      : submit_epoch;
+    if (e && s->cepoch != ep) {
+        if (!e->uploaded || e->checked != ep) {
             if (!make_fresh_snap(e)) return NULL;   // the helper gave up: the replay thread checks the entry itself
-            e->checked = submit_epoch;
+            e->checked = ep;
         }
-        s->cepoch = submit_epoch;
+        s->cepoch = ep;
+        __atomic_store_n(&chk[chk_idx(d->serial)], (uint64_t)d->serial << 32 | submit_epoch, __ATOMIC_RELEASE);
+    } else if (e && ep != submit_epoch) {   // frame-checked: the slice threads' memos still see it as checked in this submit
         __atomic_store_n(&chk[chk_idx(d->serial)], (uint64_t)d->serial << 32 | submit_epoch, __ATOMIC_RELEASE);
     }
     if (view) *view = has_view ? s->cview : s->v;

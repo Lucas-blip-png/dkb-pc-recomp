@@ -119,6 +119,8 @@
 # Integrated GPU only: let textures use the host-visible heap when video memory fills (0 off, 1 above 74% of the budget,
 # or 50% for compressed ones, 2 for every compressed one), instead of crowding the shared memory twice.
 # tex_uma_host = 0
+# Check an uploaded texture's storage for guest writes once per frame instead of once per submit, 0 or 1.
+# tex_frame_epoch = 0
 
 # Vulkan.
 # Vulkan validation layer: checks every call and slows the game down a lot. Needs the layer installed (Vulkan SDK).

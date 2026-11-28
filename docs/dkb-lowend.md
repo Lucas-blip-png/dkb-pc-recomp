@@ -289,3 +289,4 @@ frame time, so turn them on one at a time and compare.
 | `cubemap_rate = N` (2 to 60) | Renders the dynamic cubemap faces (reflections) one step in N of 6 frames. The fork ran 6. |
 | `smaa_bypass = 1` | Replaces the game's SMAA passes with a copy of their input: no anti-aliasing from the game, three fewer full-screen passes. |
 | `tex_uma_host = 1` (or 2) | On an integrated GPU, new textures go to the host heap when video memory is above 74% of its budget (50% for compressed ones), falling back to device memory on failure. Ignored on a discrete GPU. |
+| `tex_frame_epoch = 1` | Checks an uploaded texture for guest writes once per frame, not once per submit. A texture the game rewrites mid-frame shows the change a frame late. |
