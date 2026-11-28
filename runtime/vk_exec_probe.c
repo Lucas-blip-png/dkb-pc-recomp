@@ -844,6 +844,22 @@ static int test_mirror(const GfxBackend *b, uint8_t *guest, int *bytes) {
     CHECK(xf_submit(b, stream, p), "fence_wait of the third mirror submission timed out");
     for (int i = 0; i < 0x800; i++) CHECK(m[0x4000 + i] == 0x11, "CPU byte %#x beside a fill is %02x", i, m[0x4000 + i]);
     for (int i = 0; i < 0x800; i++) CHECK(m[0x4800 + i] == 0x77, "fill byte %#x is %02x", i, m[0x4800 + i]);
+    // Shadow storage only; the steps below do not depend on this one. A pool's shadow is synced when something marked
+    // the pool since the last sync. A thread recording slices of a held pass can resolve the pool, lose that mark to
+    // the replay thread's sync, and only then queue the pages its mirror lacks: the mirror's sync marks the pool again,
+    // so the sync that follows the copy list brings their bytes into the shadow before the copies read it (vk_memory.c
+    // mirror_sync). The submission after it runs the queued copy: a B2B from the page reads the new byte in the mirror.
+    m[0x9000] = 0x50;
+    int in_shadow = vk_mem_shadow_touch_probe(a + 0x9000);
+    CHECK(in_shadow, "a page queued for the mirror after a shadow sync is not in the shadow after the next one");
+    if (in_shadow > 0) {
+        p = put(stream, OP_BEGIN, NULL, 0);
+        const p_copy_b2b c6 = {a + 0x9000, a + 0xA000, 4096};
+        p = put(p, OP_COPY_B2B, &c6, sizeof c6);
+        CHECK(xf_submit(b, stream, p), "fence_wait of the mirror submission after the shadow sync timed out");
+        CHECK(m[0x9000] == 0x51 && m[0xA000] == 0x51,
+              "B2B of the page queued after a shadow sync read %02x, expected 51", m[0xA000]);
+    }
     // 4: a uniform update through the mirror, reported at its fence (vk_gpu_written_into), is its page's newest write, so
     // the next sync leaves the page out (vk_memory.c mirror_sync). The probe then changes a guest byte of the page and
     // takes the write-watch bit itself, so no stamp records the change: a copy from the page reads the mirror's byte,

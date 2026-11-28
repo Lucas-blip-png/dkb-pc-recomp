@@ -1745,8 +1745,10 @@ static uint64_t page_hi(const PoolRec *r) { return (r->lo + r->size + 0xfff) & ~
 // Where importing guest memory costs too much (Linux: re-protecting pages that amdgpu imported as a userptr
 // invalidates the buffer, about 1.3 ms per 16 MiB at the next submit; NVIDIA's proprietary driver does not pay it, see
 // mirror_mode), a CPU-visible pool gets a host-visible buffer of its own instead, at the offsets the import would have:
-// - CPU -> shadow: right before each submit (vk_mem_shadow_sync), the pools the replay resolved since the last one are
-//   queried for written pages; pages stamped after a pool's sgen are copied in by the CPU.
+// - CPU -> shadow: right before each submit (vk_mem_shadow_sync), the pools marked since the last one (shadow_touch)
+//   are queried for written pages; pages stamped after a pool's sgen are copied in by the CPU. A pool is marked when
+//   the replay resolves it, and again when its mirror queues pages or its first fill (mirror_sync, mirror_create): the
+//   copies into the mirror read the shadow, and a sync on another thread may have taken the resolve's mark by then.
 // - GPU -> guest: the replay notes each GPU write into CPU-visible memory at record time (vk_mem_gpu_pending) and
 //   reports it at the fence (vk_gpu_written), which copies those bytes back into guest memory. Until then the CPU
 //   copies of later syncs skip them: a page the CPU and the GPU both write keeps the GPU's bytes.
@@ -1759,7 +1761,7 @@ static uint64_t page_hi(const PoolRec *r) { return (r->lo + r->size + 0xfff) & ~
 // MoltenVK, which imports host memory without Linux's write-watch and page re-protection).
 typedef struct { uint64_t lo, hi, sync; } SRange;   // sync: s_syncs_done when the write was noted
 static PlatMutex shadow_lock = PLAT_MUTEX_INIT;   // after pool_lock; before gen_lock
-static PoolRec **stouch;                          // shadow_lock: pools resolved since the last sync
+static PoolRec **stouch;                          // shadow_lock: pools marked (shadow_touch) since the last sync
 static int nstouch, cstouch;
 static SRange *spend;                             // shadow_lock: GPU writes recorded and not copied back yet, in order
 static int nspend, cspend;
@@ -1842,6 +1844,9 @@ static int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size, Impor
     return 1;
 }
 
+// Marks the pool for the next shadow sync. Callers: the resolve paths (resolve_locked with pool_lock held shared),
+// mirror_sync (with the pool's sync_lock) and mirror_create (with mirror_lock); nothing takes any of those locks with
+// shadow_lock held.
 static void shadow_touch(PoolRec *r) {
     plat_mutex_lock(&shadow_lock);
     if (!r->stouched) {
@@ -1979,8 +1984,8 @@ static void shadow_sync_pool(PoolRec *r) {
     if (run) shadow_copy(r, run, hi);
 }
 
-// The pools resolved since the last call take the CPU's writes. A part's sync may take several calls (vk_sync.c
-// prologue_impl); vk_mem_shadow_sync_done ends it.
+// The pools marked since the last call (shadow_touch) take the CPU's writes. A part's sync may take several calls
+// (vk_sync.c prologue_impl); vk_mem_shadow_sync_done ends it.
 void vk_mem_shadow_sync_pools(void) {
     if (!shadow_on) return;
     uint64_t t0 = qpc();
@@ -6409,6 +6414,11 @@ static void mirror_create(PoolRec *r, BigMirror *fill) {
     BigMirror bm = {1, r->lo, n, 0, t1 - t0, t2 - t1, t3 - t2, t4 - t3, qpc() - t0, q, wpages};
     if (staged && n > STG_SMALL) *fill = bm;   // filled by the caller (staged_fill), which logs it
     else if (!staged) {
+        // Shadow storage: the first fill reads the whole shadow, and mgen above says the mirror holds every write
+        // stamped so far, so the shadow must take those writes before the part is submitted. As in mirror_sync, the
+        // resolve's mark may be gone: the pool is marked again before the fill enters pend. mirror_lock, held here
+        // when the mirrors are shared, comes before shadow_lock.
+        if (r->smap && !r->stouched) shadow_touch(r);
         range_add(&pend, &npend, &cpend, r, 0, n);
         if (n >= BIG_MIRROR) big_mirror = bm;
     }
@@ -6552,6 +6562,16 @@ static void mirror_sync(PoolRec *r) {
     r->mgen = gen_now;
     if (excl) plat_mutex_unlock(&gen_lock);
     else plat_mutex_unlock_shared(&gen_lock);
+    // Shadow storage: the copies of these pages read the pool's shadow when the GPU runs them, so a shadow sync has to
+    // come after the stamps read above and before the part is submitted. The resolve that led here marked the pool,
+    // but the replay thread's sync may have taken that mark since (vk_sync.c prologue_impl); marked again here, before
+    // the pages enter pend, the pool is synced by the prologue that takes them, after its copy list is closed. The
+    // flush ranges added below read the shadow too, so the mark does not depend on the scan having found a page.
+    // The mark is read without shadow_lock, and it is nearly always still set, so the lock is rarely taken: a sync
+    // clears it while it holds gen_lock, so a mark seen now, after the scan let gen_lock go, belongs to a sync that
+    // has not stamped the pool yet or to a later mark. shadow_lock is taken with sync_lock held and never the other
+    // way round; gen_lock, which a sync takes under shadow_lock, is not held here.
+    if (r->smap && !r->stouched) shadow_touch(r);
 
     int locked = mirror_lock_if_shared();   // paired with mirror_unlock on its own reading, as everywhere
     mrep.own_bytes += own << GEN_PAGE_SHIFT;
@@ -7509,6 +7529,29 @@ void vk_mem_mirror_prologue(VkCommandBuffer cb, uint64_t fence, uint32_t upto) {
     }
     vk_mem_mirror_part_done(upto);
     mrep.pro_t += qpc() - tp;
+}
+
+// --probe-vkexec (vk_exec_probe.c test_mirror): on one thread, the order a slice worker and the replay thread can fall
+// into with a pass end held. The pool at addr, which has shadow storage and a mirror, is resolved; a shadow sync takes
+// that touch, as the first one of a part's prologue does; the CPU then writes a byte at addr; a submission begins and
+// the mirror's sync queues the page (mirror_sync); a second shadow sync follows, as the prologue's does once the copy
+// list is closed. 1 when the shadow holds the new byte after it, which is what the queued copy will read; 0 when it
+// does not; -1 where the case does not exist (no shadow storage, or no mirror). The page stays queued: the caller
+// submits before it finalizes the pool.
+int vk_mem_shadow_touch_probe(uint64_t addr) {
+    VkMemSpan sp;
+    if (!shadow_on || !vk_mirror_on || !vk_mem_resolve(addr, 1, &sp) || !sp.pool) return -1;
+    PoolRec *r = sp.pool;
+    if (!r->smap || ms_get(r) != MS_ON) return -1;
+    vk_mem_shadow_sync_pools();
+    volatile uint8_t *g = (volatile uint8_t *)(uintptr_t)addr;
+    uint8_t v = (uint8_t)(*g + 1);
+    *g = v;
+    vk_texture_new_submit();   // a new write-watch epoch, so the sync below sees the write
+    mirror_begin();
+    mirror_sync(r);
+    vk_mem_shadow_sync_pools();
+    return r->smap[addr - r->import_lo] == v;
 }
 
 // ---- verify mode

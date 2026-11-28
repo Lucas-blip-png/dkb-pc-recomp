@@ -675,9 +675,11 @@ static VkCommandBuffer prologue_impl(VkCtx *c, uint64_t fence, uint32_t upto) {
     // thread recording slices of a held pass (vk_exec.c par_defer) may resolve a pool after the sync above and queue
     // its pages, or its new mirror's first fill, before the copy list was taken: the mirror then got the shadow's old
     // bytes for them and the pages counted as uploaded, and stray triangles crossed the scene with two pass ends held
-    // (#479). The list is closed now, so a second sync covers the pools resolved since the first one. Center of the Divide (3.2.0, 4
-    // replay threads, a recorded walk with a shot every second): no run of 5 had a stray triangle against 3 of 3
-    // without it.
+    // (#479). The list is closed now, so a second sync covers the pools marked since the first one: those resolved
+    // since, and those whose mirror queued pages or a first fill since (vk_memory.c mirror_sync and mirror_create mark
+    // the pool themselves, because the first sync may have taken the mark of the resolve that came before them).
+    // Center of the Divide (3.2.0, 4 replay threads, a recorded walk with a shot every second): no run of 5 had a
+    // stray triangle against 3 of 3 without it.
     if (shadow_resync()) vk_mem_shadow_sync_pools();
     vk_mem_shadow_sync_done();
     ts_close(cb, pair, fence, NULL);
