@@ -3589,13 +3589,14 @@ static void lb_warm_prepared(const char *dir) {
     fflush(stdout);
     static const uint32_t no_pr[16], no_fs[4];
     lb_state(no_pr, no_fs);
-    const char *te = cfg_get("DKB_LIB_PREBUILD_THREADS");
+    const char *te = cfg_get("DKB_WARM_THREADS");
     int cpus = (int)plat_cpu_usable(), k = 0;
     if (te && *te && atoi(te) > 0) {
         cpus = atoi(te);
         if (cpus > 64) cpus = 64;
     } else {
         if (cpus >= 4) cpus--;
+        // NVIDIA's compiler holds a lot of memory per compile, so more than 8 at once swaps or runs out on a mid machine.
         if (vk_ctx()->props.vendorID == 0x10de && cpus > 8) cpus = 8;
     }
     rt_log("vk_pipeline: stage library preparation on %d threads at below-normal priority", cpus);

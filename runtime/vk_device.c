@@ -90,7 +90,8 @@ static void mesa_cache_beside_exe(void) {
 // evicts pre-warmed stage libraries across runs. --warm-shaders builds every stage library into that cache, so a full
 // cache drops libraries the installer built and the game compiles them again in play. The cap goes to 10 GiB unless
 // the player set one: MESA_SHADER_CACHE_MAX_SIZE for Mesa, __GL_SHADER_DISK_CACHE_SIZE (bytes) for NVIDIA's driver. A
-// cap, not a reservation: the cache takes only what the pipelines need.
+// cap, not a reservation: the cache takes only what the pipelines need. That the NVIDIA Windows driver honours
+// __GL_SHADER_DISK_CACHE_SIZE this way is unverified.
 static void driver_cache_room(void) {
     char nv[256];
     int set_nv = !plat_getenv("__GL_SHADER_DISK_CACHE_SIZE", nv, sizeof nv);
