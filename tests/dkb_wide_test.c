@@ -215,6 +215,18 @@ static void scene_pool(void) {
     dkb_wide_init();
     memcpy(&ratio, test_page + 0x118, 4);
     CHECK(page_pool() == dkb_scene_pool(dkb_wide_pool_bytes(3840, 2160), 1.0f) && ratio == 1.0f);
+    reset("3840x2160");   // 4.0 is the largest scene ratio, anything above it is not one
+    scene_res = "4.0";
+    scene_index = 1;
+    heapdef_grown = 1;
+    dkb_wide_init();
+    memcpy(&ratio, test_page + 0x118, 4);
+    CHECK(ratio == 4.0f && scene_switched == 1);
+    reset("3840x2160");
+    scene_res = "4.01";
+    scene_index = 1;
+    dkb_wide_init();
+    CHECK(scene_switched == 0);
     reset("7680x4320");   // the output's own pool is above the cap and is never cut
     scene_res = "2.0";
     scene_index = 1;

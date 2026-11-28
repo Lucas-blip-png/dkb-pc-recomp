@@ -129,7 +129,7 @@ static const CfgMeta metas[] = {
     // Bananza: the 3D scene ratio of the temporal upscalers by name, when scene_res is auto (dkb_wide.c dkb_scene_ratio)
     {"DLSS_MODE", "auto", "auto|dlaa|quality|balanced|performance|ultra_performance", RESTART},
     // A defaults table by level, below the environment and dkb.ini (cfg.c PRESETS); custom changes nothing
-    {"PRESET", "custom", "custom|recommended|lowspec|1|2|3|4|5", RESTART},
+    {"PRESET", "custom", "custom|recommended|1|2|3|4|5|lowspec", RESTART},
     {"FSR4_LDR", "0", "0|1", RESTART},   // vk_fsr4.c: diagnosis, the colour is taken as perceptual up to 1
     {"WINDOW_FILTER", "fsr1", "fsr1|linear|catmull_rom|lanczos", LIVE},
     {"LOD_BIAS", "off", "off|auto", RESTART},
@@ -441,7 +441,8 @@ void cfg_preset_resolve(void) {
                vram / 1024.0, parts[0], total / 1024.0, parts[1], plat_cpu_usable(), parts[2],
                integrated ? ", integrated GPU caps at 2" : ok ? "" : ", no Vulkan GPU found");
     } else if (p) {
-        rt_log("[host] preset: %d", p);
+        if (p == PRESET_LOWSPEC) rt_log("[host] preset: lowspec");
+        else rt_log("[host] preset: %d", p);
     }
     __atomic_store_n(&preset, p, __ATOMIC_RELEASE);
 }

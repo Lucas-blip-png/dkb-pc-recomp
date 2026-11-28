@@ -620,6 +620,17 @@ void vk_exec_noatt_dims(const VkExec *ex, uint32_t *w, uint32_t *h) {
 }
 
 // Resolves ex->rt to this command buffer's images and derives the pass parameters and the pipeline's target formats.
+// DKB_SHADOW_RATE and DKB_CUBEMAP_RATE (from evolis-game's low-spec fork), read once; negatives count as 0. on: either
+// is above 1, the only case in which a pass can be left out (ex->skip_shadow), so with both off the replay does nothing
+// new.
+static struct { int shadow, cube, on; } pass_rates = {-1, -1, 0};
+static void pass_rates_init(void) {
+    if (pass_rates.shadow >= 0) return;
+    int s = cfg_int("DKB_SHADOW_RATE"), c = cfg_int("DKB_CUBEMAP_RATE");
+    pass_rates.cube = c > 0 ? c : 0, pass_rates.on = s > 1 || c > 1;
+    __atomic_store_n(&pass_rates.shadow, s > 0 ? s : 0, __ATOMIC_RELEASE);
+}
+
 static void resolve_rt(VkExec *ex) {
     if (ex->rt_resolved) return;
     ex->rt_resolved = 1;
@@ -667,9 +678,8 @@ static void resolve_rt(VkExec *ex) {
     // Each depth image has its own phase (two, by address), so the maps do not all fall on one frame. Not before frame
     // 120, so every map is drawn once first. Left alone while a dump is armed, on the upload helper (it never makes
     // passes) and in a slice, which must agree with the pass the walk opened.
-    static int shadow_rate = -1, cube_rate = -1;
-    if (shadow_rate < 0) shadow_rate = cfg_int("DKB_SHADOW_RATE");
-    if (cube_rate < 0) cube_rate = cfg_int("DKB_CUBEMAP_RATE");
+    pass_rates_init();
+    const int shadow_rate = pass_rates.shadow, cube_rate = pass_rates.cube;
     int has_color = 0;
     for (int i = 0; i < n; i++)
         if (ex->color[i].image) { has_color = 1; break; }
@@ -1139,6 +1149,7 @@ static int whole_target(const VkExec *ex, const VkExecTarget *t) {
 
 static void clear_attachment(VkExec *ex, const VkClearAttachment *a) {
     vk_exec_pass_begin(ex);
+    if (!ex->in_pass) return;   // a pass left out (skip_shadow) opens nothing, so there is nothing to clear
     VkClearRect cr = {vk_exec_scissor(ex), 0, ex->pass_layers};
     if (!cr.rect.extent.width || !cr.rect.extent.height) return;
     vkCmdClearAttachments(ex->cb, 1, a, 1, &cr);
@@ -1150,6 +1161,7 @@ static void clear_color(VkExec *ex, const p_clear_color *c) {
     FRAME->clears++;
     if (ex->render_disabled) return;
     resolve_rt(ex);
+    if (ex->skip_shadow) return;
     int i = c->index;
     if (i < 0 || i >= (int)ex->pass_ncolor || !ex->color[i].image) {
         warn_once(W_CLEAR_TARGET, "colour clear of target %d, which is not bound or not renderable: skipped", i);
@@ -3609,7 +3621,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_BARRIER: vk_exec_barrier_cs(ex), ex->game_barrier = 1; break;   // between dispatches, a compute barrier
         case OP_WAIT_SYNC: break;   // submit preparation waited before any replay/snapshot; source may be gone
         case OP_DRAW: case OP_DRAW_IDX: case OP_DISPATCH: case OP_UPDATE_UB: case OP_DRAW_IDX_IND: case OP_DISPATCH_IND:
-            if (h->op != OP_DISPATCH && h->op != OP_DISPATCH_IND && h->op != OP_UPDATE_UB) {
+            if ((pass_rates_init(), pass_rates.on) && h->op != OP_DISPATCH && h->op != OP_DISPATCH_IND && h->op != OP_UPDATE_UB) {
                 resolve_rt(ex);
                 if (ex->skip_shadow) break;   // a pass left out this frame: its draws are not counted or recorded
             }

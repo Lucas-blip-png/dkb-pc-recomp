@@ -122,6 +122,7 @@
 # Check an uploaded texture's storage for guest writes once per frame instead of once per submit, 0 or 1.
 # tex_frame_epoch = 0
 # Replace the game's upscaler compute shader with a linear blit of its input on any GPU (on by default on MoltenVK only), 0 or 1.
+# With 1 the blit also takes priority over upscaler = dlss or fsr3 for the game's upscaler dispatch.
 # mvk_upscale_blit = 0
 
 # Vulkan.

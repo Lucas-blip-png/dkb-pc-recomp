@@ -5357,6 +5357,7 @@ static int smaa_bypass_draw(VkExec *ex, uint64_t fs_origin) {
     if (fs_origin == 0x3c050d9686cf358aull || fs_origin == 0x5ea510329f353dbaull) return 1;
     if (fs_origin != 0x1daec4428216177bull) return 0;
     DrawCtx *const dc = DC_OF(ex);
+    if (HELPER_COPY && dc->slice) { vk_exec_par_hazard(); return 0; }   // a slice cannot copy: the draw runs as it was
     if (IS_HELPER(dc)) { vk_spec_fail(VK_SPEC_WRITE); return 1; }
     uint64_t hs = ex->tex[NVN_STAGE_FS][0];
     if (!hs) return 0;
@@ -5368,13 +5369,16 @@ static int smaa_bypass_draw(VkExec *ex, uint64_t fs_origin) {
     const VkTexImage *s = vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(hs), &vs, &hvs);
     if (!s || s->samples > 1 || s->type != VK_IMAGE_TYPE_2D) return 0;
     if (!(s->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || !(t->img->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return 0;
-    int same = s->format == t->format && s->width == t->width && s->height == t->height;
-    if (!same && (!blit_ok(s->format, 0) || !blit_ok(t->format, 1))) return 0;
+    // The copy and blit take the whole image, mip 0 and layer 0, in the images' own formats: a view that picks another
+    // level or layer, or the target's, is left to the shader.
+    if ((hvs && ((vs.set_levels && vs.base_level) || (vs.set_layers && vs.min_layer))) || t->level || t->base_layer) return 0;
+    int same = s->format == t->img->format && s->width == t->width && s->height == t->height;
+    if (!same && (!blit_ok(s->format, 0) || !blit_ok(t->img->format, 1))) return 0;
     vk_exec_barrier(ex);   // ends the open pass and orders the copy after what wrote the source
     static int logged;
     if (!logged++)
         rt_log("vk_exec: SMAA bypassed (%s %ux%u fmt %d -> %ux%u fmt %d)", same ? "copy" : "blit", s->width, s->height,
-               (int)s->format, t->width, t->height, (int)t->format);
+               (int)s->format, t->width, t->height, (int)t->img->format);
     if (s->image != t->image) {
         if (same) {
             VkImageCopy cp = {
@@ -5588,10 +5592,12 @@ static int mvk_upscale_cs(uint64_t h) {
            h == 0xbd63ebb7ee8d50eaull || h == 0x9bf9c9b0219fa9b4ull || h == 0xc714f7479e0e112bull;
 }
 
-// The upscaler's compute shaders by NVN 2 origin (from evolis-game's low-spec fork), which does not move with the
-// translator or the host's shader options the way the SPIR-V hash does.
+// The upscaler's compute shaders: by SPIR-V hash and, with DKB_MVK_UPSCALE_BLIT set explicitly (from evolis-game's
+// low-spec fork), also by NVN 2 origin, which does not move with the translator or the host's shader options. MoltenVK's
+// default stays on the hashes alone.
 static int mvk_upscale_match(VkExec *ex, const GfxShader *cs) {
     if (mvk_upscale_cs(gfx_shader_spirv_fnv(cs))) return 1;
+    if (!cfg_is_set("DKB_MVK_UPSCALE_BLIT")) return 0;
     uint64_t o = stage_origin(DC_OF(ex), ex->prog, NVN_STAGE_CS);
     return o == 0xe27e4707534b74e8ull || o == 0x3582d55d1149d49bull;
 }
