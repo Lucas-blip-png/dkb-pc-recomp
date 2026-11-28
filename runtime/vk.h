@@ -410,7 +410,8 @@ void vk_mem_mirror_prologue(VkCommandBuffer cb, uint64_t fence, uint32_t upto); 
 // write into CPU-visible memory at record time (vk_mem_gpu_pending) and reports it at the fence with vk_gpu_written,
 // which copies the bytes back into guest memory before telling the texture cache (vk_guest_written).
 void vk_mem_shadow_sync(void);         // vk_mem_shadow_sync_pools, then vk_mem_shadow_sync_done
-void vk_mem_shadow_sync_pools(void);   // the pools resolved since the last call take the CPU's writes
+void vk_mem_shadow_sync_pools(void);   // the pools resolved, or queued for their mirror, since the last call take the
+                                       // CPU's writes
 void vk_mem_shadow_sync_done(void);    // the part these syncs precede is submitted next
 void vk_mem_gpu_pending(uint64_t addr, uint64_t size);
 void vk_gpu_written(uint64_t addr, uint64_t size);
@@ -429,6 +430,9 @@ void vk_gpu_written_many(const VkGpuWrite *w, int n);
 #define VK_WB_LAZY (1ull << 63)
 int vk_mem_mirror_probe(uint64_t addr);   // --probe-vkexec: the pool at addr gets its mirror as on a first buffer use;
                                           // 1 when it has one
+// --probe-vkexec: whether a page the mirror's sync queues after a shadow sync took the pool's touch is in the shadow
+// after the next shadow sync (1 or 0; -1 without shadow storage or a mirror). The caller submits afterwards.
+int vk_mem_shadow_touch_probe(uint64_t addr);
 void vk_mem_class_log(const VkPhysicalDeviceProperties *p, const VkPhysicalDeviceMemoryProperties *m);   // once
 int vk_mem_class_of(uint64_t addr);               // VK_MCLS_* of the pool at addr (NONE when unbacked)
 void vk_mem_census(uint64_t frame);               // at each present: pool census and traffic, logged at frame 1800 and,
