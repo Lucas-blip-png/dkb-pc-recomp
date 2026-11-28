@@ -1611,6 +1611,7 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_PAD_PROMPTS_NINTENDO] = "Nintendo",
     [UI_MENU_PAD_PROMPTS_PLAYSTATION] = "PlayStation",
     [UI_MENU_PAD_PROMPTS_XBOX] = "Xbox",
+    [UI_MENU_FRAME_GEN_DLSS] = "NVIDIA DLSS",
 };
 
 #define SWKBD_ONLY(name, ...) static const char *const name[UI_TEXT_COUNT] = {SWKBD(__VA_ARGS__)}
