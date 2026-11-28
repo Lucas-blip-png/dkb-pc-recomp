@@ -1928,8 +1928,16 @@ static void write_back(Tex *e) {
             free(buf);
         }
     // The copy followed every submitted part. A render recorded into the submission still being recorded is not among
-    // them, so the storage did not get it: the texture stays GPU-dirty for a later read (as wb_record's tag).
+    // them, so the storage did not get it: the texture stays GPU-dirty for a later read (as wb_record's tag). The
+    // write just made counts as a CPU write to the write watch, so the texture takes it as its own (generation and
+    // snapshot, as vk_texture_wb_poll does for a late render); else the next read would drop the render as rewritten.
     if (e->gpu_fence <= vk_sync_issued()) e->gpu_dirty = 0;
+    else {
+        uint32_t g2;
+        storage_rewritten(e, 0, &g2);
+        e->gpu_gen = g2;
+        if (e->snap) memcpy(e->snap, (const void *)(uintptr_t)e->pub.addr, e->t.L.size);
+    }
 }
 
 // Mirrored textures overlapping [addr, addr+size) that the GPU wrote since their last write-back.
