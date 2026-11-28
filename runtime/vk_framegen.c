@@ -468,6 +468,12 @@ static int hudless_images(VkCtx *c, VkCommandBuffer cb) {
     return 1;
 }
 
+// Made frames that reached the display, over the whole run: the display thread's (Auto, 3x to 8x) and vk_fg_show's
+// (2x). The performance overlay turns it into a rate (vk_fg_made_total) to show the frames on screen beside the game's.
+static volatile uint64_t g_made_shown;
+
+uint64_t vk_fg_made_total(void) { return __atomic_load_n(&g_made_shown, __ATOMIC_RELAXED); }
+
 static void log_stats(uint64_t now) {
     if (!S.t0) S.t0 = now;
     if (now - S.t0 < 5000000000ull) return;
@@ -552,6 +558,7 @@ static void display_main(void *arg) {
                 // keeps the game frame's index from when it was recorded
                 if (st->game[k]) vk_antilag_present(st->antilag);
                 vk_present_image_held(st->frame[k].img, VK_IMAGE_LAYOUT_GENERAL, st->fmt, (int)st->w, (int)st->h, NULL);
+                if (!st->game[k]) __atomic_add_fetch(&g_made_shown, 1, __ATOMIC_RELAXED);
             }
             vk_present_unlock();
             if (shown_at) {
@@ -859,6 +866,7 @@ void vk_fg_show(int (*pending)(void), uint64_t frame, uint64_t antilag) {
     plat_mutex_unlock(&fgl);
     if (!made || !real) return;   // released meanwhile
     vk_present_image(made, VK_IMAGE_LAYOUT_GENERAL, fmt, w, h, NULL);
+    __atomic_add_fetch(&g_made_shown, 1, __ATOMIC_RELAXED);
     uint64_t made_at = kern_now_ns();
     if (frame) vk_thumbs_frame(frame);   // the thumbnail and the dump name the game's frame, not the made one
     vk_present_blit(real, VK_IMAGE_LAYOUT_GENERAL, fmt, w, h, NULL);

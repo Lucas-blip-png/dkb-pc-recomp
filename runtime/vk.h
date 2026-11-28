@@ -184,7 +184,9 @@ void vk_crt_release(void);
 // frames get none.
 int vk_fg_record(VkImage src, VkFormat fmt, int w, int h, const int crop[4], const VkFiInputs *fi, uint64_t frame_no, uint64_t antilag);
 void vk_fg_show(int (*pending)(void), uint64_t frame, uint64_t antilag);
-void vk_fg_release(void);   // before the device goes away
+void vk_fg_release(void);
+// Made frames presented so far (any thread): the performance overlay's frames-on-screen rate.
+uint64_t vk_fg_made_total(void);   // before the device goes away
 // AMD Anti-Lag 2 (vk_antilag.c, DKB_ANTILAG). vk_antilag_available: the device can run it (0 before the device).
 // vk_antilag_frame: the index of the game frame being made now (its input stage was given), 0 while off or none; a
 // present job keeps it. vk_antilag_input: after the game presented, the next frame's input stage, where the driver
