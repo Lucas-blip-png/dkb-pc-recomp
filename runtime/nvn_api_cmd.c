@@ -412,7 +412,7 @@ static void rec_buffer_free(uint8_t *seg) {
 }
 typedef struct { uintptr_t lo, hi; uint8_t *copy; } cmd_copy;
 typedef struct { cmd_copy *v; uint32_t n, cap; } copy_bucket;
-static PlatMutex copy_lock = PLAT_MUTEX_INIT;    // guards the two maps, the counters and every prefix
+static PlatMutex copy_lock = PLAT_MUTEX_INIT;    // guards the two maps, the counters and every prefix (DKB_COPY_SHARDS=0)
 static nvn_hmap copy_pages = {.klen = 8};   // page -> copy_bucket
 static nvn_hmap copy_live = {.klen = 8};    // handle -> copy_prefix of a live copy
 static uint64_t ncopies, copy_bytes, copies_made, nsubmits;
@@ -421,6 +421,58 @@ static uint64_t ncopies, copy_bytes, copies_made, nsubmits;
 // record still names them, with either replay; they are freed once no record names them (refs 0).
 static copy_prefix **zombies;
 static uint32_t nzombies, cap_zombies;
+
+// DKB_COPY_SHARDS (default 1): shards copy_live by handle (64 cache-line-aligned locks), copy_pages by 1 MiB region
+// (16 pages of 64 KiB per shard, with an atomic bucket count so empty regions skip locking), and moves zombies[] behind
+// its own lock with off-lock freeing. Multiple guest threads record command buffers simultaneously on Hilltop, and a
+// single global copy_lock serialised CallCommands (shared) against every EndRecording and AddControlMemory (exclusive).
+// No two shard locks are ever held at once (copy_add inserts into live_shards then page_shards; release_copies extracts
+// from page_shards, removes from live_shards, then sweeps/appends under zombie_lock and frees off-lock).
+#define LIVE_SHARDS 64
+#define PAGE_SHARDS 64
+typedef struct {
+    _Alignas(64) PlatMutex lock;
+    nvn_hmap map;
+} LiveShard;
+typedef struct {
+    _Alignas(64) PlatMutex lock;
+    nvn_hmap map;
+    uint32_t count;   // live buckets in map (atomic)
+} PageShard;
+static LiveShard live_shards[LIVE_SHARDS];
+static PageShard page_shards[PAGE_SHARDS];
+static struct { _Alignas(64) PlatMutex lock; } zombie_lock_box = {PLAT_MUTEX_INIT};
+#define zombie_lock zombie_lock_box.lock
+static uint64_t zombie_last_replayed;
+static uint64_t zombie_dirty, zombie_swept_dirty;
+static int shards_ready;
+static int shards_enabled;
+
+static __attribute__((noinline)) void shards_init(void) {
+    plat_mutex_lock(&copy_lock);
+    if (!shards_ready) {
+        for (int i = 0; i < LIVE_SHARDS; i++) live_shards[i].map.klen = 8;
+        for (int i = 0; i < PAGE_SHARDS; i++) page_shards[i].map.klen = 8;
+        int m = rt_knob("COPY_SHARDS", "1");
+        if (m == 2) rt_log("nvn: DKB_COPY_SHARDS cannot alternate under DKB_AB; staying enabled");
+        shards_enabled = m != 0;
+        __atomic_store_n(&shards_ready, 1, __ATOMIC_RELEASE);
+    }
+    plat_mutex_unlock(&copy_lock);
+}
+
+static inline int copy_shards_on(void) {
+    if (__builtin_expect(!__atomic_load_n(&shards_ready, __ATOMIC_ACQUIRE), 0)) shards_init();
+    return shards_enabled;
+}
+
+static inline uint32_t live_shard_idx(uint64_t handle) {
+    return (uint32_t)(((handle >> 6) * 0x9E3779B97F4A7C15ull) >> 58);
+}
+
+static inline uint32_t page_shard_idx(uintptr_t pg) {
+    return (uint32_t)(((pg >> 4) * 0x9E3779B97F4A7C15ull) >> 58);
+}
 
 // ---------- uniform range lists (nvn_api.h nvn_ubo_list_build, vk_usnap.c DKB_USNAP_LIST)
 // Without a back end that builds them (tests, the null back end) a copy has none.
@@ -858,21 +910,29 @@ static void copy_free(copy_prefix *pf) {
     copy_block_free(pf);
 }
 
-// Deferred copy freeing (DKB_CMD_REC_FAST): unlinks ready-to-free copies under copy_lock (still running calls_adjust
-// for COPY_CALLS so nested zombies drain in one sweep), then runs free() and blk_lock outside copy_lock.
+// Deferred copy freeing (DKB_CMD_REC_FAST and DKB_COPY_SHARDS): unlinks ready-to-free copies under lock (still
+// running calls_adjust for COPY_CALLS so nested zombies drain in one sweep), then runs free() and blk_lock off-lock.
+static _Thread_local copy_prefix **tl_rel_pf;
+static _Thread_local uint32_t tl_rel_pf_cap;
 static _Thread_local copy_prefix **tl_free_pf;
 static _Thread_local uint32_t tl_free_pf_cap;
+static _Thread_local copy_prefix **tl_zomb_pf;
+static _Thread_local uint32_t tl_zomb_pf_cap;
 static _Thread_local void **tl_free_ptr;
 static _Thread_local uint32_t tl_free_ptr_cap;
 
-static void defer_pf(copy_prefix *pf, uint32_t *n) {
-    if (*n == tl_free_pf_cap) {
-        uint32_t cap = tl_free_pf_cap ? tl_free_pf_cap * 2 : 64;
-        copy_prefix **v = realloc(tl_free_pf, sizeof *v * cap);
+static void pf_vec_push(copy_prefix ***vec, uint32_t *cap, uint32_t *n, copy_prefix *pf) {
+    if (*n == *cap) {
+        uint32_t c = *cap ? *cap * 2 : 64;
+        copy_prefix **v = realloc(*vec, sizeof *v * c);
         if (!v) rt_fatal("nvn: out of memory (deferred copy release)");
-        tl_free_pf = v, tl_free_pf_cap = cap;
+        *vec = v, *cap = c;
     }
-    tl_free_pf[(*n)++] = pf;
+    (*vec)[(*n)++] = pf;
+}
+
+static void defer_pf(copy_prefix *pf, uint32_t *n) {
+    pf_vec_push(&tl_free_pf, &tl_free_pf_cap, n, pf);
 }
 
 static void defer_ptr(void *p, uint32_t *n) {
@@ -908,7 +968,8 @@ static void zombie_sweep(uint64_t replayed) {   // copy_lock held
     for (int again = 1; again;) {
         again = 0;
         for (uint32_t i = 0; i < nzombies;) {
-            if (zombies[i]->used_at <= replayed && !__atomic_load_n(&zombies[i]->refs, __ATOMIC_RELAXED)) {
+            if (__atomic_load_n(&zombies[i]->used_at, __ATOMIC_RELAXED) <= replayed &&
+                !__atomic_load_n(&zombies[i]->refs, __ATOMIC_RELAXED)) {
                 copy_prefix *pf = zombies[i];
                 zombies[i] = zombies[--nzombies];
                 again |= pf->flags & COPY_CALLS;
@@ -924,7 +985,8 @@ static void zombie_sweep_defer(uint64_t replayed, uint32_t *npf) {   // copy_loc
     for (int again = 1; again;) {
         again = 0;
         for (uint32_t i = 0; i < nzombies;) {
-            if (zombies[i]->used_at <= replayed && !__atomic_load_n(&zombies[i]->refs, __ATOMIC_RELAXED)) {
+            if (__atomic_load_n(&zombies[i]->used_at, __ATOMIC_RELAXED) <= replayed &&
+                !__atomic_load_n(&zombies[i]->refs, __ATOMIC_RELAXED)) {
                 copy_prefix *pf = zombies[i];
                 zombies[i] = zombies[--nzombies];
                 if (pf->flags & COPY_CALLS) {
@@ -937,6 +999,34 @@ static void zombie_sweep_defer(uint64_t replayed, uint32_t *npf) {   // copy_loc
             }
         }
     }
+}
+
+static void zombie_sweep_sharded(uint64_t replayed, uint32_t *npf) {   // zombie_lock held
+    uint64_t d = __atomic_load_n(&zombie_dirty, __ATOMIC_ACQUIRE);
+    int dropped_calls = 0;
+    for (int again = 1; again;) {
+        again = 0;
+        for (uint32_t i = 0; i < nzombies;) {
+            if (__atomic_load_n(&zombies[i]->used_at, __ATOMIC_RELAXED) <= replayed &&
+                !__atomic_load_n(&zombies[i]->refs, __ATOMIC_RELAXED)) {
+                copy_prefix *pf = zombies[i];
+                uint32_t n = nzombies - 1;
+                zombies[i] = zombies[n];
+                __atomic_store_n(&nzombies, n, __ATOMIC_RELAXED);
+                if (pf->flags & COPY_CALLS) {
+                    again = 1;
+                    dropped_calls = 1;
+                    copy_calls_adjust(pf, -1);
+                }
+                defer_pf(pf, npf);
+            } else {
+                i++;
+            }
+        }
+    }
+    __atomic_store_n(&zombie_last_replayed, replayed, __ATOMIC_RELAXED);
+    __atomic_store_n(&zombie_swept_dirty, d, __ATOMIC_RELAXED);
+    if (dropped_calls) __atomic_add_fetch(&zombie_dirty, 1, __ATOMIC_RELEASE);
 }
 
 // The recording o abandons gives back the counts its OP_CALL records took, when its buffer is its own to read; else
@@ -953,6 +1043,7 @@ static void drop_recording_calls(cmd_t *o) {
         } else {
             calls_adjust(o->seg, o->cur, -1);
         }
+        __atomic_add_fetch(&zombie_dirty, 1, __ATOMIC_RELEASE);
     } else {
         __atomic_add_fetch(&n_ref_leaks, 1, __ATOMIC_RELAXED);
     }
@@ -963,6 +1054,12 @@ static void drop_recording_calls(cmd_t *o) {
 uint32_t nvn_copy_refs(uint64_t handle) { return __atomic_load_n(&((const copy_prefix *)(uintptr_t)handle - 1)->refs, __ATOMIC_RELAXED); }
 uint32_t nvn_copy_depth(uint64_t handle) { return ((const copy_prefix *)(uintptr_t)handle - 1)->depth; }
 uint32_t nvn_copy_zombies(void) {
+    if (copy_shards_on()) {
+        plat_mutex_lock_shared(&zombie_lock);
+        uint32_t n = nzombies;
+        plat_mutex_unlock_shared(&zombie_lock);
+        return n;
+    }
     plat_mutex_lock_shared(&copy_lock);
     uint32_t n = nzombies;
     plat_mutex_unlock_shared(&copy_lock);
@@ -974,6 +1071,13 @@ static copy_prefix *copy_find(uint64_t handle) {   // copy_lock held
 }
 
 int nvn_handle_live(uint64_t handle) {
+    if (copy_shards_on()) {
+        LiveShard *s = &live_shards[live_shard_idx(handle)];
+        plat_mutex_lock_shared(&s->lock);
+        int live = nvn_hm_get(&s->map, &handle) != NULL;
+        plat_mutex_unlock_shared(&s->lock);
+        return live;
+    }
     plat_mutex_lock_shared(&copy_lock);
     int live = copy_find(handle) != NULL;
     plat_mutex_unlock_shared(&copy_lock);
@@ -981,6 +1085,14 @@ int nvn_handle_live(uint64_t handle) {
 }
 
 uint64_t nvn_handle_bytes(uint64_t handle) {
+    if (copy_shards_on()) {
+        LiveShard *s = &live_shards[live_shard_idx(handle)];
+        plat_mutex_lock_shared(&s->lock);
+        const copy_prefix *pf = nvn_hm_get(&s->map, &handle);
+        uint64_t n = pf ? pf->bytes : 0;
+        plat_mutex_unlock_shared(&s->lock);
+        return n;
+    }
     plat_mutex_lock_shared(&copy_lock);
     const copy_prefix *pf = copy_find(handle);
     uint64_t n = pf ? pf->bytes : 0;
@@ -990,11 +1102,20 @@ uint64_t nvn_handle_bytes(uint64_t handle) {
 
 // Marks a live copy used by submission now; its size from OP_BEGIN to OP_END inclusive.
 static uint64_t copy_touch(uint64_t handle, uint64_t now, const char *what) {
-    plat_mutex_lock_shared(&copy_lock);
-    copy_prefix *pf = copy_find(handle);
+    copy_prefix *pf;
     uint64_t bytes = 0;
-    if (pf) used_at_max(pf, now), bytes = pf->bytes;
-    plat_mutex_unlock_shared(&copy_lock);
+    if (copy_shards_on()) {
+        LiveShard *s = &live_shards[live_shard_idx(handle)];
+        plat_mutex_lock_shared(&s->lock);
+        pf = nvn_hm_get(&s->map, &handle);
+        if (pf) used_at_max(pf, now), bytes = pf->bytes;
+        plat_mutex_unlock_shared(&s->lock);
+    } else {
+        plat_mutex_lock_shared(&copy_lock);
+        pf = copy_find(handle);
+        if (pf) used_at_max(pf, now), bytes = pf->bytes;
+        plat_mutex_unlock_shared(&copy_lock);
+    }
     if (!pf) rt_fatal("nvn: %s: command handle %#llx is not a live recording (released or never recorded)", what,
                       (unsigned long long)handle);
     return bytes;
@@ -1302,10 +1423,58 @@ scan_done:
     return (uint8_t *)(pf + 1);
 }
 
+static _Thread_local int64_t tl_ncopies, tl_copy_bytes;
+static _Thread_local uint32_t tl_copies_made, tl_copy_ops;
+
+static void copy_stats_flush(void) {
+    uint32_t dm = tl_copies_made;
+    int64_t dn = tl_ncopies, db = tl_copy_bytes;
+    tl_copies_made = 0, tl_copy_ops = 0, tl_ncopies = 0, tl_copy_bytes = 0;
+    uint64_t live = (uint64_t)__atomic_add_fetch(&ncopies, (uint64_t)dn, __ATOMIC_RELAXED);
+    uint64_t bytes = (uint64_t)__atomic_add_fetch(&copy_bytes, (uint64_t)db, __ATOMIC_RELAXED);
+    if (dm) {
+        uint64_t made = __atomic_add_fetch(&copies_made, dm, __ATOMIC_RELAXED);
+        if ((made - dm) / 20000 != made / 20000)
+            NVN_LOG("recording copies: %llu made, %llu live, %.1f MiB, submit %llu", (unsigned long long)made,
+                    (unsigned long long)live, bytes / 1048576.0,
+                    (unsigned long long)__atomic_load_n(&nsubmits, __ATOMIC_RELAXED));
+    }
+}
+
 static void copy_add(uintptr_t lo, uintptr_t hi, uint8_t *copy) {
     copy_prefix *pf = (copy_prefix *)copy - 1;
     uint64_t handle = (uintptr_t)copy;
     uintptr_t page = lo >> COPY_PAGE_SHIFT;
+    if (copy_shards_on()) {
+        pf->made_at = __atomic_load_n(&nsubmits, __ATOMIC_RELAXED);
+        LiveShard *ls = &live_shards[live_shard_idx(handle)];
+        plat_mutex_lock(&ls->lock);
+        nvn_hm_put(&ls->map, &handle, pf);
+        plat_mutex_unlock(&ls->lock);
+
+        PageShard *ps = &page_shards[page_shard_idx(page)];
+        plat_mutex_lock(&ps->lock);
+        copy_bucket *b = nvn_hm_get(&ps->map, &page);
+        if (!b) {
+            b = calloc(1, sizeof *b);
+            if (!b) rt_fatal("nvn: command copy index");
+            nvn_hm_put(&ps->map, &page, b);
+            __atomic_store_n(&ps->count, ps->count + 1, __ATOMIC_RELAXED);
+        }
+        if (b->n == b->cap) {
+            b->cap = b->cap ? b->cap * 2 : 8;
+            b->v = realloc(b->v, b->cap * sizeof *b->v);
+            if (!b->v) rt_fatal("nvn: command copy index");
+        }
+        b->v[b->n++] = (cmd_copy){lo, hi, copy};
+        plat_mutex_unlock(&ps->lock);
+
+        tl_ncopies++;
+        tl_copy_bytes += (int64_t)pf->bytes;
+        tl_copies_made++;
+        if (++tl_copy_ops >= 64) copy_stats_flush();
+        return;
+    }
     plat_mutex_lock(&copy_lock);
     pf->made_at = nsubmits;
     copy_bucket *b = nvn_hm_get(&copy_pages, &page);
@@ -1333,6 +1502,94 @@ static void copy_add(uintptr_t lo, uintptr_t hi, uint8_t *copy) {
 static void release_copies(uintptr_t lo, uintptr_t hi) {
     if (hi <= lo) return;
     uint64_t replayed = gfx_replayed_submits();
+    if (copy_shards_on()) {
+        uint32_t nrel = 0, npf = 0, nzomb = 0, nptr = 0;
+        if (__atomic_load_n(&nzombies, __ATOMIC_RELAXED) != 0 &&
+            (replayed != __atomic_load_n(&zombie_last_replayed, __ATOMIC_RELAXED) ||
+             __atomic_load_n(&zombie_dirty, __ATOMIC_ACQUIRE) !=
+                 __atomic_load_n(&zombie_swept_dirty, __ATOMIC_RELAXED))) {
+            plat_mutex_lock(&zombie_lock);
+            if (nzombies) zombie_sweep_sharded(replayed, &npf);
+            plat_mutex_unlock(&zombie_lock);
+        }
+        uintptr_t pg_lo = lo >> COPY_PAGE_SHIFT, pg_hi = (hi - 1) >> COPY_PAGE_SHIFT;
+        for (uintptr_t pg = pg_lo; pg <= pg_hi;) {
+            uintptr_t chunk_end = (pg | 15u);
+            if (chunk_end > pg_hi) chunk_end = pg_hi;
+            PageShard *ps = &page_shards[page_shard_idx(pg)];
+            if (!__atomic_load_n(&ps->count, __ATOMIC_RELAXED)) {
+                pg = chunk_end + 1;
+                continue;
+            }
+            plat_mutex_lock(&ps->lock);
+            if (ps->count) {
+                for (; pg <= chunk_end; pg++) {
+                    copy_bucket *b = nvn_hm_get(&ps->map, &pg);
+                    if (!b) continue;
+                    for (uint32_t i = 0; i < b->n;) {
+                        cmd_copy *k = &b->v[i];
+                        if (!(k->lo < hi && lo < k->hi)) { i++; continue; }
+                        pf_vec_push(&tl_rel_pf, &tl_rel_pf_cap, &nrel, (copy_prefix *)k->copy - 1);
+                        b->v[i] = b->v[--b->n];
+                    }
+                    if (!b->n) {
+                        nvn_hm_del(&ps->map, &pg);
+                        __atomic_store_n(&ps->count, ps->count - 1, __ATOMIC_RELAXED);
+                        defer_ptr(b->v, &nptr);
+                        defer_ptr(b, &nptr);
+                    }
+                }
+            } else {
+                pg = chunk_end + 1;
+            }
+            plat_mutex_unlock(&ps->lock);
+        }
+        int64_t rel_bytes = 0;
+        int dropped_calls = 0;
+        for (uint32_t i = 0; i < nrel; i++) {
+            copy_prefix *pf = tl_rel_pf[i];
+            uint64_t handle = (uintptr_t)(pf + 1);
+            LiveShard *ls = &live_shards[live_shard_idx(handle)];
+            plat_mutex_lock(&ls->lock);
+            nvn_hm_del(&ls->map, &handle);
+            pf->magic = 0;
+            int keep = __atomic_load_n(&pf->used_at, __ATOMIC_RELAXED) > replayed ||
+                       __atomic_load_n(&pf->refs, __ATOMIC_RELAXED) != 0;
+            plat_mutex_unlock(&ls->lock);
+            rel_bytes += (int64_t)pf->bytes;
+            if (keep) {
+                pf_vec_push(&tl_zomb_pf, &tl_zomb_pf_cap, &nzomb, pf);
+            } else {
+                if (pf->flags & COPY_CALLS) {
+                    copy_calls_adjust(pf, -1);
+                    dropped_calls = 1;
+                }
+                defer_pf(pf, &npf);
+            }
+        }
+        if (nrel) {
+            tl_ncopies -= (int64_t)nrel;
+            tl_copy_bytes -= rel_bytes;
+            tl_copy_ops += nrel;
+            if (tl_copy_ops >= 64) copy_stats_flush();
+        }
+        if (dropped_calls) __atomic_add_fetch(&zombie_dirty, 1, __ATOMIC_RELEASE);
+        if (nzomb) {
+            plat_mutex_lock(&zombie_lock);
+            for (uint32_t i = 0; i < nzomb; i++) {
+                if (nzombies == cap_zombies) {
+                    cap_zombies = cap_zombies ? cap_zombies * 2 : 64;
+                    zombies = realloc(zombies, sizeof *zombies * cap_zombies);
+                    if (!zombies) rt_fatal("nvn: out of memory (released recording copies)");
+                }
+                zombies[nzombies] = tl_zomb_pf[i];
+                __atomic_store_n(&nzombies, nzombies + 1, __ATOMIC_RELAXED);
+            }
+            plat_mutex_unlock(&zombie_lock);
+        }
+        if (npf || nptr) flush_deferred_frees(npf, nptr);
+        return;
+    }
     if (cmd_rec_fast()) {
         uint32_t npf = 0, nptr = 0;
         plat_mutex_lock(&copy_lock);
@@ -1349,7 +1606,8 @@ static void release_copies(uintptr_t lo, uintptr_t hi) {
                 ncopies--;
                 copy_bytes -= pf->bytes;
                 pf->magic = 0;
-                if (pf->used_at > replayed || __atomic_load_n(&pf->refs, __ATOMIC_RELAXED)) {
+                if (__atomic_load_n(&pf->used_at, __ATOMIC_RELAXED) > replayed ||
+                    __atomic_load_n(&pf->refs, __ATOMIC_RELAXED)) {
                     zombie_add(pf);   // still read
                 } else {
                     if (pf->flags & COPY_CALLS) copy_calls_adjust(pf, -1);
@@ -1611,6 +1869,22 @@ static void inline_recording(cmd_t *o, uint64_t handle, const char *what) {
 }
 static _Thread_local uint32_t tl_call_refs;
 
+static void call_refs_flush(uint32_t refs_added) {
+    if (!refs_added) return;
+    tl_call_refs += refs_added;
+    if (__builtin_expect(tl_call_refs >= 4096, 0)) {
+        uint32_t d = tl_call_refs;
+        tl_call_refs = 0;
+        uint64_t cur = __atomic_add_fetch(&n_call_refs, d, __ATOMIC_RELAXED);
+        if (((cur - d) >> 20) != (cur >> 20))
+            rt_log("nvn: DKB_CALL_REF: %llu calls referenced, %llu copied (deferred records), %llu copied (nested %d "
+                   "deep), %llu abandoned recordings kept their counts, %u released copies still named or read",
+                   (unsigned long long)cur, (unsigned long long)__atomic_load_n(&n_call_inlined, __ATOMIC_RELAXED),
+                   (unsigned long long)__atomic_load_n(&n_call_deep, __ATOMIC_RELAXED), CALL_REF_DEPTH,
+                   (unsigned long long)__atomic_load_n(&n_ref_leaks, __ATOMIC_RELAXED), nvn_copy_zombies());
+    }
+}
+
 static void call_commands_fast(cmd_t *o, const uint64_t *h, int n, const char *what) {
     int i = 0;
     uint32_t refs_added = 0;
@@ -1691,20 +1965,95 @@ static void call_commands_fast(cmd_t *o, const uint64_t *h, int n, const char *w
         }
         plat_mutex_unlock_shared(&copy_lock);
     }
-    if (refs_added) {
-        tl_call_refs += refs_added;
-        if (__builtin_expect(tl_call_refs >= 4096, 0)) {
-            uint32_t d = tl_call_refs;
-            tl_call_refs = 0;
-            uint64_t cur = __atomic_add_fetch(&n_call_refs, d, __ATOMIC_RELAXED);
-            if (((cur - d) >> 20) != (cur >> 20))
-                rt_log("nvn: DKB_CALL_REF: %llu calls referenced, %llu copied (deferred records), %llu copied (nested %d "
-                       "deep), %llu abandoned recordings kept their counts, %u released copies still named or read",
-                       (unsigned long long)cur, (unsigned long long)__atomic_load_n(&n_call_inlined, __ATOMIC_RELAXED),
-                       (unsigned long long)__atomic_load_n(&n_call_deep, __ATOMIC_RELAXED), CALL_REF_DEPTH,
-                       (unsigned long long)__atomic_load_n(&n_ref_leaks, __ATOMIC_RELAXED), nvn_copy_zombies());
+    call_refs_flush(refs_added);
+}
+
+static void call_commands_sharded(cmd_t *o, const uint64_t *h, int n, const char *what) {
+    uint64_t sub = __atomic_load_n(&nsubmits, __ATOMIC_RELAXED);
+    uint32_t refs_added = 0;
+    rec_track *tr = rec_track_of(o);
+    if (o->recording && n > 0) cmd_reserve(o, (size_t)(n < 64 ? n : 64) * 16);
+    int held = -1;
+    for (int i = 0; i < n; i++) {
+        uint64_t handle = h[i];
+        if (__builtin_expect(!handle, 0)) {
+            if (held >= 0) plat_mutex_unlock_shared(&live_shards[held].lock);
+            rt_fatal("nvn: %s with a null handle", what);
+        }
+        int sidx = (int)live_shard_idx(handle);
+        if (sidx != held) {
+            if (held >= 0) plat_mutex_unlock_shared(&live_shards[held].lock);
+            plat_mutex_lock_shared(&live_shards[sidx].lock);
+            held = sidx;
+        }
+        copy_prefix *pf = nvn_hm_get(&live_shards[sidx].map, &handle);
+        if (__builtin_expect(!pf, 0)) {
+            plat_mutex_unlock_shared(&live_shards[sidx].lock);
+            rt_fatal("nvn: %s: command handle %#llx is not a live recording (released or never recorded)", what,
+                     (unsigned long long)handle);
+        }
+        used_at_max(pf, sub);
+        uint64_t bytes = pf->bytes;
+        const int shallow = pf->depth < CALL_REF_DEPTH;
+        if (__builtin_expect(pf->deferred == 1 && bytes > 16 && o->recording && shallow, 1)) {
+            __atomic_add_fetch(&pf->refs, 1, __ATOMIC_RELAXED);
+            if (n == 1) {
+                plat_mutex_unlock_shared(&live_shards[sidx].lock);
+                held = -1;
+            }
+            if (__builtin_expect(o->cur + 16 + OP_RESERVE > o->end, 0)) cmd_reserve(o, 16);
+            _Static_assert(sizeof(p_jump) == 8, "the 16-byte OP_CALL written below is an 8-byte header and a p_jump");
+            uint8_t *dst = o->cur;
+            put_hdr(dst, OP_CALL, 16);
+            memcpy(dst + 8, &handle, 8);
+            o->cur = dst + 16;
+            o->cmd_used += 16;
+            o->hw_used += (size_t)bytes - 16;
+            o->last_rec = 0;
+            if (tr) {
+                tr->flags |= (uint16_t)(COPY_CALLS | (pf->flags & COPY_WAITS));
+                uint16_t d = (uint16_t)(pf->depth + 1);
+                if (d > tr->depth) tr->depth = d;
+                track_callee_add(tr, pf);
+                track_compose_ubo(tr, pf);
+            }
+            refs_added++;
+        } else {
+            __atomic_add_fetch(shallow ? &n_call_inlined : &n_call_deep, 1, __ATOMIC_RELAXED);
+            if (bytes > 16) {
+                size_t body = (size_t)bytes - 16;
+                cmd_reserve(o, body);
+                memcpy(o->cur, (const uint8_t *)(uintptr_t)handle + 8, body);
+                if ((pf->flags & COPY_CALLS) && o->recording) {
+                    if (pf->flags & COPY_CALLEES) {
+                        copy_prefix *const *cs = copy_callees(pf);
+                        for (uint32_t j = 0; j < pf->ncallees; j++)
+                            __atomic_add_fetch(&cs[j]->refs, 1, __ATOMIC_RELAXED);
+                        if (tr) {
+                            tr->flags |= COPY_CALLS;
+                            if (pf->depth > tr->depth) tr->depth = pf->depth;
+                            track_callees_append(tr, cs, pf->ncallees);
+                        }
+                    } else {
+                        calls_adjust(o->cur, o->cur + body, +1);
+                        if (tr) tr->valid = 0, tr = NULL;
+                    }
+                }
+                if (tr) {
+                    tr->flags |= (uint16_t)(pf->flags & COPY_WAITS);
+                    if (pf->deferred == 2) tr->deferred = 1;
+                    else if (pf->deferred == 0) tr->valid = 0, tr = NULL;
+                    if (tr) track_compose_ubo(tr, pf);
+                }
+                o->cur += body;
+                o->cmd_used += body;
+                o->hw_used += body;
+                o->last_rec = 0;
+            }
         }
     }
+    if (held >= 0) plat_mutex_unlock_shared(&live_shards[held].lock);
+    call_refs_flush(refs_added);
 }
 
 // void nvnCommandBuffer{Call,Copy}Commands(NVNcommandBuffer *cmd, int n, const NVNcommandHandle *handles)
@@ -1712,9 +2061,15 @@ NVN_API(nvnCommandBufferCallCommands) {
     cmd_t *o = cmd_of(c);
     int n = (int)arg_x(c, 1);
     const uint64_t *h = arg_p(c, 2);
-    if (n > 0 && cmd_rec_fast() && call_ref()) {
-        call_commands_fast(o, h, n, "CallCommands");
-        return;
+    if (n > 0 && call_ref()) {
+        if (copy_shards_on()) {
+            call_commands_sharded(o, h, n, "CallCommands");
+            return;
+        }
+        if (cmd_rec_fast()) {
+            call_commands_fast(o, h, n, "CallCommands");
+            return;
+        }
     }
     for (int i = 0; i < n; i++) inline_recording(o, h[i], "CallCommands");
 }
@@ -1722,9 +2077,15 @@ NVN_API(nvnCommandBufferCopyCommands) {
     cmd_t *o = cmd_of(c);
     int n = (int)arg_x(c, 1);
     const uint64_t *h = arg_p(c, 2);
-    if (n > 0 && cmd_rec_fast() && call_ref()) {
-        call_commands_fast(o, h, n, "CopyCommands");
-        return;
+    if (n > 0 && call_ref()) {
+        if (copy_shards_on()) {
+            call_commands_sharded(o, h, n, "CopyCommands");
+            return;
+        }
+        if (cmd_rec_fast()) {
+            call_commands_fast(o, h, n, "CopyCommands");
+            return;
+        }
     }
     for (int i = 0; i < n; i++) inline_recording(o, h[i], "CopyCommands");
 }
@@ -2376,7 +2737,27 @@ void nvn_submit_prepare(const uint64_t *handles, int n) {
     uint64_t now = __atomic_add_fetch(&nsubmits, 1, __ATOMIC_RELAXED);
     nvn_mode_trace(NVN_MODE_PREPARE, 0, 0, (uint32_t)n, now);
     const int fast = cmd_rec_fast();
-    if (fast && n > 0) {
+    if (copy_shards_on() && n > 0) {
+        int held = -1;
+        for (int i = 0; i < n; i++) {
+            uint64_t handle = handles[i];
+            int sidx = (int)live_shard_idx(handle);
+            if (sidx != held) {
+                if (held >= 0) plat_mutex_unlock_shared(&live_shards[held].lock);
+                plat_mutex_lock_shared(&live_shards[sidx].lock);
+                held = sidx;
+            }
+            copy_prefix *pf = nvn_hm_get(&live_shards[sidx].map, &handle);
+            if (__builtin_expect(!pf, 0)) {
+                plat_mutex_unlock_shared(&live_shards[sidx].lock);
+                rt_fatal("nvn: QueueSubmitCommands: command handle %#llx is not a live recording (released or never recorded)",
+                         (unsigned long long)handle);
+            }
+            used_at_max(pf, now);
+        }
+        if (held >= 0) plat_mutex_unlock_shared(&live_shards[held].lock);
+        for (int i = 0; i < n; i++) nvn_mode_trace(NVN_MODE_HANDLE, 0, handles[i], (uint32_t)i, now);
+    } else if (fast && n > 0) {
         plat_mutex_lock_shared(&copy_lock);
         for (int i = 0; i < n; i++) {
             uint64_t handle = handles[i];
@@ -2406,6 +2787,33 @@ void nvn_submit_prepare(const uint64_t *handles, int n) {
     }
 }
 
+// Clones a live copy for asynchronous replay, duplicating any heap callee array and bumping callee refcounts.
+static copy_prefix *copy_clone(const copy_prefix *pf, uint64_t now) {
+    size_t sz = sizeof *pf + pf->bytes;
+    copy_prefix *cl = copy_block(sz);
+    uint64_t block = cl->block;
+    memcpy(cl, pf, sz);
+    cl->block = block;
+    cl->magic = 0;   // not a live handle: the game never sees it
+    cl->refs = 0;
+    if (cl->flags & COPY_CALLEES) {
+        if (cl->ncallees > 4) {
+            copy_prefix **v = malloc(cl->ncallees * sizeof *v);
+            if (!v) rt_fatal("nvn: out of memory (clone callees)");
+            memcpy(v, pf->u.callees, cl->ncallees * sizeof *v);
+            cl->u.callees = v;
+        }
+        if (cl->flags & COPY_CALLS) copy_calls_adjust(cl, +1);
+    } else if (cl->flags & COPY_CALLS) {
+        calls_adjust((const uint8_t *)(cl + 1), (const uint8_t *)(cl + 1) + cl->bytes, +1);
+    }
+    cl->ubo = NULL;   // the list stays the original's: the replay walks the clone's records
+    cl->def_list = NULL;
+    cl->used_at = now;
+    __atomic_fetch_add(&n_clones, 1, __ATOMIC_RELAXED);
+    return cl;
+}
+
 // Asynchronous replay. A copy a queued submission still reads keeps that submission's deferred binds: when it holds
 // deferred binds (or is not known to hold none), this submission gets a clone, resolved here and freed after its replay.
 void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
@@ -2413,58 +2821,80 @@ void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
     nvn_mode_trace(NVN_MODE_PREPARE, 0, 0, (uint32_t)n, now);
     uint64_t replayed = gfx_replayed_submits();
     const int fast = cmd_rec_fast();
-    uint32_t npf = 0;
-    plat_mutex_lock(&copy_lock);
-    if (nzombies) {
-        if (fast) zombie_sweep_defer(replayed, &npf);
-        else zombie_sweep(replayed);
-    }
-    for (int i = 0; i < n; i++) {
-        uint64_t handle = handles[i];
-        copy_prefix *pf = copy_find(handle);
-        if (!pf) {
-            plat_mutex_unlock(&copy_lock);
-            if (npf) flush_deferred_frees(npf, 0);
-            rt_fatal("nvn: QueueSubmitCommands: command handle %#llx is not a live recording (released or never recorded)",
-                     (unsigned long long)handle);
+    if (copy_shards_on()) {
+        uint32_t npf = 0, nzomb = 0;
+        if (__atomic_load_n(&nzombies, __ATOMIC_RELAXED)) {
+            plat_mutex_lock(&zombie_lock);
+            if (nzombies) zombie_sweep_sharded(replayed, &npf);
+            plat_mutex_unlock(&zombie_lock);
         }
-        nvn_mode_trace(NVN_MODE_HANDLE, 0, handle, (uint32_t)i, now);
-        out[i] = handle;
-        if (pf->used_at > replayed && pf->used_at != now && pf->deferred != 1) {
-            size_t sz = sizeof *pf + pf->bytes;
-            copy_prefix *cl = copy_block(sz);
-            uint64_t block = cl->block;
-            memcpy(cl, pf, sz);
-            cl->block = block;
-            cl->magic = 0;   // not a live handle: the game never sees it
-            cl->refs = 0;
-            if (cl->flags & COPY_CALLEES) {
-                if (cl->ncallees > 4) {
-                    copy_prefix **v = malloc(cl->ncallees * sizeof *v);
-                    if (!v) rt_fatal("nvn: out of memory (clone callees)");
-                    memcpy(v, pf->u.callees, cl->ncallees * sizeof *v);
-                    cl->u.callees = v;
-                }
-                if (cl->flags & COPY_CALLS) {
-                    copy_prefix *const *cs = copy_callees(cl);
-                    for (uint32_t j = 0; j < cl->ncallees; j++)
-                        __atomic_add_fetch(&cs[j]->refs, 1, __ATOMIC_RELAXED);
-                }
-            } else if (cl->flags & COPY_CALLS) {
-                calls_adjust((const uint8_t *)(cl + 1), (const uint8_t *)(cl + 1) + cl->bytes, +1);
+        for (int i = 0; i < n; i++) {
+            uint64_t handle = handles[i];
+            LiveShard *ls = &live_shards[live_shard_idx(handle)];
+            plat_mutex_lock(&ls->lock);
+            copy_prefix *pf = nvn_hm_get(&ls->map, &handle);
+            if (!pf) {
+                plat_mutex_unlock(&ls->lock);
+                if (npf) flush_deferred_frees(npf, 0);
+                rt_fatal("nvn: QueueSubmitCommands: command handle %#llx is not a live recording (released or never recorded)",
+                         (unsigned long long)handle);
             }
-            cl->ubo = NULL;   // the list stays the original's: the replay walks the clone's records
-            cl->def_list = NULL;
-            cl->used_at = now;
-            zombie_add(cl);
-            out[i] = (uintptr_t)(cl + 1);
-            __atomic_fetch_add(&n_clones, 1, __ATOMIC_RELAXED);
-        } else {
-            used_at_max(pf, now);
+            nvn_mode_trace(NVN_MODE_HANDLE, 0, handle, (uint32_t)i, now);
+            out[i] = handle;
+            uint64_t u = __atomic_load_n(&pf->used_at, __ATOMIC_RELAXED);
+            if (u > replayed && u != now && pf->deferred != 1) {
+                copy_prefix *cl = copy_clone(pf, now);
+                pf_vec_push(&tl_zomb_pf, &tl_zomb_pf_cap, &nzomb, cl);
+                out[i] = (uintptr_t)(cl + 1);
+            } else {
+                used_at_max(pf, now);
+            }
+            plat_mutex_unlock(&ls->lock);
         }
+        if (nzomb) {
+            plat_mutex_lock(&zombie_lock);
+            for (uint32_t i = 0; i < nzomb; i++) {
+                if (nzombies == cap_zombies) {
+                    cap_zombies = cap_zombies ? cap_zombies * 2 : 64;
+                    zombies = realloc(zombies, sizeof *zombies * cap_zombies);
+                    if (!zombies) rt_fatal("nvn: out of memory (released recording copies)");
+                }
+                zombies[nzombies] = tl_zomb_pf[i];
+                __atomic_store_n(&nzombies, nzombies + 1, __ATOMIC_RELAXED);
+            }
+            plat_mutex_unlock(&zombie_lock);
+        }
+        if (npf) flush_deferred_frees(npf, 0);
+    } else {
+        uint32_t npf = 0;
+        plat_mutex_lock(&copy_lock);
+        if (nzombies) {
+            if (fast) zombie_sweep_defer(replayed, &npf);
+            else zombie_sweep(replayed);
+        }
+        for (int i = 0; i < n; i++) {
+            uint64_t handle = handles[i];
+            copy_prefix *pf = copy_find(handle);
+            if (!pf) {
+                plat_mutex_unlock(&copy_lock);
+                if (npf) flush_deferred_frees(npf, 0);
+                rt_fatal("nvn: QueueSubmitCommands: command handle %#llx is not a live recording (released or never recorded)",
+                         (unsigned long long)handle);
+            }
+            nvn_mode_trace(NVN_MODE_HANDLE, 0, handle, (uint32_t)i, now);
+            out[i] = handle;
+            uint64_t u = __atomic_load_n(&pf->used_at, __ATOMIC_RELAXED);
+            if (u > replayed && u != now && pf->deferred != 1) {
+                copy_prefix *cl = copy_clone(pf, now);
+                zombie_add(cl);
+                out[i] = (uintptr_t)(cl + 1);
+            } else {
+                used_at_max(pf, now);
+            }
+        }
+        plat_mutex_unlock(&copy_lock);
+        if (npf) flush_deferred_frees(npf, 0);
     }
-    plat_mutex_unlock(&copy_lock);
-    if (npf) flush_deferred_frees(npf, 0);
     wait_submission(out, n);
     for (int i = 0; i < n; i++) {
         copy_prefix *pf = (copy_prefix *)(uintptr_t)out[i] - 1;
