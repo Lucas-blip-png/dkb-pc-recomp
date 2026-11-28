@@ -185,7 +185,8 @@ WAYLAND_DISPLAY=wayland-1 SDL_VIDEODRIVER=wayland` (the socket name is in `$XDG_
 
 Memory: on Windows the GPU imports guest memory and `GetWriteWatch` tracks the CPU's writes to it. On Linux,
 re-protecting imported memory invalidates the driver's userptr buffer on every submit (about 1.3 ms per 16 MiB on
-amdgpu), and importing pins the pages, which drops their write protection. Each CPU-visible pool therefore gets a
+amdgpu; NVIDIA's driver re-protects without that cost, so it keeps importing, see `vk_memory.c` `mirror_mode`). The
+pin faults each page once at import. Elsewhere each CPU-visible pool therefore gets a
 host-visible copy (shadow storage, `runtime/vk_memory.c`): the pages the CPU wrote go in before each submit, and the GPU's
 writes come back at its fence. In play that costs about 0.2 ms a frame and doubles the memory of those pools (about
 1.1 GB). `DKB_SHADOW=1` turns it on under Windows too. The Steam Deck's RADV has `VK_EXT_external_memory_host` as

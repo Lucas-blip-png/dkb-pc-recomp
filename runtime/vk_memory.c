@@ -1743,8 +1743,8 @@ static uint64_t page_hi(const PoolRec *r) { return (r->lo + r->size + 0xfff) & ~
 
 // ---------------------------------------------------------------- shadow storage
 // Where importing guest memory costs too much (Linux: re-protecting pages that amdgpu imported as a userptr
-// invalidates the buffer, about 1.3 ms per 16 MiB at the next submit, and the import's write pinning clears the
-// write watch), a CPU-visible pool gets a host-visible buffer of its own instead, at the offsets the import would have:
+// invalidates the buffer, about 1.3 ms per 16 MiB at the next submit; NVIDIA's proprietary driver does not pay it, see
+// mirror_mode), a CPU-visible pool gets a host-visible buffer of its own instead, at the offsets the import would have:
 // - CPU -> shadow: right before each submit (vk_mem_shadow_sync), the pools the replay resolved since the last one are
 //   queried for written pages; pages stamped after a pool's sgen are copied in by the CPU.
 // - GPU -> guest: the replay notes each GPU write into CPU-visible memory at record time (vk_mem_gpu_pending) and
@@ -1755,7 +1755,7 @@ static uint64_t page_hi(const PoolRec *r) { return (r->lo + r->size + 0xfff) & ~
 //   plant culling appends to buffers the game resets on the CPU before each use; skipping the reset left the shadow
 //   with the old list, the culling appended to it, and the write-back put the grown list back in guest memory each
 //   frame (the plant instance pools filled with repeats and the open ground lost its grass, issue #462).
-// DKB_SHADOW=1/0 forces the mode on or off; the default is on for Linux, off where importing is cheap (Windows, and
+// DKB_SHADOW=1/0 forces the mode on or off; the default is on for Linux except NVIDIA's proprietary driver (mirror_mode), off where importing is cheap (Windows, and
 // MoltenVK, which imports host memory without Linux's write-watch and page re-protection).
 typedef struct { uint64_t lo, hi, sync; } SRange;   // sync: s_syncs_done when the write was noted
 static PlatMutex shadow_lock = PLAT_MUTEX_INIT;   // after pool_lock; before gen_lock
