@@ -1,60 +1,28 @@
-DKB Recomp 0.5.3: a static recompilation of *Donkey Kong Bananza* (Switch 2) to a native Windows exe with a Vulkan renderer. It is still experimental (0.x). This release brings amiibo from your own tag files, selectable button prompts and a Player 2 controller for co-op, NVIDIA DLSS Frame Generation, a Chinese menu and installer, fewer shader stalls, gyro under Steam Input, a low-spec profile for integrated GPUs, and a long list of replay speed-ups.
+DKB Recomp 0.5.4: a static recompilation of *Donkey Kong Bananza* (Switch 2) to a native Windows exe with a Vulkan renderer. It is still experimental (0.x). This is a small release: it makes the game build and start from **RecompLauncher** on Windows, turns the replay threads on for discrete AMD cards under RADV on Linux, and adds diagnostics for the open stall and audio reports.
 
 **The packages hold no game data, and no release ever will.** You build the game on your own PC from your own dump of **1.0.0 or the 3.2.0 update**, given as a `.nup` or `.nx` file or as ExeFS and RomFS folders. Other updates are not supported.
 
-## What is new since 0.5.2
+## What is new since 0.5.3
 
-- **Amiibo (#567, thanks @roverdrubber, #508).** The game reads your own amiibo tag dumps (`.bin`, or Flipper `.nfc`) from an amiibo folder. You pick the figure in the new F1 > Amiibo tab, and the setup's home screen can copy files in. No amiibo data comes with the project (docs/amiibo.md).
-- **Button prompts and co-op controllers (#569, thanks @shadowlink1174, #505, #550).** F1 > Controls has a Button Prompt Style (Nintendo, Xbox, PlayStation or Automatic), separate from the button layout, and a Player 2 Controller row for co-op. A pad chosen for Player 2 is kept for Player 2 while another pad can play Player 1.
-- **NVIDIA DLSS Frame Generation (#561, thanks @Zorkats).** `frame_gen_by = dlss` makes the 2x frames with DLSS-G through a D3D12 bridge, on an RTX 40 or newer as NGX decides. The setup fetches NVIDIA's `nvngx_dlssg.dll` after you accept NVIDIA's licence. If anything fails, the game's own frame is shown.
-- **Fewer shader stalls (#564, thanks @wbkepler, #560).** The setup and the launcher precompile the pipelines the game is missing before it starts. Shader cache reads are batched, and the boot warm has its own thread count (`DKB_WARM_THREADS`). A cached shader is still loaded where the draw needs it, so nothing is skipped for a frame.
-- **Gyro under Steam Input (#551).** When Steam starts the game with Steam Input on, motion is read from the real controller behind Steam's virtual pad. Buttons and sticks still come from Steam, so your remapping holds. Your Steam layout must bind the gyro to something, or Steam switches it off (docs/controls.md). Ported from TotK Recomp (St5sz2Jk's patch). Not yet tested with a real pad under Steam: please report.
-- **Chinese (#553, #554, thanks @cirnoice9).** The installer, the launcher, the settings menu, the overlay and the start-up screen are in Simplified Chinese.
-- **Performance overlay with frame generation (#566, thanks @MatyMeatBoy).** It shows the frames on screen, with the game's own rate in brackets.
-- **Replay and memory speed-ups (thanks @wbkepler).** This covers #529 to #544 and #494. Indirect resets run in compute (on NVIDIA), and hot binds are fused. Host calls and descriptor keys cost less. Command recording takes fewer locks, and the command-copy index is sharded (#539). Uniform snapshots are streamed with AVX2, and only the changed mirror bytes are written back. The FP and SIMD lowering is lighter, and FP compares fold into their branches (#541, #542).
-- **Generated code keeps ten guest registers in C locals** instead of six (59.2 against 58.8 fps in the tutorial cave). FCMP of a denormal under flush-to-zero now branches right.
-- **Linux shadow storage (thanks @kylianbrun and @roverdrubber).** It is off by default on NVIDIA's proprietary driver, where importing is cheap (#556). `shadow = 0|1` in `dkb.ini` works now. A second shadow sync after a part's mirror copies removes the stray triangles of #479 (#557).
-- **Small reads of GPU-written storage (#548, thanks @kylianbrun).** With `nx2_read_nowait` and `wb_ahead`, both opt-in, these reads skip the wait on the sync replay.
-- **Long paths on Windows (#526).** Paths of 248 characters or more open in Windows' long form, so a deep RomFS folder no longer reads as missing (the crash talking to the first NPC).
-- **Stretched triangles where salt meets the muck (#439).** The shader translator re-ran a ballot inside the leader's branch of the muck mesh compute, so the subgroups' vertices overlapped (stretched triangles and NaN normals). Ballots, votes and shuffles now run once, where the guest runs them. **Shaders are translated once more on the first start after updating.**
-- **Ultrawide (#535, thanks @Mega-Man-X7).** The Bananza badge inside the Bananergy ring and the transformation carousel are no longer clipped at 21:9.
-- **RecompLauncher (#547).** `DKB-Setup.exe` now waits for the setup and the game and passes the progress lines through. The manifest uses the current `inputs` format.
-- **Xbox prompts note.** The Controls menu no longer tells Bananza players to run the setup again for Xbox prompts.
+- **RecompLauncher on Windows.** The setup failed its first step after 3 seconds and the game was never built. RecompLauncher started it with `TMP` and `TEMP` naming a folder that does not exist, and clang stopped with "unable to make temporary file". The setup now uses its own temporary folder when the inherited one is missing. A valid `TEMP` is kept. Together with 0.5.3's fix (`DKB-Setup.exe` waits for the build and the game, #547), the launcher's Install, Set up and Play now work end to end. If you set the game up in RecompLauncher with 0.5.2 or 0.5.3, update it there and run the setup again.
+- **Replay threads on RADV (#570, #479).** Discrete AMD GPUs on Mesa's RADV driver now get the same default as on AMD's Windows driver: 6 replay threads on 12 or more logical processors, 4 on 6 to 11. Players set it by hand on an RX 6800 XT, an RX 9070 XT and an RX 7900 XTX without device loss, and the 9070 XT went from 30 to 39 fps in the Hilltop Layer. Integrated GPUs, the Steam Deck among them, stay off (`replay_threads` overrides the default).
+- **Shadow sync follow-up (#577, thanks @roverdrubber).** A pool is marked for the next shadow sync as soon as its mirror queues pages, which closes the last small window behind the stray triangles of #479.
+- **Diagnostics.** A stalled thread's dump names the host function and module it is stuck in (#575). A fence wait of a second or more that runs out is logged. `DKB_AUDIO_DUMP=<file>` records the game's mixed audio before the volume, for crackle reports (#576).
+- **Probes (#578, #579, #581, thanks @roverdrubber).** `--probe-vkexec` and `--probe-vkcopy-astc` run to their end again, with and without shadow storage.
+- **Chinese.** The 19 installer strings added for amiibo files and the shader precompile are translated.
+- **GitHub Sponsors.** The project can now be sponsored on GitHub too, next to Ko-fi.
 
-## Low-spec profile (opt-in)
+## Pull requests in 0.5.4
 
-Ported from evolis-game's low-spec fork of this runtime ([donkey-kong-bananza-pc-lowspec](https://github.com/evolis-game/donkey-kong-bananza-pc-lowspec), GPL-3.0-or-later, credited in THIRD_PARTY_NOTICES.md). Every setting is off by default, so nothing changes unless you turn it on. Details are in docs/dkb-lowend.md.
-
-- `preset = lowspec` in `dkb.ini` (or `DKB_PRESET=lowspec`) applies the fork's integrated GPU profile: `astc = gpu`, `astc_bc = 1`, `tex_uma_host = 1`, `tex_vram_pressure = 72`, `vram_headroom = 0`, `shadow_rate = 8`, `cubemap_rate = 6` and `replay_threads = 2`. A setting you write yourself still wins.
-- `shadow_rate = N` renders each shadow map one frame in N, so shadows can lag by up to N frames.
-- `cubemap_rate = N` renders the dynamic reflection cubemaps one step in N.
-- `smaa_bypass = 1` replaces the game's SMAA passes with a copy of their input, removing three full-screen passes but also the game's own anti-aliasing.
-- `tex_uma_host = 1`: on an integrated GPU near its memory budget, new textures go to the host heap.
-- `tex_frame_epoch = 1` checks uploaded textures for game writes once per frame, not once per submit.
-- `output_res` now goes down to 640x360, and `scene_res` up to 4.0.
-- `mvk_upscale_blit = 1` also works outside macOS.
-
-On the RTX 5060 Ti used for testing, `preset = lowspec` held 58.1 fps in the tutorial cave with no validation errors. It is meant for integrated GPUs and has not been measured on one yet, so please share numbers and logs in #498.
-
-## Pull requests in 0.5.3
-
-Merged since 0.5.2, by author:
-
-- @wbkepler: #494, #529, #530, #531, #532, #534, #536, #537, #538, #539, #540, #541, #542, #543, #544, #564
-- @roverdrubber: #519, #520, #521, #522, #557, #567
-- @kylianbrun: #548, #556
-- @cirnoice9: #553, #554
-- @Zorkats: #561
-- @MatyMeatBoy: #566
-- @shadowlink1174: #569
+- @roverdrubber: #577, #579, #581
 
 ## Issues fixed or answered
 
-#508 (amiibo) and #505 (Xbox prompts, both @SercanDmr), #550 (PlayStation prompts, @jesusen904), #551 (gyro under Steam Input, @gubbywumpus), #560 (shader stutter, @MaLDox77), #526 (crash talking to the first NPC, @tmess), #535 (ultrawide badge, @Mega-Man-X7), #547 (RecompLauncher, @conceitosemprendimentos-lab), #439 (stretched triangles in the muck, @Dimiduh).
+#570 (Hilltop performance on RADV, @anon0730, with the logs that settled the default), #578 (probe crash, @roverdrubber), RecompLauncher on Windows (found by testing it here).
 
 ## Thanks
 
-Pull requests in 0.5.3: wbkepler, roverdrubber, kylianbrun, cirnoice9, Zorkats, MatyMeatBoy, shadowlink1174. Low-spec work: evolis-game. Issues, logs, saves and recordings: everyone named above. Thank you.
+roverdrubber for the pull requests; anon0730 and everyone who sent logs, saves and recordings. Thank you.
 
 ## Download
 
@@ -86,13 +54,13 @@ Pull requests in 0.5.3: wbkepler, roverdrubber, kylianbrun, cirnoice9, Zorkats, 
 
 ## Reporting a bug
 
-Open an issue with the log (`dkb.log`), the build line at its top (`dkb 0.5.3+<commit>`), your GPU and driver, and what you did before it failed. **Never share generated files, keys or screenshots that show game content.** Questions and chat: the [Discord server](https://discord.gg/kCkDsqu37y) (#help, #bugs, and #brasil in Portuguese).
+Open an issue with the log (`dkb.log`), the build line at its top (`dkb 0.5.4+<commit>`), your GPU and driver, and what you did before it failed. **Never share generated files, keys or screenshots that show game content.** Questions and chat: the [Discord server](https://discord.gg/kCkDsqu37y) (#help, #bugs, and #brasil in Portuguese).
 
 ## Support the project
 
-Tips go to [ko-fi.com/lucasblippng](https://ko-fi.com/lucasblippng). A tip pays for time on the project; it buys no game files, builds or early access, and everything stays open source. The current goal is US$20 a month for the Claude Pro plan used to work on the project, and its progress bar is on the Ko-fi page. Starring the repository and sharing it with people who know GPUs, ARM64 or the Switch helps too.
+Tips go to [ko-fi.com/lucasblippng](https://ko-fi.com/lucasblippng) or [GitHub Sponsors](https://github.com/sponsors/Lucas-blip-png), once or monthly. A tip pays for time on the project; it buys no game files, builds or early access, and everything stays open source. The current goal is US$20 a month for the Claude Pro plan used to work on the project. Starring the repository and sharing it with people who know GPUs, ARM64 or the Switch helps too.
 
 Roadmap: #10.
 
 
-**Full Changelog**: https://github.com/Lucas-blip-png/dkb-pc-recomp/compare/v0.5.2...v0.5.3
+**Full Changelog**: https://github.com/Lucas-blip-png/dkb-pc-recomp/compare/v0.5.3...v0.5.4

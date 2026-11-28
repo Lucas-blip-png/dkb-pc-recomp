@@ -26,12 +26,17 @@ As far as we know, no other static recompilation of a Switch 2 game is public.
 ## Status
 
 **Playable on recent NVIDIA cards, well past the first level.** Players report runs through layer -101, sublayer 200,
-the Glacier layer, Snow World (Layer 500), the Resort and the Tempest layer. The current release is 0.5.3
-(28 November): amiibo from your own tag files, selectable button prompts and a Player 2 controller, NVIDIA DLSS
-Frame Generation, Chinese, fewer shader stalls and an opt-in low-spec profile. The [latest release](https://github.com/Lucas-blip-png/dkb-pc-recomp/releases/latest) carries
+the Glacier layer, Snow World (Layer 500), the Resort and the Tempest layer. The current release is 0.5.4
+(28 November), which makes RecompLauncher build and start the game on Windows; 0.5.3 brought amiibo from your own
+tag files, selectable button prompts and a Player 2 controller, NVIDIA DLSS Frame Generation, Chinese, fewer shader
+stalls and an opt-in low-spec profile. The [latest release](https://github.com/Lucas-blip-png/dkb-pc-recomp/releases/latest) carries
 `DKB-Launcher.exe`, one small Windows file that installs the build tools, builds the game from your own dump (`.nup`,
 `.nx` or folders) and updates in place with one click. It also has the setup zip, a Linux AppImage, and a
 macOS preview: [docs/installer.md](docs/installer.md).
+
+New in 0.5.4:
+- RecompLauncher on Windows builds and starts the game (the setup gets its own temporary folder when `TEMP` is missing).
+- Replay threads on by default for discrete AMD GPUs under RADV (#570), and diagnostics for stalls and audio (#575, #576).
 
 New in 0.5.3:
 - Amiibo from your own tag dumps (F1 > Amiibo, #567), button prompt style and Player 2 controller rows (#569),
