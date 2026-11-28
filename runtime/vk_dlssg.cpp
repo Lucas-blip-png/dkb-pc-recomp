@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // NVIDIA DLSS Frame Generation (DLSS-G) through NGX's D3D12 side, for GPUs whose NGX Vulkan side offers none. NGX's
-// Vulkan side refuses frame generation below the RTX 40 series; the third-party dlssg_for_sm86 enabler (a winmm.dll
-// proxy beside the exe, with its dlssg_sm86.ini and dlssg_sm86\ folder) serves NGX's D3D12 frame generation on RTX 20
-// and 30 cards, and not the Vulkan one. So the frames are made on a D3D12 device of our own, on the Vulkan device's
-// adapter, from images both APIs share. An RTX 40 or 50 runs the same route without the enabler.
+// Vulkan side offers frame generation only from the RTX 40 series on (NGX decides). So the frames are made on a D3D12
+// device of our own, on the Vulkan device's adapter, from images both APIs share.
 //
 // The order of one 2x frame (vk_framegen.c record, frame_gen_by = dlss):
 //
@@ -14,8 +12,9 @@
 //   the D3D12 queue: waits for v_in, runs NGX's evaluation into the shared output, signals v_out
 //   a second Vulkan submission: waits for v_out, copies the shared output into the made frame
 //
-// A semaphore wait holds back that submission's commands, and every later command buffer starts with a full barrier
-// (vk_present.c, vk_framegen.c), so the present of the made frame comes after the copy. Between the two APIs the
+// A semaphore wait holds back that submission's commands. The order against what follows comes from the closing
+// vk_full_barrier in the copy-back command buffer recorded in vk_dlssg_submit: its second scope covers every later
+// submission on the queue, so the present of the made frame comes after the copy. Between the two APIs the
 // shared images rest in D3D12's COMMON state and Vulkan's GENERAL layout, owned by VK_QUEUE_FAMILY_EXTERNAL.
 //
 // Written without NVIDIA's headers: the exports are taken with GetProcAddress and the parameter object is called
@@ -88,12 +87,6 @@ int get_i(NgxParam *p, const char *n) {
     return v;
 }
 
-unsigned get_u(NgxParam *p, const char *n) {
-    unsigned v = 0;
-    ((NgxResult (*)(NgxParam *, const char *, unsigned *))slot(p, 12))(p, n, &v);
-    return v;
-}
-
 void set_ptr(NgxParam *p, const char *n, void *v) {
     ((NgxResult (*)(NgxParam *, const char *, void *))slot(p, 0))(p, n, v);
 }
@@ -128,23 +121,6 @@ bool exe_dir(wchar_t *dir, size_t cap) {
     return true;
 }
 
-bool beside_exe(const wchar_t *dir, const wchar_t *name) {
-    wchar_t path[MAX_PATH + 64];
-    if (wcslen(dir) + wcslen(name) >= sizeof path / sizeof *path) return false;
-    wcscpy(path, dir);
-    wcscat(path, name);
-    return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
-}
-
-// Whether the winmm.dll the process loaded is the one beside dkb.exe (the enabler's proxy) rather than the system's.
-bool proxy_loaded(const wchar_t *dir) {
-    HMODULE m = GetModuleHandleW(L"winmm.dll");
-    wchar_t path[MAX_PATH];
-    if (!m || !GetModuleFileNameW(m, path, MAX_PATH)) return false;
-    size_t k = wcslen(dir);
-    return _wcsnicmp(path, dir, k) == 0 && !wcschr(path + k, L'\\');
-}
-
 // The D3D12 device on the Vulkan device's adapter, found by its LUID. d3d12.dll and dxgi.dll stay loaded: the driver
 // keeps references into them. why says what was missing.
 ID3D12Device *d3d12_device(const LUID &luid, char *name, size_t name_cap, const char **why) {
@@ -168,22 +144,6 @@ ID3D12Device *d3d12_device(const LUID &luid, char *name, size_t name_cap, const 
     drop(adapter);
     if (FAILED(hd)) return *why = "no D3D12 device on the Vulkan device's adapter", nullptr;
     return device;
-}
-
-// What the probe made, let go in reverse order whatever step it reached.
-struct Probe {
-    ID3D12Device *device = nullptr;
-    PfnShutdown shutdown = nullptr;
-    bool ngx = false;
-    ~Probe() {
-        unsigned left;
-        if (ngx && shutdown) shutdown(device, &left);
-        drop(device);
-    }
-};
-
-void say_no(const char *why) {
-    rt_log("dlssg: probe: %s; no DLSS Frame Generation through D3D12", why);
 }
 
 // ---- the route -------------------------------------------------------------------------------------------------------
@@ -610,8 +570,7 @@ bool start_on(const char **why) {
     unsigned init_result = (unsigned)get_i(caps, "FrameGeneration.FeatureInitResult");
     S.f.destroy(caps);
     if (!available) {
-        snprintf(line, sizeof line, "NGX's D3D12 side offers no frame generation here (%#x): on an RTX 20 or 30, is the "
-                 "dlssg_for_sm86 enabler's winmm.dll beside dkb.exe?", init_result);
+        snprintf(line, sizeof line, "NGX's D3D12 side offers no frame generation here (%#x): it needs an RTX 40 or newer", init_result);
         return *why = line, false;
     }
     if (ngx_failed(S.f.alloc(&S.params)) || !S.params) return *why = "no NGX parameter block", false;
@@ -756,64 +715,6 @@ bool camera(const VkDlssgSet *s, Camera &cam) {
 
 }  // namespace
 
-// ---- the probe -------------------------------------------------------------------------------------------------------
-
-extern "C" void vk_dlssg_probe(const uint8_t luid_bytes[8], int luid_valid, uint32_t vendor) {
-    wchar_t dir[MAX_PATH + 1];
-    if (!exe_dir(dir, MAX_PATH + 1) || !beside_exe(dir, L"dlssg_sm86.ini")) return;   // no enabler: nothing to ask
-    if (vendor != 0x10de) return say_no("the Vulkan device is not an NVIDIA GPU");
-    if (!luid_valid) return say_no("the Vulkan device has no LUID to find its adapter by");
-    const bool proxy = proxy_loaded(dir), model = beside_exe(dir, L"nvngx_dlssg.dll");
-    if (!proxy && beside_exe(dir, L"version.dll"))   // the enabler's notes put version.dll first; dkb.exe never loads it
-        rt_log("dlssg: probe: the enabler's proxy beside dkb.exe is version.dll, which dkb.exe does not load; use the "
-               "winmm.dll from its alternatives folder instead");
-    else if (!proxy)
-        rt_log("dlssg: probe: the winmm.dll loaded is not the one beside dkb.exe (the enabler's proxy)");
-    if (!model) rt_log("dlssg: probe: nvngx_dlssg.dll is not beside dkb.exe (NGX looks there, as for nvngx_dlss.dll)");
-
-    const char *why = nullptr;
-    HMODULE core = (HMODULE)vk_ngx_core(&why);
-    if (!core) return say_no(why ? why : "no NGX core");
-    PfnInit init = (PfnInit)(void *)GetProcAddress(core, "NVSDK_NGX_D3D12_Init_Ext");
-    PfnParams caps_of = (PfnParams)(void *)GetProcAddress(core, "NVSDK_NGX_D3D12_GetCapabilityParameters");
-    PfnDestroy destroy = (PfnDestroy)(void *)GetProcAddress(core, "NVSDK_NGX_D3D12_DestroyParameters");
-    Probe p;
-    p.shutdown = (PfnShutdown)(void *)GetProcAddress(core, "NVSDK_NGX_D3D12_Shutdown1");
-    if (!init || !caps_of || !destroy || !p.shutdown) return say_no("_nvngx.dll lacks a D3D12 export the probe needs");
-
-    LUID luid;
-    static_assert(sizeof luid == 8, "VK_LUID_SIZE");
-    memcpy(&luid, luid_bytes, sizeof luid);
-    char name[128] = "?";
-    if (!(p.device = d3d12_device(luid, name, sizeof name, &why))) return say_no(why);
-
-    // NGX's D3D12 side on that device, with the Vulkan side's application id and data folder (where NGX looks for
-    // nvngx_dlssg.dll first and writes its logs)
-    char line[160];
-    NgxResult r = init(kAppId, dir, p.device, kNgxVersionApi, nullptr);
-    if (ngx_failed(r)) {
-        snprintf(line, sizeof line, "NGX's D3D12 side did not start (%#x)", r);
-        return say_no(line);
-    }
-    p.ngx = true;
-    NgxParam *caps = nullptr;
-    r = caps_of(&caps);
-    if (ngx_failed(r) || !caps) {
-        snprintf(line, sizeof line, "NGX's D3D12 side has no capability parameters (%#x)", r);
-        return say_no(line);
-    }
-    int available = get_i(caps, "FrameGeneration.Available");
-    int init_result = get_i(caps, "FrameGeneration.FeatureInitResult");
-    int needs_driver = get_i(caps, "FrameGeneration.NeedsUpdatedDriver");
-    unsigned most = get_u(caps, "DLSSG.MultiFrameCountMax");
-    destroy(caps);
-    rt_log("dlssg: probe: D3D12 device on %s (LUID %08lx:%08lx); NGX's D3D12 frame generation %s (init result %#x, "
-           "newer driver needed %d), MultiFrameCountMax %u (0 reads as 1); proxy %s, nvngx_dlssg.dll %s",
-           name, (unsigned long)luid.HighPart, (unsigned long)luid.LowPart, available ? "available" : "NOT available",
-           (unsigned)init_result, needs_driver, most, proxy ? "loaded" : "not loaded",
-           model ? "beside dkb.exe" : "missing");
-}
-
 // ---- the route's entry points ----------------------------------------------------------------------------------------
 
 extern "C" void vk_dlssg_device_exts(const VkExtensionProperties *ext, uint32_t n_have, const char **names, uint32_t *n,
@@ -850,7 +751,11 @@ extern "C" int vk_dlssg_record(VkCommandBuffer cb, const VkDlssgSet *set) {
     S.pending = false;   // a set recorded and never sent is dropped: its list is reset below
     if (!set->color || !set->depth || !set->motion || !set->out || !set->w || !set->h || !set->rw || !set->rh) return 0;
     Camera cam;
-    if (!camera(set, cam)) return 0;   // a frame without a usable projection: made another way
+    if (!camera(set, cam)) {   // a frame without a usable projection: made another way
+        static bool said = false;
+        if (!said) said = true, rt_log("dlssg: a frame's projection is not usable for DLSS Frame Generation; frames like it get the built-in one");
+        return 0;
+    }
     if (!images(set->w, set->h, set->rw, set->rh)) return 0;
     bool made = false;
     if (!feature(set->w, set->h, set->rw, set->rh, &made)) return 0;
@@ -1048,10 +953,14 @@ extern "C" VkResult vk_dlssg_submit(VkQueue queue, const VkSubmitInfo2 *si, VkFe
 extern "C" void vk_dlssg_release(void) {
     if (!S.vk) return;
     if (S.started && !d3d12_wait(S.fence_value)) {
-        rt_log("dlssg: the D3D12 queue stayed busy at the release: its objects are left to the process's end");
-        S = State{};
-        g_dead.store(false, std::memory_order_relaxed);
-        return;
+        rt_log("dlssg: the D3D12 queue stayed busy at the release: its D3D12 objects are left to the process's end");
+        // the Vulkan device is idle, so the Vulkan side goes; forgetting the D3D12 pointers leaks them on purpose, since
+        // the queue may still use them (teardown skips what is null)
+        S.feature = nullptr, S.params = nullptr, S.ngx_on = false;
+        Shared *const ims[5] = {&S.color, &S.hudless, &S.depth, &S.motion, &S.out};
+        for (Shared *im : ims) im->res = nullptr;
+        for (int i = 0; i < kSlots; i++) S.list[i] = nullptr, S.alloc[i] = nullptr;
+        S.fence = nullptr, S.queue = nullptr, S.device = nullptr;
     }
     teardown();
     if (S.started) rt_log("dlssg: let go");
@@ -1061,9 +970,6 @@ extern "C" void vk_dlssg_release(void) {
 
 #else
 
-extern "C" void vk_dlssg_probe(const uint8_t luid[8], int luid_valid, uint32_t vendor) {
-    (void)luid, (void)luid_valid, (void)vendor;
-}
 extern "C" void vk_dlssg_device_exts(const VkExtensionProperties *ext, uint32_t n_have, const char **names, uint32_t *n,
                                      uint32_t cap) {
     (void)ext, (void)n_have, (void)names, (void)n, (void)cap;

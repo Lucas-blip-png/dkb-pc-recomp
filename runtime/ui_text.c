@@ -98,7 +98,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_FRAME_GEN_BY] = "Frame generation made by",
     [UI_MENU_FRAME_GEN_BY_DESC] = "Built-in makes the frames from the picture alone. AMD FSR 3.1 also uses the scene's depth and motion "
                                   "and an optical flow, which takes more GPU time. NVIDIA DLSS uses the same inputs with DLSS Frame Generation, "
-                                  "on an RTX 40 or newer, or on an RTX 20 or 30 with the dlssg_for_sm86 enabler beside dkb.exe (Windows only). "
+                                  "on an RTX 40 or newer (NGX decides; Windows only). "
                                   "Both make the 2x frames only.\n\n"
                                   "Both need a temporal upscaler (DLSS, FSR 3.1 or FSR 4) with the 3D drawn below the output size; "
                                   "a frame they cannot make gets the built-in one.",
@@ -544,7 +544,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_FRAME_GEN_BY] = "Кадры создаёт",
     [UI_MENU_FRAME_GEN_BY_DESC] = "Встроенный способ делает кадры только по картинке. AMD FSR 3.1 использует ещё глубину и движение сцены "
                                   "и оптический поток, на что уходит больше времени видеокарты. NVIDIA DLSS берёт те же данные для DLSS Frame Generation "
-                                  "на RTX 40 и новее или на RTX 20 и 30 с программой dlssg_for_sm86 рядом с dkb.exe (только Windows). "
+                                  "на RTX 40 и новее (решает NGX; только Windows). "
                                   "Оба делают только кадры режима 2x.\n\n"
                                   "Обоим нужен временной апскейлер (DLSS, FSR 3.1 или FSR 4), при котором 3D рисуется в разрешении ниже выходного; "
                                   "кадр, который они не могут сделать, получается встроенным способом.",

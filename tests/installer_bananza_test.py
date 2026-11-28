@@ -649,13 +649,9 @@ assert '--full-build' in a and pathlib.Path(a[a.index('--expected')+1]).name=='e
             self.assertEqual(self.run_install()[0], 0)
             self.assertEqual(fetched, [self.dest])
             (self.dest / b.dlss.FILES[0][1]).unlink()   # a file gone: fetched again
-            (self.dest / b.dlss.ENABLER_INI).write_bytes(b'x')   # and the enabler with the proxy dkb.exe never loads
-            (self.dest / b.dlss.ENABLER_DIR).mkdir()
-            (self.dest / b.dlss.ENABLER_WRONG_PROXY).write_bytes(b'x')
             code, events = self.run_install()
             self.assertEqual(code, 0, events)
             self.assertEqual(len(fetched), 2)
-            self.assertIn('warn.dkb_dlssg_version_proxy', [e.get('id') for e in events if e['type'] == 'warning'])
             self.options.dlss = 'off'
             self.assertEqual(self.run_install()[0], 0)
             self.assertNotIn('dlss', b.statefile.load(self.dest, b.STATE))

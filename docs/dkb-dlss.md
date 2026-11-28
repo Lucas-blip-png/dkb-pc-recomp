@@ -112,9 +112,8 @@ the setup does not check for the GPU). The window first shows NVIDIA's license (
 `dkb_dlss`) then downloads `lib/Windows_x86_64/rel/nvngx_dlss.dll` and `lib/Windows_x86_64/rel/nvngx_dlssg.dll` (DLSS Frame
 Generation's, [dkb-framegen.md](dkb-framegen.md)) at the tag, checks each against its pinned size and SHA-256, and puts them next to
 `dkb.exe` with the license (`NVIDIA-DLSS-license.txt`). A later setup keeps them; `--dlss off` (untick) stops fetching them and leaves
-the files. A failed download only warns. After a fetch the step also says whether the dlssg_for_sm86 enabler is next to `dkb.exe`
-(`dlss.enabler`): it warns when the enabler is incomplete or uses `version.dll`, which `dkb.exe` never loads. Setup never fetches the
-enabler. Windows only, as DLSS here.
+the files. A failed download only warns.
+Windows only, as DLSS here.
 
 ## FSR 4 (`upscaler = fsr4`, issue #270)
 

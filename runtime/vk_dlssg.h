@@ -14,12 +14,6 @@ extern "C" {
 // without it (no NVIDIA driver, not Windows), with *why, when given, saying what was missing. vk_dlss.c.
 void *vk_ngx_core(const char **why);
 
-// At device creation (vk_device.c): when the dlssg_for_sm86 enabler's dlssg_sm86.ini sits beside dkb.exe on an NVIDIA
-// GPU, makes a D3D12 device on the Vulkan device's adapter (found by its LUID), starts NGX's D3D12 side on it, logs
-// whether NGX offers frame generation there and how many frames it can make, then lets it all go again. A check that
-// the enabler answers this runtime before frames are made through it. Windows only.
-void vk_dlssg_probe(const uint8_t luid[8], int luid_valid, uint32_t vendor);
-
 // The device extensions the shared images and the shared fence need (external memory and semaphores from Win32
 // handles), added to names[*n] (cap entries at most) where the device has them, on Windows with an NVIDIA GPU; ext is
 // the device's list of n_have. Before the device is made (vk_device.c create_device). Elsewhere it adds nothing.

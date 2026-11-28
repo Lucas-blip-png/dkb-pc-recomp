@@ -179,8 +179,7 @@ int vk_dlss_wanted(void) {
 
 // The driver's _nvngx.dll, found through the registry keys NVIDIA's header-only loader reads. Shared with the D3D12
 // side (vk_dlssg.cpp), so it is loaded once and never freed. Today its callers run one at a time (load at instance
-// creation and vk_dlssg_probe at device creation on the boot thread, vk_dlssg.cpp start_on later on the present
-// thread); the one-time init keeps it right for any caller.
+// creation on the boot thread, vk_dlssg.cpp start_on later on the present thread); the one-time init keeps it right for any caller.
 static HMODULE ngx_core;
 static const char *ngx_core_missing;
 

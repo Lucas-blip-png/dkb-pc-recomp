@@ -604,9 +604,6 @@ static int create_device(void) {
     VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &emh};
     vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
     g_vk.min_imported_host_alignment = (uint32_t)emh.minImportedHostPointerAlignment;
-    // DLSS Frame Generation through D3D12 (vk_dlssg.cpp): with the enabler beside dkb.exe, one log line on whether its
-    // D3D12 side answers on this device's adapter
-    vk_dlssg_probe(idp.deviceLUID, idp.deviceLUIDValid, g_vk.props.vendorID);
     vk_dlssg_device(g_vk.phys, g_vk.device, g_vk.gfx_family, idp.deviceLUID, idp.deviceLUIDValid, dlssg_interop);
     vk_caps_init(&g_vk);
 

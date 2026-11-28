@@ -3,7 +3,7 @@
 The pinned table (LICENSE, FILES) is replaced by stand-ins. Checked: the license text comes back only with its pinned
 hash; fetch() puts the DLL and the license in place and installed() then holds; a DLL whose bytes differ is refused and
 leaves no file and no .part behind; the real table is one NVIDIA/DLSS release with a hash on every file, DLSS's DLL and
-DLSS Frame Generation's; enabler() tells the dlssg_for_sm86 enabler's states apart from the files beside dkb.exe.
+DLSS Frame Generation's.
 """
 import hashlib
 import http.server
@@ -93,26 +93,6 @@ class DlssTest(unittest.TestCase):
             self.assertGreater(size, 0)
             self.assertEqual(len(sha), 64)
         self.pins.start()
-
-    def test_enabler(self):
-        def place(*names):
-            for name in names:
-                if name.endswith('/'):
-                    (self.dir / name).mkdir()
-                else:
-                    (self.dir / name).write_bytes(b'x')
-        self.assertEqual(dlss.enabler(self.dir), 'absent')
-        place('winmm.dll')   # a proxy-named DLL alone may be another mod's
-        self.assertEqual(dlss.enabler(self.dir), 'absent')
-        place('dlssg_sm86.ini')
-        self.assertEqual(dlss.enabler(self.dir), 'incomplete')
-        place('dlssg_sm86/')
-        self.assertEqual(dlss.enabler(self.dir), 'ready')
-        (self.dir / 'winmm.dll').unlink()
-        place('version.dll')   # the enabler's first choice, which dkb.exe never loads
-        self.assertEqual(dlss.enabler(self.dir), 'version_proxy')
-        (self.dir / 'version.dll').unlink()
-        self.assertEqual(dlss.enabler(self.dir), 'incomplete')
 
 
 if __name__ == '__main__':
