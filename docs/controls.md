@@ -33,7 +33,7 @@ which can become ambiguous if their connection order changes. Duplicate names ha
 Motion and vibration use the selected controller's existing capabilities. Switching devices keeps the existing
 button mappings and button-layout setting.
 
-`DKB_PAD_LAYOUT` (`pad_layout`, the *Button layout* row on the Controls tab, live) picks which face button is Switch A:
+`DKB_PAD_LAYOUT` (`pad_layout`, the *Button Layout* row on the Controls tab, live) picks which physical buttons send the Switch face-button actions:
 
 - `nintendo`: by position, as on a Switch (the table below).
 - `xbox`: south A, east B, west X, north Y, as an Xbox pad labels them; on a PlayStation pad cross is A, circle B, square X, triangle Y.
@@ -88,7 +88,7 @@ gamepad on player 1 (keyboard only) there is no player 2. GameShare is not suppo
 
 ## Xbox button prompts
 
-`pad_layout = xbox_prompts` (*Xbox prompts (A right)* on the Controls tab) is for an Xbox pad played by position. The buttons work as with `nintendo`: the right button, labelled B, does Switch A (interact, confirm), and the bottom one, labelled A, does Switch B (run, cancel). The letters the game shows are swapped to match the labels, A with B and X with Y, so each prompt names the button to press. The other layouts leave the prompts alone: with `xbox` the Switch letters already match the labels.
+`pad_layout = xbox_prompts` (*Switch layout + swapped letters* in Tears of the Kingdom) is the older combined setting. It keeps the original Switch button positions and swaps the letters in button prompts. In Bananza, choose **Switch layout** under **Button Layout** and **Xbox** under **Button Prompt Style** for the same combination.
 
 The swapped letters are part of the game's textures, fonts and messages, so they follow the layout and not the bindings. A button remapped with a `bind_` line or on the Controls tab keeps the letter the game draws for it, and the prompt then names the wrong button. Use `xbox_prompts` with the default bindings.
 
@@ -103,7 +103,13 @@ Without the folder (an install made by an older setup, or one where the setup co
 
 ## PlayStation button prompts (Bananza)
 
-With a DualShock 4 or DualSense pad connected when the game starts, Bananza shows PlayStation symbols in its button prompts: a cross, circle, square and triangle for the face buttons, L1, R1, L2 and R2 for the shoulder buttons and triggers, and the Options and Create marks for + and -. `pad_prompts` in `dkb.ini` chooses: `auto` (default) as above, `playstation` always, `switch` never. The game reads its fonts once at boot, so a pad connected later, or a changed setting, takes effect at the next start. The log says `RomFS overlay: PlayStation button prompts` when they are on.
+In F1 > Controls > Controller, choose **Switch layout** or **Swap A/B and X/Y** under **Button Layout**. Physical button changes apply immediately. The game reloads prompts for the new button positions on restart. An existing automatic layout continues to follow the controller until you choose a layout.
+
+**Button Prompt Style** selects the icons shown in Bananza. **Automatic** detects PlayStation controllers at startup and otherwise uses the existing layout-based letters. **Nintendo** and **Xbox** use the respective controller's letters at the configured button positions. **PlayStation** uses symbols at those positions. The choices save as `auto`, `nintendo`, `xbox`, and `playstation` in `dkb.ini`, and apply on restart. The older `switch` value keeps its layout-based letter behavior.
+
+**Xbox** also shows LB, RB, LT, and RT, plus the Menu and View icons in place of + and −. Setup generates the Xbox fonts from the installed game files. Older installs keep the Xbox face letters until setup prepares the new fonts.
+
+PlayStation prompts show a cross, circle, square and triangle for the face buttons, L1, R1, L2 and R2 for the shoulder buttons and triggers, and the Options and Create marks for + and -. The log says `RomFS overlay: PlayStation button prompts` when they are on.
 
 Each face-button symbol names the button that does it, so it follows `pad_layout` and the `bind_` lines, as the buttons do:
 

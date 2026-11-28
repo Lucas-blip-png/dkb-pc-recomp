@@ -46,15 +46,17 @@ int input_pad_devices(InputPadDevice **devices);
 // Only input polling advances this history. Menu enumeration must not consume arrival notifications.
 typedef struct {
     uint32_t *ids, pending;
+    uint32_t reserved;   // connected manual Player 2 controller when another pad may serve Player 1
     int count, initialized, automatic, force;
-    int keep;   // a new arrival does not take over while the current device is still connected (coop: it is player 2)
+    int keep, keep_seen;   // co-op retains Player 1 and tracks mode changes separately from controller arrivals
     char preferred[128];
 } InputPadSelection;
 uint32_t input_pad_choose(InputPadSelection *s, const InputPadDevice *devices, int count,
-                          const char *preferred, uint32_t current);
-// Player 2's pad (coop): the one it already has while that is listed and is not player 1's, else the first listed device
-// that is not player 1's; 0 for none. Devices are told apart by instance id only: identical pads share name and GUID.
-uint32_t input_pad2_choose(const InputPadDevice *devices, int count, uint32_t player1, uint32_t current2);
+                          const char *preferred, const char *player2, uint32_t current);
+// In Auto, retain the current eligible Player 2 controller or use the first available. A manual choice only uses
+// its matching controller key. Player 1 always has priority; 0 means Player 2 is unassigned.
+uint32_t input_pad2_choose(const InputPadDevice *devices, int count, uint32_t player1, uint32_t current2,
+                           const char *preferred);
 // The menu calls this after an explicit choice, including reselecting the saved preference after an auto takeover.
 void input_pad_selection_changed(void);
 int input_pad_automatic(void);   // read-only UI status: automatic takeover/fallback is currently in effect

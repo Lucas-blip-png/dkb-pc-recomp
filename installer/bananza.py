@@ -54,6 +54,8 @@ PS_FOLDERS = {'romfs-patches-ps': 'xbox', 'romfs-patches-ps-nintendo': 'nintendo
 KEY_FOLDERS = {'romfs-patches-keys-ABYX': 'ABYX', 'romfs-patches-keys-BAXY': 'BAXY', 'romfs-patches-keys-BAYX': 'BAYX'}
 PROMPT_ARGS = {**{name: ('--layout', layout) for name, layout in PS_FOLDERS.items()},
                **{name: ('--keys', keys) for name, keys in KEY_FOLDERS.items()}}
+XBOX_PROMPT_ARGS = {f'romfs-patches-xbox-keys-{keys}': ('--xbox-keys', keys)
+                    for keys in ('ABXY', *KEY_FOLDERS.values())}
 WIDE_FOLDERS = (tuple(f'romfs-patches-{size}{suffix}' for size in WIDE_SIZES for suffix in ('', '-hud-edges')) +
                 tuple(f'romfs-patches-{size}' for size in TALL_SIZES))
 COMMIT_WARN_GIB = 24   # the game commits about 14 GB; README asks for 16 GB of RAM plus a large page file
@@ -106,7 +108,8 @@ def plain_destination(dest, dlls=()):
     files = (STATE, STATE + '.tmp', DEST_OWNER, DEST_OWNER + '.tmp', SAVES_OWNER, '.dkb-setup.lock', 'dkb.ini',
              'dkb.ini.tmp', 'totk.ini',
              'totk.ini.tmp', 'romfs-index.bin', 'seed-nvn2.bin', 'dkb' + EXE, 'dkb_xlate' + EXE, 'dkb_xlate.id', *(p.name for p in dlls))
-    for name in ('exefs', 'romfs', *WIDE_FOLDERS, *files, *(name + '.setup-part' for name in files)):
+    for name in ('exefs', 'romfs', *WIDE_FOLDERS, *PROMPT_ARGS, *XBOX_PROMPT_ARGS,
+                 *files, *(name + '.setup-part' for name in files)):
         plain_tree(dest / name)
 
 
@@ -991,48 +994,55 @@ class WideLayouts(Step):
 
 
 class PadPrompts(Step):
-    """The PlayStation button prompts (tools/dkb_ps_prompts.py): one overlay per face-button layout, and the
-    Switch-letter overlays (--keys), from the user's font."""
+    """Generate PlayStation, Switch-letter and Xbox button overlays from the user's font."""
     id = 'dkb_prompts'
 
     def key(self, ctx):
-        return digest(ctx.keys['dkb_data'], ctx.info['game'], PROMPT_ARGS, source_key(ctx.layout, 'tools/dkb_ps_prompts.py'))
+        return digest(ctx.keys['dkb_data'], ctx.info['game'], PROMPT_ARGS, XBOX_PROMPT_ARGS,
+                      source_key(ctx.layout, 'tools/dkb_ps_prompts.py'))
 
     def current(self, ctx, record):
         try:
-            return (set(record.get('outputs', {})) == set(PROMPT_ARGS) and
+            folders = PROMPT_ARGS.keys() | XBOX_PROMPT_ARGS.keys()
+            return (set(record.get('outputs', {})) == folders and
                     all((ctx.dest / name / 'manifest.tsv').is_file() and
-                        tree_key(ctx.dest / name) == record['outputs'][name] for name in PROMPT_ARGS))
+                        tree_key(ctx.dest / name) == record['outputs'][name] for name in folders))
         except OSError:
             return False
 
     def verify(self, ctx, record):
         return self.current(ctx, record)
 
-    def run(self, ctx):
-        plain_outputs(ctx)
-        staged = ctx.temp / 'build' / 'ps-prompts'
-        owned_dir(ctx, staged)
+    def prepare(self, ctx, staged, variants):
         try:
-            for name, (option, value) in PROMPT_ARGS.items():
+            for name, (option, value) in variants.items():
                 run_tool(ctx, self.id, [ctx.layout.python, ctx.layout.tools / 'dkb_ps_prompts.py',
                                         '--romfs', ctx.dest / 'romfs', '--out', staged / name, option, value,
-                                        '--installer-workspace', ctx.temp], name=f'{self.id}-{value}')
+                                        '--installer-workspace', ctx.temp],
+                         name=f'{self.id}-xbox-{value}' if option == '--xbox-keys' else f'{self.id}-{value}')
         except InstallError as error:
             if error.id != 'dkb.tool_failed':   # path/ownership failures still stop setup
                 raise
             ctx.reporter.warning('warn.dkb_prompts_failed', code=error.params.get('code'),
                                  log=str(error.params.get('log')))
-            # Optional: the Switch prompts stay. Nothing is published and nothing recorded, so the next setup retries.
-            return {'prepared': False}
+            return False
         plain_outputs(ctx)
-        for name in PROMPT_ARGS:   # each manifest last, as WideLayouts
+        for name in variants:   # each manifest last, as WideLayouts
             folder = staged / name
             for source in sorted(folder.rglob('*')):
                 if source.is_file() and source.name != 'manifest.tsv':
                     copy_file(source, ctx.dest / name / source.relative_to(folder))
             copy_file(folder / 'manifest.tsv', ctx.dest / name / 'manifest.tsv')
-        return {'outputs': {name: tree_key(ctx.dest / name) for name in PROMPT_ARGS}}
+        return True
+
+    def run(self, ctx):
+        plain_outputs(ctx)
+        staged = ctx.temp / 'build' / 'ps-prompts'
+        owned_dir(ctx, staged)
+        # Publish the original overlays before building the optional Xbox set.
+        if not self.prepare(ctx, staged, PROMPT_ARGS) or not self.prepare(ctx, staged, XBOX_PROMPT_ARGS):
+            return {'prepared': False}
+        return {'outputs': {name: tree_key(ctx.dest / name) for name in (*PROMPT_ARGS, *XBOX_PROMPT_ARGS)}}
 
 
 def fsr4_platform():

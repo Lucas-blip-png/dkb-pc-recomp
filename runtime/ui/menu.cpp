@@ -62,6 +62,8 @@ int gfx_window_hdr10(void);    // gfx.h: the swapchain is HDR10 now (the CRT row
 // fs.h (romfs.c): romfs-patches-xbox was next to romfs-index.bin at start, and was loaded.
 int romfs_xbox_prompts_ready(void);
 int romfs_xbox_prompts_active(void);
+int romfs_prompt_layout(void);
+const char *romfs_prompt_style(void);
 extern const char rt_port_version[];
 extern const char rt_game_display[];
 }
@@ -160,6 +162,8 @@ static const struct { int bit; ImGuiKey key; } pad_keys[] = {
     {B_UP, ImGuiKey_GamepadDpadUp}, {B_RIGHT, ImGuiKey_GamepadDpadRight}, {B_DOWN, ImGuiKey_GamepadDpadDown},
 };
 static uint64_t pad_prev;   // buttons at the last frame; a button held when the menu opened counts once released
+static int pad_nav_layout = -1;
+static bool pad_face_wait_release;
 static int stick_dir = -1;  // the D-pad button the left stick holds, -1 none
 
 // The left stick moves the cursor as the D-pad does (ImGui's own stick handling only scrolls the page): past half way
@@ -176,6 +180,16 @@ static void pad_events(ImGuiIO &io, int reset) {
     uint64_t b;
     int32_t lx, ly;
     int have = input_pad_read(&b, &lx, &ly);
+    const int layout = input_pad_layout();
+    const uint64_t face = (1ull << B_A) | (1ull << B_B) | (1ull << B_X) | (1ull << B_Y);
+    if (reset) pad_face_wait_release = false;
+    else if (layout != pad_nav_layout && (pad_prev & face)) pad_face_wait_release = true;
+    pad_nav_layout = layout;
+    // A press that selected a new layout must release before it can act as a different menu button.
+    if (pad_face_wait_release) {
+        if (!(b & face)) pad_face_wait_release = false;
+        b &= ~face;
+    }
     if (have) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     else io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
     stick_dir = stick_to_dpad(lx, ly);
@@ -936,14 +950,17 @@ static void tab_sound(float scale) {
     opt_end();
 }
 
-// The note under the layout label. Xbox prompts (the Nintendo layout with the A/B and X/Y prompts swapped, romfs.c
-// overlay_init) change the buttons at once but the prompts only at the next start: "files missing" without
-// romfs-patches-xbox, "prompts change after restart" while the prompts in use differ from the choice. Automatic with a
-// gamepad connected: "in use: Xbox". NULL otherwise.
+static bool pad_layout_prompts_pending(void) {
+    const int boot_layout = romfs_prompt_layout();
+    return !rt_game_version && boot_layout >= 0 &&
+           boot_layout != input_pad_layout_pick(cfg_value("DKB_PAD_LAYOUT"), 0);
+}
+
+// Automatic shows the active mapping. In Tears of the Kingdom the combined Xbox option also reports its overlay state.
 static const char *pad_layout_note(void) {
     bool want = !strcasecmp(cfg_value("DKB_PAD_LAYOUT"), "xbox_prompts");
-    if (want && !romfs_xbox_prompts_ready()) return menu_text(UI_MENU_PAD_LAYOUT_PROMPTS_MISSING);
-    if (want != (romfs_xbox_prompts_active() != 0)) return menu_text(UI_MENU_PAD_LAYOUT_PROMPTS_RESTART);
+    if (rt_game_version && want && !romfs_xbox_prompts_ready()) return menu_text(UI_MENU_PAD_LAYOUT_PROMPTS_MISSING);
+    if (rt_game_version && want != (romfs_xbox_prompts_active() != 0)) return menu_text(UI_MENU_PAD_LAYOUT_PROMPTS_RESTART);
     int got = input_pad_layout();
     if (got < 0 || strcmp(cfg_value("DKB_PAD_LAYOUT"), "auto")) return nullptr;
     static char note[96];
@@ -960,7 +977,7 @@ static void controller_display_name(const char *name, char *out, size_t size) {
         suffix[-1] = 0;
 }
 
-static void row_controller_device(void) {
+static void row_controller_device(bool player2) {
     static InputPadDevice *devices;
     static int count;
     static uint64_t next;
@@ -976,8 +993,13 @@ static void row_controller_device(void) {
     char (*display)[256] = (char (*)[256])calloc((size_t)(count + 1), 256);
     if (!values || !names || !display) { free(values); free(names); free(display); return; }
     values[0] = "auto"; names[0] = menu_text(UI_MENU_AUTO);
-    const char *preferred = cfg_value("DKB_PAD_DEVICE");
+    const bool coop = cfg_bool("DKB_COOP");
+    const char *key = player2 ? "DKB_PAD2_DEVICE" : coop ? "DKB_COOP_PAD_DEVICE" : "DKB_PAD_DEVICE";
+    const char *preferred = cfg_value(key);
+    InputPadInfo info;
+    const int connected = input_pad_info(&info);
     int found = !strcmp(preferred, "auto");
+    int n = 1, cur = 0;
     for (int i = 0; i < count; i++) {
         controller_display_name(devices[i].name, display[i], sizeof display[i]);
         int duplicates = 0, ordinal = 0;
@@ -990,14 +1012,18 @@ static void row_controller_device(void) {
             size_t used = strlen(display[i]);
             snprintf(display[i] + used, sizeof display[i] - used, " (%d)", ordinal);
         }
-        values[i + 1] = devices[i].key; names[i + 1] = display[i];
+        if (player2 && connected && devices[i].id == info.id) continue;
+        if (connected && devices[i].id == info.id) cur = n;
+        values[n] = devices[i].key; names[n++] = display[i];
         if (!strcmp(preferred, devices[i].key)) found = 1;
     }
-    int n = count + 1;
     if (!found) { values[n] = preferred; names[n++] = menu_text(UI_MENU_PAD_SAVED); }
-    InputPadInfo info;
-    int connected = input_pad_info(&info);
-    int cur = 0;
+    if (player2) {
+        if (!coop) opt_disable_next(UI_MENU_PAD2_NEEDS_COOP);
+        opt_choice_list(key, UI_MENU_PAD2_DEVICE, values, names, n, UI_MENU_PAD2_DEVICE_DESC);
+        free(values); free(names); free(display);
+        return;
+    }
     if (input_pad_automatic()) {
         if (connected) {
             char auto_name[241];
@@ -1005,22 +1031,55 @@ static void row_controller_device(void) {
             snprintf(display[count], sizeof display[count], menu_text(UI_MENU_PAD_DEVICE_AUTO_FMT), auto_name);
             names[0] = display[count];
         }
-    } else if (connected) {
-        for (int i = 0; i < count; i++) if (devices[i].id == info.id) cur = i + 1;
+        cur = 0;
     }
     const char *status = menu_text(connected ? UI_MENU_PAD_CONNECTED : UI_MENU_PAD_NONE);
     char detail[320];
     snprintf(detail, sizeof detail, "%s%s%s", status, connected ? ": " : "", connected ? info.name : "");
-    if (opt_choice_list("DKB_PAD_DEVICE", UI_MENU_PAD_DEVICE, values, names, n, UI_MENU_PAD_DEVICE_DESC, cur, status, detail))
+    if (opt_choice_list(key, UI_MENU_PAD_DEVICE, values, names, n, UI_MENU_PAD_DEVICE_DESC, cur, status, detail))
         input_pad_selection_changed();
     free(values); free(names); free(display);
 }
 
-static void rows_controller(void) {
-    row_controller_device();
+static void rows_controller_layout(void) {
     static const UiTextId layout[] = {UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_PAD_LAYOUT_NINTENDO, UI_MENU_PAD_LAYOUT_XBOX,
                                       UI_MENU_PAD_LAYOUT_XBOX_PROMPTS};
-    opt_choice("DKB_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layout, 4, UI_MENU_PAD_LAYOUT_DESC, pad_layout_note());
+    if (rt_game_version) {
+        opt_choice("DKB_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layout, 4, UI_MENU_PAD_LAYOUT_DESC, pad_layout_note());
+        return;
+    }
+    const bool legacy = !strcasecmp(cfg_value("DKB_PAD_LAYOUT"), "xbox_prompts");
+    const char *style = cfg_value("DKB_PAD_PROMPTS");
+    static const char *const layouts[] = {"nintendo", "xbox"};
+    const char *layout_names[] = {menu_text(UI_MENU_PAD_LAYOUT_NINTENDO), menu_text(UI_MENU_PAD_LAYOUT_XBOX)};
+    const bool pending = pad_layout_prompts_pending();
+    const char *layout_note = pending ? menu_text(UI_MENU_PAD_LAYOUT_PROMPTS_RESTART) : pad_layout_note();
+    const char *layout_status = pending ? menu_text(UI_MENU_DKB_PAD_LAYOUT_RESTART_DETAIL) : nullptr;
+    const bool layout_changed = opt_choice_list("DKB_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layouts, layout_names, 2,
+                                                UI_MENU_DKB_PAD_LAYOUT_DESC, legacy ? 0 : -1, layout_note,
+                                                layout_status, menu_text(UI_MENU_AUTO));
+    if (layout_changed && legacy && !strcasecmp(style, "switch") && !cfg_from_env("DKB_PAD_PROMPTS")) {
+        cfg_set("DKB_PAD_PROMPTS", "xbox");   // keep the letter style when leaving the old combined setting
+        style = cfg_value("DKB_PAD_PROMPTS");
+    }
+
+    static const char *const styles[] = {"auto", "nintendo", "xbox", "playstation"};
+    const char *style_names[] = {menu_text(UI_MENU_AUTO), menu_text(UI_MENU_PAD_PROMPTS_NINTENDO),
+                                 menu_text(UI_MENU_PAD_PROMPTS_XBOX), menu_text(UI_MENU_PAD_PROMPTS_PLAYSTATION)};
+    int current = !strcasecmp(style, "switch") ? (legacy && !layout_changed ? 2 : 1) : -1;
+    const char *boot_style = romfs_prompt_style();
+    const bool restart = boot_style && strcasecmp(style, boot_style) != 0;
+    opt_choice_list("DKB_PAD_PROMPTS", UI_MENU_PAD_PROMPTS, styles, style_names, 4, UI_MENU_PAD_PROMPTS_DESC,
+                    current, nullptr, nullptr, nullptr, restart);
+}
+
+static void rows_controller(void) {
+    row_controller_device(false);
+    if (!rt_game_version) {
+        opt_toggle("DKB_COOP", UI_MENU_COOP, UI_MENU_COOP_DESC);
+        row_controller_device(true);
+    }
+    rows_controller_layout();
     opt_toggle("DKB_MOTION", UI_MENU_MOTION, UI_MENU_MOTION_DESC);
     opt_slider("DKB_RUMBLE_STRENGTH", UI_MENU_RUMBLE_STRENGTH, 0, 300, UI_MENU_RUMBLE_STRENGTH_DESC, 10, "%.0f %%");
     opt_slider("DKB_RUMBLE_CURVE", UI_MENU_RUMBLE_CURVE, 0.2f, 1.5f, UI_MENU_RUMBLE_CURVE_DESC, 0.05f, "%.2f");
