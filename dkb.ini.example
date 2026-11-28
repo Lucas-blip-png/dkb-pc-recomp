@@ -116,6 +116,9 @@
 # cubemap_rate = 0
 # Replace the game's own SMAA passes (edge detection, blend weights, blend) with a copy of its input, 0 or 1.
 # smaa_bypass = 0
+# Integrated GPU only: let textures use the host-visible heap when video memory fills (0 off, 1 above 74% of the budget,
+# or 50% for compressed ones, 2 for every compressed one), instead of crowding the shared memory twice.
+# tex_uma_host = 0
 
 # Vulkan.
 # Vulkan validation layer: checks every call and slows the game down a lot. Needs the layer installed (Vulkan SDK).
