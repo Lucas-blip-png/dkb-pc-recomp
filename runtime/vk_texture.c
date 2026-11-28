@@ -552,8 +552,52 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
         }
     }
     if (!img) {
-        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-        VkResult r = vmaCreateImage(c->vma, &ci, &ai, &img, &e->alloc, NULL);
+        // DKB_TEX_UMA_HOST (from evolis-game's low-spec fork; 0 = off, the default): on an integrated GPU, whose
+        // "device" memory is carved out of the same RAM, a texture that is not a depth-stencil image or a BC render
+        // target may live in the host-visible, non-device-local heap. With 1, it goes there once the device-local heap
+        // is at 74% of its budget (any texture), or at 50% for compressed ones and for those that are not colour
+        // attachments; with 2, every compressed or non-colour-attachment texture goes there. A failed host allocation
+        // falls back to the device heap below. The aliasing path above (nvn_gpu_only) is untouched.
+        static int uma_host = -1;
+        static uint32_t host_bits;
+        if (uma_host < 0) {
+            uma_host = cfg_int("DKB_TEX_UMA_HOST");
+            if (uma_host > 0 && c->props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+                for (uint32_t mt = 0; mt < c->mem_props.memoryTypeCount; mt++) {
+                    uint32_t hi = c->mem_props.memoryTypes[mt].heapIndex;
+                    if (!(c->mem_props.memoryHeaps[hi].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) &&
+                        (c->mem_props.memoryTypes[mt].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+                        host_bits |= 1u << mt;
+                }
+            }
+            if (host_bits) rt_log("vk: integrated GPU: textures may use the host heap (DKB_TEX_UMA_HOST=%d, memory types %#x)", uma_host, host_bits);
+        }
+        int use_host = 0;
+        if (host_bits && !ds && !block_views) {
+            int cbw = 0, cbh = 0;
+            int is_comp = f.vk != f.ideal || (nvn_fmt_bpb(d->format, &cbw, &cbh) && cbw >= 4 && cbh >= 4);
+            int plain = is_comp || !(usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+            if (uma_host >= 2 && plain) use_host = 1;
+            else {
+                uint64_t used = 0, budget = 0;
+                int exact = 0;
+                if (vk_mem_vram(&used, &budget, &exact) && budget) {
+                    if (used >= budget / 100 * 74) use_host = 1;
+                    else if (used >= budget / 100 * 50 && plain) use_host = 1;
+                }
+            }
+        }
+        VkResult r = VK_ERROR_INITIALIZATION_FAILED;
+        if (use_host) {
+            VmaAllocationCreateInfo hai = {.usage = VMA_MEMORY_USAGE_UNKNOWN, .memoryTypeBits = host_bits,
+                                           .preferredFlags = VK_MEMORY_PROPERTY_HOST_CACHED_BIT};
+            r = vmaCreateImage(c->vma, &ci, &hai, &img, &e->alloc, NULL);
+            if (r != VK_SUCCESS) img = VK_NULL_HANDLE;
+        }
+        if (!img) {
+            VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+            r = vmaCreateImage(c->vma, &ci, &ai, &img, &e->alloc, NULL);
+        }
         if (r != VK_SUCCESS) {
             log_limited(&n_failed, "image creation failed (%d): nvn fmt %#x %ux%ux%u target %d levels %u layers %u", (int)r,
                         d->format, w, h, depth, d->target, levels, layers);
@@ -1614,12 +1658,22 @@ const VkTexImage *vk_texture_by_id_locked(const dpool_ref *pool, int id, view_t 
     // Bindings of one submit share one check, answered from the submit's write-watch snapshot (guest writes during a
     // replay race the GPU read on hardware too). After one check an entry is either uploaded or never uploads (not
     // mirrored, GPU-owned or no CPU layout), so a slot that checked its entry in this submit has nothing left to do.
-    if (e && s->cepoch != submit_epoch) {
-        if (!e->uploaded || e->checked != submit_epoch) {
+    // DKB_TEX_FRAME_EPOCH=1 (from evolis-game's low-spec fork; off by default): an entry that is already uploaded is
+    // checked once per presented frame, not once per submit (the epoch is the frame count, with the top bit set so it
+    // never equals a submit epoch). A guest write to a texture after its first check in a frame shows a frame later.
+    static int frame_ep = -1;
+    if (frame_ep < 0) frame_ep = cfg_bool("DKB_TEX_FRAME_EPOCH");
+    uint32_t ep = frame_ep && e && e->uploaded
+                      ? (uint32_t)((__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1u) | 0x80000000u)
+                      : submit_epoch;
+    if (e && s->cepoch != ep) {
+        if (!e->uploaded || e->checked != ep) {
             if (!make_fresh_snap(e)) return NULL;   // the helper gave up: the replay thread checks the entry itself
-            e->checked = submit_epoch;
+            e->checked = ep;
         }
-        s->cepoch = submit_epoch;
+        s->cepoch = ep;
+        __atomic_store_n(&chk[chk_idx(d->serial)], (uint64_t)d->serial << 32 | submit_epoch, __ATOMIC_RELEASE);
+    } else if (e && ep != submit_epoch) {   // frame-checked: the slice threads' memos still see it as checked in this submit
         __atomic_store_n(&chk[chk_idx(d->serial)], (uint64_t)d->serial << 32 | submit_epoch, __ATOMIC_RELEASE);
     }
     if (view) *view = has_view ? s->cview : s->v;

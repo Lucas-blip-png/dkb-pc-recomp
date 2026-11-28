@@ -5057,7 +5057,7 @@ fall:
 
 static int prepare_draw_impl(VkExec *ex, int prim, int32_t count, int restart) {
     DrawCtx *const dc = DC_OF(ex);
-    if (ex->render_disabled) return 0;
+    if (ex->render_disabled || ex->skip_shadow) return 0;
     static int skip_all = -1;   // DKB_SKIP_DRAWS=1: drop every draw (bisecting GPU faults)
     if (skip_all < 0) skip_all = getenv("DKB_SKIP_DRAWS") != NULL;
     if (skip_all) return 0;
@@ -5346,10 +5346,77 @@ static int indirect_reset_draw(VkExec *ex, const p_draw *d) {
     return 1;
 }
 
+static int blit_ok(VkFormat f, int dst);
+
+// DKB_SMAA_BYPASS=1 (from evolis-game's low-spec fork): the game's SMAA edge-detect and blend-weight draws (fragment
+// shaders 3c050d9686cf358a and 5ea510329f353dba, by NVN 2 origin) are dropped and the neighbourhood-blend draw
+// (1daec4428216177b) becomes a copy, or a linear blit when the sizes or formats differ, of its texture 0 into colour
+// target 0. Returns 1 when the draw was handled or dropped, 0 to draw it as usual (also when the copy cannot be made).
+// On a helper thread the part is given up: the replay thread records the copy.
+static int smaa_bypass_draw(VkExec *ex, uint64_t fs_origin) {
+    if (fs_origin == 0x3c050d9686cf358aull || fs_origin == 0x5ea510329f353dbaull) return 1;
+    if (fs_origin != 0x1daec4428216177bull) return 0;
+    DrawCtx *const dc = DC_OF(ex);
+    if (HELPER_COPY && dc->slice) { vk_exec_par_hazard(); return 0; }   // a slice cannot copy: the draw runs as it was
+    if (IS_HELPER(dc)) { vk_spec_fail(VK_SPEC_WRITE); return 1; }
+    uint64_t hs = ex->tex[NVN_STAGE_FS][0];
+    if (!hs) return 0;
+    vk_exec_resolve_targets(ex);
+    VkExecTarget *t = &ex->color[0];
+    if (!t->image || !t->img || t->is3d || t->blocks || t->samples > 1) return 0;
+    view_t vs;
+    int hvs = 0;
+    const VkTexImage *s = vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(hs), &vs, &hvs);
+    if (!s || s->samples > 1 || s->type != VK_IMAGE_TYPE_2D) return 0;
+    if (!(s->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || !(t->img->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return 0;
+    // The copy and blit take the whole image, mip 0 and layer 0, in the images' own formats: a view that picks another
+    // level or layer, or the target's, is left to the shader.
+    if ((hvs && ((vs.set_levels && vs.base_level) || (vs.set_layers && vs.min_layer))) || t->level || t->base_layer) return 0;
+    int same = s->format == t->img->format && s->width == t->width && s->height == t->height;
+    if (!same && (!blit_ok(s->format, 0) || !blit_ok(t->img->format, 1))) return 0;
+    vk_exec_barrier(ex);   // ends the open pass and orders the copy after what wrote the source
+    static int logged;
+    if (!logged++)
+        rt_log("vk_exec: SMAA bypassed (%s %ux%u fmt %d -> %ux%u fmt %d)", same ? "copy" : "blit", s->width, s->height,
+               (int)s->format, t->width, t->height, (int)t->img->format);
+    if (s->image != t->image) {
+        if (same) {
+            VkImageCopy cp = {
+                .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, t->level, t->base_layer, 1},
+                .extent = {t->width, t->height, 1},
+            };
+            vkCmdCopyImage(ex->cb, s->image, VK_IMAGE_LAYOUT_GENERAL, t->image, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+        } else {
+            VkImageBlit bl = {
+                .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, t->level, t->base_layer, 1},
+            };
+            bl.srcOffsets[1] = (VkOffset3D){(int32_t)s->width, (int32_t)s->height, 1};
+            bl.dstOffsets[1] = (VkOffset3D){(int32_t)t->width, (int32_t)t->height, 1};
+            vkCmdBlitImage(ex->cb, s->image, VK_IMAGE_LAYOUT_GENERAL, t->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
+                           VK_FILTER_LINEAR);
+        }
+        ex->recorded++;
+    }
+    if (t->tex) vk_texture_gpu_written(t->tex);
+    vk_exec_barrier(ex);
+    return 1;
+}
+
+static int post_fx_skip(VkExec *ex) {
+    static int smaa = -1;
+    if (smaa < 0) smaa = cfg_int("DKB_SMAA_BYPASS") > 0;
+    if (!smaa || !ex->prog) return 0;
+    uint64_t fso = stage_origin(DC_OF(ex), ex->prog, NVN_STAGE_FS);
+    return fso && smaa_bypass_draw(ex, fso);
+}
+
 static void op_draw(VkExec *ex, const p_draw *d) {
     DrawCtx *const dc = DC_OF(ex);
     dc->c0_binst = (uint32_t)d->base_instance;
     if (indirect_reset_draw(ex, d)) return;
+    if (post_fx_skip(ex)) return;
     if (d->count <= 0 || !prepare_draw(ex, d->prim, d->count, 0)) return;
     dc->frame->draws++;
     merge_note(ex, 0, d->prim, d->count, d->first, 0, 0, d->instances, d->base_instance);
@@ -5429,6 +5496,7 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
     static const uint32_t isize[3] = {1, 2, 4};
     if (d->itype < 0 || d->itype > 2) return warn_once(W_INDEX, "index type %d is unknown: draw skipped", d->itype);
     int restart = restart_for(ex, d->prim, d->itype);
+    if (post_fx_skip(ex)) return;
     if (d->count <= 0 || !prepare_draw(ex, d->prim, d->count, restart)) return;
     dc->frame->draws++;
     uint64_t bytes = (uint64_t)d->count * isize[d->itype];
@@ -5500,7 +5568,7 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
 
 // ---- dispatch and uniform buffer updates
 
-// WORKAROUND, MoltenVK only (DKB_MVK_UPSCALE_BLIT, on by default there, 0 turns it off):
+// WORKAROUND, MoltenVK (DKB_MVK_UPSCALE_BLIT, on by default there, 0 turns it off; 1 turns it on on any GPU):
 // Bananza's own compute upscaler (the dispatch that scales the graded frame to the output size) gives wrong results on
 // Metal. Its input is right; its output keeps a dim red channel, little green and blue, and blocks, so every scene is
 // dark red and blue. The cause is not found: fast math off (MVK_CONFIG_FAST_MATH_ENABLED=0), a write-only binding of the
@@ -5524,6 +5592,16 @@ static int mvk_upscale_cs(uint64_t h) {
            h == 0xbd63ebb7ee8d50eaull || h == 0x9bf9c9b0219fa9b4ull || h == 0xc714f7479e0e112bull;
 }
 
+// The upscaler's compute shaders: by SPIR-V hash and, with DKB_MVK_UPSCALE_BLIT set explicitly (from evolis-game's
+// low-spec fork), also by NVN 2 origin, which does not move with the translator or the host's shader options. MoltenVK's
+// default stays on the hashes alone.
+static int mvk_upscale_match(VkExec *ex, const GfxShader *cs) {
+    if (mvk_upscale_cs(gfx_shader_spirv_fnv(cs))) return 1;
+    if (!cfg_is_set("DKB_MVK_UPSCALE_BLIT")) return 0;
+    uint64_t o = stage_origin(DC_OF(ex), ex->prog, NVN_STAGE_CS);
+    return o == 0xe27e4707534b74e8ull || o == 0x3582d55d1149d49bull;
+}
+
 // Whether the device can blit from format f with linear filtering (src) or into it (dst), optimal tiling.
 static int blit_ok(VkFormat f, int dst) {
     VkFormatProperties fp;
@@ -5537,11 +5615,13 @@ static int blit_ok(VkFormat f, int dst) {
 // then runs). The caller has already put a full barrier before it (vk_exec_barrier in op_dispatch) and puts one after.
 static int mvk_upscale_blit(VkExec *ex, const GfxShader *cs) {
     static int on = -1;
-    if (on < 0) on = vk_caps.moltenvk && cfg_bool("DKB_MVK_UPSCALE_BLIT");
+    // On by default on MoltenVK only; DKB_MVK_UPSCALE_BLIT=1 turns it on elsewhere too (from evolis-game's low-spec
+    // fork: a weak GPU runs the blit in place of the game's upscaler, trading its reconstruction for frame time).
+    if (on < 0) on = cfg_is_set("DKB_MVK_UPSCALE_BLIT") ? cfg_bool("DKB_MVK_UPSCALE_BLIT") : vk_caps.moltenvk;
     // The hash is kept with the shader (gfx_shader_spirv_fnv): a cache of the last shader alone missed on nearly every
     // dispatch, as dispatches alternate between compute shaders, and hashing the whole SPIR-V each time took about 12%
     // of the replaying thread on an M4.
-    if (!on || !mvk_upscale_cs(gfx_shader_spirv_fnv(cs))) return 0;
+    if (!on || !mvk_upscale_match(ex, cs)) return 0;
     uint64_t hs = ex->tex[NVN_STAGE_CS][0], hd = ex->img[NVN_STAGE_CS][1];
     view_t vs, vd;
     int hvs = 0, hvd = 0;

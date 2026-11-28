@@ -50,7 +50,7 @@ float dkb_dlss_mode_ratio(const char *mode) {
     return 0;
 }
 
-// DKB_SCENE_RES: "auto" leaves the game's dynamic resolution alone. "full" (ratio 1.0) or a ratio from 1.0 to 3.0
+// DKB_SCENE_RES: "auto" leaves the game's dynamic resolution alone. "full" (ratio 1.0) or a ratio from 1.0 to 4.0
 // draws the 3D scene at the virtual display divided by that ratio: the patched store in the controller at main
 // 3c12b4 (patches-dkb100.txt, set dkbscene) loads the ratio from page +0x118. Under emulation the game's own
 // control settles at 1.5, so the pool the game sizes for that 3D size (page +0x110) grows by (1.5 / ratio)^2.
@@ -69,7 +69,7 @@ static float dkb_scene_ratio(void) {
         return ratio;
     }
     if (!strcmp(value, "full")) ratio = 1.0f;
-    else if (sscanf(value, "%f%c", &ratio, &tail) != 1 || ratio < 1.0f || ratio > 3.0f) ratio = 0;
+    else if (sscanf(value, "%f%c", &ratio, &tail) != 1 || ratio < 1.0f || ratio > 4.0f) ratio = 0;
     return ratio;
 }
 
@@ -99,8 +99,8 @@ static uint32_t dkb_scene_pool(uint32_t pool, float ratio) {
 static int dkb_output_size(unsigned *width, unsigned *height) {
     int allow_wide = cfg_bool("DKB_ULTRAWIDE");
     char tail;
-    return sscanf(cfg_value("DKB_OUTPUT_RES"), "%ux%u%c", width, height, &tail) == 2 && *width >= 1280 &&
-           *width <= 7680 && *height >= 720 && *height <= 4320 && !(*width % 2) && !(*height % 2) &&
+    return sscanf(cfg_value("DKB_OUTPUT_RES"), "%ux%u%c", width, height, &tail) == 2 && *width >= 640 &&
+           *width <= 7680 && *height >= 360 && *height <= 4320 && !(*width % 2) && !(*height % 2) &&
            *width * 10 >= *height * 16 && (allow_wide || *width * 9 <= *height * 16);
 }
 
@@ -250,7 +250,7 @@ void dkb_wide_init(void) {
     if (!dkb_output_size(&width, &height)) {
         rt_patch_switch(set, 0);
         // Sizes narrower than 16:10 (4:3, 5:4) never pass, ultrawide or not: say so instead of hinting at 16:9 (#403).
-        rt_log("Bananza resolution: output_res %s is not supported: use even sizes from 1280x720 to 7680x4320, from 16:10 "
+        rt_log("Bananza resolution: output_res %s is not supported: use even sizes from 640x360 to 7680x4320, from 16:10 "
                "to 16:9, or wider than 16:9 with ultrawide = 1 (narrower than 16:10 is not supported; aspect = fit "
                "letterboxes the picture); using stock 2880x1620", cfg_value("DKB_OUTPUT_RES"));
         if (scene) rt_log("Bananza resolution: scene_res needs a valid output resolution and is not applied");

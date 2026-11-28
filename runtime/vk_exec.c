@@ -620,6 +620,17 @@ void vk_exec_noatt_dims(const VkExec *ex, uint32_t *w, uint32_t *h) {
 }
 
 // Resolves ex->rt to this command buffer's images and derives the pass parameters and the pipeline's target formats.
+// DKB_SHADOW_RATE and DKB_CUBEMAP_RATE (from evolis-game's low-spec fork), read once; negatives count as 0. on: either
+// is above 1, the only case in which a pass can be left out (ex->skip_shadow), so with both off the replay does nothing
+// new.
+static struct { int shadow, cube, on; } pass_rates = {-1, -1, 0};
+static void pass_rates_init(void) {
+    if (pass_rates.shadow >= 0) return;
+    int s = cfg_int("DKB_SHADOW_RATE"), c = cfg_int("DKB_CUBEMAP_RATE");
+    pass_rates.cube = c > 0 ? c : 0, pass_rates.on = s > 1 || c > 1;
+    __atomic_store_n(&pass_rates.shadow, s > 0 ? s : 0, __ATOMIC_RELEASE);
+}
+
 static void resolve_rt(VkExec *ex) {
     if (ex->rt_resolved) return;
     ex->rt_resolved = 1;
@@ -662,7 +673,33 @@ static void resolve_rt(VkExec *ex) {
     ex->pass_samples = samples ? samples : 1;
     ex->pipe.samples = (uint8_t)ex->pass_samples;
     ex->pipe_serial++;
+    // DKB_SHADOW_RATE=N (from evolis-game's low-spec fork): a square depth-only pass of 1024 or more is rendered one frame
+    // in N and left out in between, so the shadow map keeps its last content; 0 or 1 renders every frame (the default).
+    // Each depth image has its own phase (two, by address), so the maps do not all fall on one frame. Not before frame
+    // 120, so every map is drawn once first. Left alone while a dump is armed, on the upload helper (it never makes
+    // passes) and in a slice, which must agree with the pass the walk opened.
+    pass_rates_init();
+    const int shadow_rate = pass_rates.shadow, cube_rate = pass_rates.cube;
+    int has_color = 0;
+    for (int i = 0; i < n; i++)
+        if (ex->color[i].image) { has_color = 1; break; }
+    ex->skip_shadow = 0;
+    if (!vk_dump_armed && !vk_spec_helper() && !par_slice && !ex->pass_noatt) {
+        uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        if (shadow_rate > 1 && f >= 120 && !has_color && ex->pass_depth && ex->pass_w >= 1024 && ex->pass_w == ex->pass_h) {
+            uint64_t slot = (((uintptr_t)ex->depth.image >> 6) + ex->depth.base_layer) & 1u;
+            if (((f + slot) % (uint64_t)shadow_rate) != 0) ex->skip_shadow = 1;
+        } else if (cube_rate > 1 && f >= 120 && n == 1 && ex->color[0].image && ex->color[0].img &&
+                   ex->color[0].img->layers == 6 && ex->pass_w == 128 && ex->pass_h == 128 && ex->pass_depth) {
+            // DKB_CUBEMAP_RATE=N (also from evolis-game's low-spec fork): the same for the 128x128 passes that draw a
+            // dynamic cubemap's six faces, one frame in N (counted in steps of 6 frames, so the six faces of a
+            // refresh stay together).
+            if (((f / 6) % (uint64_t)cube_rate) != 0) ex->skip_shadow = 1;
+        }
+    }
 }
+
+void vk_exec_resolve_targets(VkExec *ex) { resolve_rt(ex); }
 
 // The attachment view of a target. A registered texture's view lives as long as its image (vk_exec_target_view); any
 // other image's view is made for this command buffer and freed at its fence.
@@ -906,6 +943,7 @@ void vk_exec_pass_begin(VkExec *ex) {
     if (ex->in_pass) return;
     if (par_slice) { vk_exec_par_hazard(); return; }   // a slice cannot open a pass (parallel passes)
     resolve_rt(ex);
+    if (ex->skip_shadow) return;
     // Learned targets (VkTexImage.fb_learned) are attached in the feedback layout
     VkImage want[9];
     VkImageAspectFlags wasp[9];
@@ -1111,6 +1149,7 @@ static int whole_target(const VkExec *ex, const VkExecTarget *t) {
 
 static void clear_attachment(VkExec *ex, const VkClearAttachment *a) {
     vk_exec_pass_begin(ex);
+    if (!ex->in_pass) return;   // a pass left out (skip_shadow) opens nothing, so there is nothing to clear
     VkClearRect cr = {vk_exec_scissor(ex), 0, ex->pass_layers};
     if (!cr.rect.extent.width || !cr.rect.extent.height) return;
     vkCmdClearAttachments(ex->cb, 1, a, 1, &cr);
@@ -1122,6 +1161,7 @@ static void clear_color(VkExec *ex, const p_clear_color *c) {
     FRAME->clears++;
     if (ex->render_disabled) return;
     resolve_rt(ex);
+    if (ex->skip_shadow) return;
     int i = c->index;
     if (i < 0 || i >= (int)ex->pass_ncolor || !ex->color[i].image) {
         warn_once(W_CLEAR_TARGET, "colour clear of target %d, which is not bound or not renderable: skipped", i);
@@ -1152,6 +1192,7 @@ static void clear_color(VkExec *ex, const p_clear_color *c) {
 static void clear_ds(VkExec *ex, const p_clear_ds *c) {
     if (ex->render_disabled) return;
     resolve_rt(ex);
+    if (ex->skip_shadow) return;
     const VkExecTarget *t = &ex->depth;
     if (!t->image) return;
     VkImageAspectFlags asp = 0;
@@ -1212,6 +1253,7 @@ static void set_rt(VkExec *ex, const p_set_rt *r) {
     vk_exec_pass_end(ex);
     ex->rt = *r;
     ex->rt_resolved = 0;
+    ex->skip_shadow = 0;
 }
 
 // ---- command buffer parts
@@ -1529,7 +1571,7 @@ static void par_walk(VkExec *ex, const op_hdr *h, const op_hdr *end, int state_o
             if (!state_only) vk_exec_barrier(ex);
             break;
         case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IDX_IND:
-            if (state_only) break;
+            if (state_only || ex->skip_shadow) break;
             fr->draws_seen++;
             vk_exec_draw_digest_draw(ex);
             // fall through
@@ -2241,6 +2283,7 @@ static int par_start(VkExec *ex) {
         return pass_why = PAR_WHY_DUMP, 0;
     }
     resolve_rt(ex);
+    if (ex->skip_shadow) return pass_why = PAR_WHY_NOATT, 0;   // a pass left out is not sliced
     uint64_t sig = par_sig(ex);
     ParHist *e = par_find(sig, 0);
     if (!e) return pass_why = PAR_WHY_NEW, par_no[0]++, 0;
@@ -3578,6 +3621,10 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_BARRIER: vk_exec_barrier_cs(ex), ex->game_barrier = 1; break;   // between dispatches, a compute barrier
         case OP_WAIT_SYNC: break;   // submit preparation waited before any replay/snapshot; source may be gone
         case OP_DRAW: case OP_DRAW_IDX: case OP_DISPATCH: case OP_UPDATE_UB: case OP_DRAW_IDX_IND: case OP_DISPATCH_IND:
+            if ((pass_rates_init(), pass_rates.on) && h->op != OP_DISPATCH && h->op != OP_DISPATCH_IND && h->op != OP_UPDATE_UB) {
+                resolve_rt(ex);
+                if (ex->skip_shadow) break;   // a pass left out this frame: its draws are not counted or recorded
+            }
             if (h->op == OP_DRAW_IDX && merge_walk(ex, &h)) continue;
             if (h->op == OP_DRAW || h->op == OP_DRAW_IDX || h->op == OP_DRAW_IDX_IND) {
                 vk_exec_frame.draws_seen++, split_draws++;

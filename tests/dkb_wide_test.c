@@ -215,6 +215,18 @@ static void scene_pool(void) {
     dkb_wide_init();
     memcpy(&ratio, test_page + 0x118, 4);
     CHECK(page_pool() == dkb_scene_pool(dkb_wide_pool_bytes(3840, 2160), 1.0f) && ratio == 1.0f);
+    reset("3840x2160");   // 4.0 is the largest scene ratio, anything above it is not one
+    scene_res = "4.0";
+    scene_index = 1;
+    heapdef_grown = 1;
+    dkb_wide_init();
+    memcpy(&ratio, test_page + 0x118, 4);
+    CHECK(ratio == 4.0f && scene_switched == 1);
+    reset("3840x2160");
+    scene_res = "4.01";
+    scene_index = 1;
+    dkb_wide_init();
+    CHECK(scene_switched == 0);
     reset("7680x4320");   // the output's own pool is above the cap and is never cut
     scene_res = "2.0";
     scene_index = 1;
@@ -293,6 +305,8 @@ int main(void) {
     valid("7680x2160", 7680, 2160);
     valid("1920x1080", 1920, 1080);
     valid("1280x720", 1280, 720);
+    valid("640x360", 640, 360);
+    valid("960x540", 960, 540);
     configured("1920x1080", 1920, 1080, 0);
     configured("2560x1440", 2560, 1440, 0);
     configured("3840x2160", 3840, 2160, 0);
@@ -302,8 +316,8 @@ int main(void) {
     configured("1680x1050", 1680, 1050, 0);
     const char *bad[] = {"", "3440", "3440:1440", "3440x1440junk", "3440x1440\n",
                          "0x0", "1280x960", "1440x1080", "1278x800", "2560x0",
-                         "3441x1440", "3440x1441", "1278x720", "7682x1440", "7680x4322",
-                         "3440x718", "-3440x1440"};
+                         "3441x1440", "3440x1441", "640x358", "7682x1440", "7680x4322",
+                         "3440x358", "-3440x1440", "638x358"};
     for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) rejected(bad[i]);
     reset("3440x1440");
     setting = 0;

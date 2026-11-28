@@ -108,6 +108,23 @@
 # split_draws = 64
 # split_us = 1000
 
+# Low-spec options, all off by default (from evolis-game's low-spec fork; docs/dkb-lowend.md, "Low-spec options").
+# Render each shadow map one frame in N (2 to 60; 0 or 1 = every frame). The map keeps its last content in between, so
+# shadows lag by up to N frames. Applies from frame 120.
+# shadow_rate = 0
+# The same for the dynamic cubemap faces (reflections): rendered one frame in N of every 6 (2 to 60; 0 or 1 = every frame).
+# cubemap_rate = 0
+# Replace the game's own SMAA passes (edge detection, blend weights, blend) with a copy of its input, 0 or 1.
+# smaa_bypass = 0
+# Integrated GPU only: let textures use the host-visible heap when video memory fills (0 off, 1 above 74% of the budget,
+# or 50% for compressed ones, 2 for every compressed one), instead of crowding the shared memory twice.
+# tex_uma_host = 0
+# Check an uploaded texture's storage for guest writes once per frame instead of once per submit, 0 or 1.
+# tex_frame_epoch = 0
+# Replace the game's upscaler compute shader with a linear blit of its input on any GPU (on by default on MoltenVK only), 0 or 1.
+# With 1 the blit also takes priority over upscaler = dlss or fsr3 for the game's upscaler dispatch.
+# mvk_upscale_blit = 0
+
 # Vulkan.
 # Vulkan validation layer: checks every call and slows the game down a lot. Needs the layer installed (Vulkan SDK).
 # vk_validation = 0
@@ -168,6 +185,7 @@
 # 1280x800, 1680x1050, 1920x1200 and 2560x1600 (16:10). Any other size
 # gets the camera's view but a 16:9 HUD, stretched over the picture, unless you build its layout with
 # tools/make_romfs_patches.py --aspect WxH. Read at start.
+# Sizes from 640x360 (from evolis-game's low-spec fork) to 7680x4320 are accepted on Bananza.
 # output_res = 1920x1080
 # 3D render scale: the scene's size relative to the game resolution, game (5/6, the game's own 1600x900 at 1080p) or
 # a percentage (25 to 400, at most 4096 pixels a side); above 100 supersamples the scene (anti-aliasing). Read at start.
@@ -197,7 +215,7 @@
 # window_filter = fsr1
 # Bananza only: auto keeps the game's dynamic 3D resolution (usually two thirds of output_res on each side), full draws
 # the 3D scene at output_res (sharper, more GPU cost; no upscaler then, except that on update 3.2.0 upscaler = fsr3,
-# fsr4 or dlss runs at that size as native anti-aliasing, docs/dkb-testing.md), a ratio from 1.0 to 3.0 draws it at
+# fsr4 or dlss runs at that size as native anti-aliasing, docs/dkb-testing.md), a ratio from 1.0 to 4.0 draws it at
 # output_res divided by that ratio and upscales it to output_res (1.5 with upscaler = dlss: DLSS Quality at output_res).
 # Read at start.
 # scene_res = auto
@@ -206,7 +224,9 @@
 # dlss_mode = auto
 # A set of defaults for a class of PC (output_res, scene_res, upscaler, astc_bc, fps_limit, frame_gen): custom (nothing
 # changes), recommended (from your GPU memory, RAM and processors) or 1 Minimum, 2 Low, 3 Medium, 4 High, 5 Ultra
-# (docs/dkb-testing.md). A key you set here wins over it. Read at start.
+# (docs/dkb-testing.md), or lowspec: the integrated GPU profile of docs/dkb-lowend.md (astc = gpu, astc_bc = 1,
+# tex_uma_host = 1, tex_vram_pressure = 72, vram_headroom = 0, shadow_rate = 8, cubemap_rate = 6, replay_threads = 2).
+# A key you set here wins over it. Read at start.
 # preset = custom
 # auto chooses mip levels for the upscaled size with a temporal upscaler below full scene resolution. Restart to apply.
 # lod_bias = off

@@ -42,7 +42,7 @@ static const char *const known[] = {
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
     "BIND_SKIP", "BIND_STATS", "BIND_UP", "BIND_X", "BIND_Y",
-    "BIND_ZL", "BIND_ZR", "BLOCK_VIEWS_3D", "CLOTH_REALTIME", "CMD_REC_FAST", "CMD_TRACK_FAST", "COLOR_BRIGHTNESS", "COLOR_CONTRAST", "COLOR_GAMMA", "COLOR_PRESET", "COLOR_SATURATION", "COPY_SHARDS", "CORE_DIAG", "CORE_WAITS", "CRIT", "CRUMB_BIND", "CRIT_OUT", "CRT_FILTER", "CRT_LINES", "DESC_C0_SERIAL", "DESC_KEEP", "DESC_SAMP_GEN", "DESC_STAGE_ORIGIN", "DESC_TD_HASH", "DESC_TEMPLATE", "DEVICE_PROFILE", "DLSS_MODE", "PRESET", "DLSS_PRESET", "DLSS_WARM_FULL", "DRAW_FAST", "DRAW_MERGE", "DRAW_PROFILE", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG", "DYN_KEEP", "DYN_UBO",
+    "BIND_ZL", "BIND_ZR", "BLOCK_VIEWS_3D", "CLOTH_REALTIME", "CMD_REC_FAST", "CMD_TRACK_FAST", "COLOR_BRIGHTNESS", "COLOR_CONTRAST", "COLOR_GAMMA", "COLOR_PRESET", "COLOR_SATURATION", "COPY_SHARDS", "CORE_DIAG", "CORE_WAITS", "CRIT", "CRUMB_BIND", "CRIT_OUT", "CRT_FILTER", "CUBEMAP_RATE", "CRT_LINES", "DESC_C0_SERIAL", "DESC_KEEP", "DESC_SAMP_GEN", "DESC_STAGE_ORIGIN", "DESC_TD_HASH", "DESC_TEMPLATE", "DEVICE_PROFILE", "DLSS_MODE", "PRESET", "DLSS_PRESET", "DLSS_WARM_FULL", "DRAW_FAST", "DRAW_MERGE", "DRAW_PROFILE", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG", "DYN_KEEP", "DYN_UBO",
     "EXEFS", "EXPERIMENTAL_GEOMETRY", "FEEDBACK", "FIXED_STEP", "FIX_C0", "FIX_INDIRECT_RESET", "FIX_LQ_FOLD", "FIX_SCREEN_UV", "FIX_VS_FAULT", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES", "FLIGHT_SPIKE_MS",
     "FLIGHT_THUMBS", "CONSOLE", "COOP", "COOP_PAD_DEVICE", "FMZ", "FMZ_SEL", "FOV", "FOV_PATCH", "FPS60", "FPS_LIMIT", "FRAME_GEN", "FRAME_GEN_BY", "FREEZE_IDLE", "FRZ_LAZY", "FRZ_WHOLE", "FSR4_LDR", "FSR_DIR", "FREE_CORES", "FULLSCREEN", "GPL", "GPL_DRAW_BUILD", "GPU", "GPU_CHECKPOINTS", "GPU_HANG_S",
     "GPU_INDEX", "GPU_NAME", "GS_STORAGE_WRITEBACK", "HDR", "HDR_GAME_NITS", "HDR_NATIVE", "HDR_PEAK_NITS", "HDR_SHOULDER", "HDR_TRACE", "HDR_UI_NITS", "HEADLESS", "HEAP_LAZY", "HIGHFPS_FIX", "HOLD_TAKEBACK", "HOSTFN_FAST", "HOST_PROPS_CACHE", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LANG", "LAZY_CHUNK_KB", "LIB_PREBUILD",
@@ -54,8 +54,8 @@ static const char *const known[] = {
     "RENDER_SCALE", "RENHDRUM", "SCENE_RES", "SCHED_HANDOFF", "REPLAY_ASYNC", "REPLAY_HELPERS", "REPLAY_PAR", "REPLAY_THREADS", "CALL_REF", "RESET_BATCH", "RESET_CPU_LIST", "RESET_FAST",
     "REPLAY_CHECK", "RESOLVE_CHECK", "ROMFS", "ROMFS_DIR", "ROMFS_INDEX", "ROMFS_MMAP", "ROMFS_MODS", "ROMFS_PATCHES",
     "ROMFS_PROOF_DIR", "ROMFS_VERIFY", "RUMBLE", "RUMBLE_CURVE", "RUMBLE_HD", "RUMBLE_STRENGTH", "RUMBLE_TRIGGERS", "SHADER_CACHE",
-    "SHADER_LOAD_QUEUE", "SHADER_MEMO", "SHADOW", "SHADOW_RESYNC", "SHARED_FONTS", "SHARPNESS", "SHOTS", "SHOT_ASYNC", "SHOTS_DIR", "SHOTS_FULL", "SKIP_CS", "SKIP_FS", "SKIP_VS", "SMAA", "SPARSE_MIRROR_COPY", "SPEED_PROBE", "STALL_DUMP", "SPIN", "SPIN_HANDOFF_US", "SPLASH", "SPLASH_SHOTS", "SPLASH_TEST", "SPLASH_WATCH", "SPLIT_DRAWS", "SPLIT_US", "STAGED_BLK_CHECK", "STAGED_FETCH_TEST", "STAGED_INJECT", "STAGED_READ_PROBE", "STAGED_WB", "STAMP_BATCH", "STICK_DEADZONE", "SVC_SLOW", "SWITCH2", "SWKBD_ANSWER",
-    "SWKBD_TEST", "TEST_PAD", "TEST_PREPARE_SHADERS", "TEX_ALIAS", "TEX_CHECK_SHARE", "TEX_HASH", "TEX_MEMO", "TEX_REPEAT", "CS_BARRIER", "TEX_VRAM_PRESSURE", "TIMER_1MS", "TOUCH_MAP", "REC_BATCH", "TRACE", "UBO_SNAPSHOT", "UPSCALER", "USNAP_DROP_LOCAL", "USNAP_FAST", "USNAP_LIST", "USNAP_LIST_CHECK", "USNAP_OPT", "VK_DYN_A2C", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
+    "SHADER_LOAD_QUEUE", "SHADER_MEMO", "SHADOW", "SHADOW_RATE", "SHADOW_RESYNC", "SHARED_FONTS", "SHARPNESS", "SHOTS", "SHOT_ASYNC", "SHOTS_DIR", "SHOTS_FULL", "SKIP_CS", "SKIP_FS", "SKIP_VS", "SMAA", "SMAA_BYPASS", "SPARSE_MIRROR_COPY", "SPEED_PROBE", "STALL_DUMP", "SPIN", "SPIN_HANDOFF_US", "SPLASH", "SPLASH_SHOTS", "SPLASH_TEST", "SPLASH_WATCH", "SPLIT_DRAWS", "SPLIT_US", "STAGED_BLK_CHECK", "STAGED_FETCH_TEST", "STAGED_INJECT", "STAGED_READ_PROBE", "STAGED_WB", "STAMP_BATCH", "STICK_DEADZONE", "SVC_SLOW", "SWITCH2", "SWKBD_ANSWER",
+    "SWKBD_TEST", "TEST_PAD", "TEST_PREPARE_SHADERS", "TEX_ALIAS", "TEX_CHECK_SHARE", "TEX_FRAME_EPOCH", "TEX_HASH", "TEX_MEMO", "TEX_REPEAT", "TEX_UMA_HOST", "CS_BARRIER", "TEX_VRAM_PRESSURE", "TIMER_1MS", "TOUCH_MAP", "REC_BATCH", "TRACE", "UBO_SNAPSHOT", "UPSCALER", "USNAP_DROP_LOCAL", "USNAP_FAST", "USNAP_LIST", "USNAP_LIST_CHECK", "USNAP_OPT", "VK_DYN_A2C", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
     "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_VALIDATION", "VOLUME", "VULKAN_DRIVER", "VRAM_HEADROOM", "VRAM_LIMIT", "VS_OUTS",
     "ULTRAWIDE", "HUD_POSITION", "WB_AHEAD", "WB_ASYNC", "WB_EARLY", "WB_EXACT", "WB_FENCE_LIMIT", "WB_LAZY", "WARM_THREADS", "WB_UNLOCKED", "WINDOW_FILTER", "WINDOW_MODE", "WINDOW_SIZE", "WW_SLOW_MS", "XLATE", "XLATE_ID", "XLATE_PROCS", "ZSTD_CHECK", "ZSTD_NATIVE",
 };
@@ -93,7 +93,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"TEX_ALIAS", "performance"}, {"TEX_VRAM_PRESSURE", "performance"}, {"ASTC_BC", "performance"}, {"ASTC_BC1", "performance"}, {"LOD_GUARD", "performance"}, {"FIX_C0", "performance"}, {"FIX_INDIRECT_RESET", "performance"}, {"FIX_VS_FAULT", "performance"}, {"FIX_LQ_FOLD", "performance"}, {"FIX_ZERO", "performance"}, {"FIX_SCREEN_UV", "performance"}, {"LIST_RESTART", "performance"},
     {"BIND_SKIP", "performance"}, {"SHADER_MEMO", "performance"}, {"PIPE_MEMO", "performance"}, {"TEX_MEMO", "performance"}, {"DESC_KEEP", "performance"}, {"LOOKAHEAD", "performance"}, {"DESC_TEMPLATE", "performance"},
     {"DESC_C0_SERIAL", "performance"}, {"DESC_SAMP_GEN", "performance"}, {"DESC_TD_HASH", "performance"}, {"DESC_STAGE_ORIGIN", "performance"}, {"DYN_KEEP", "performance"}, {"DRAW_FAST", "performance"}, {"HOLD_TAKEBACK", "performance"}, {"TEX_REPEAT", "performance"}, {"CS_BARRIER", "performance"},
-    {"TEX_HASH", "performance"}, {"ZSTD_NATIVE", "performance"}, {"ZSTD_CHECK", "performance"}, {"MVK_UPSCALE_BLIT", "performance"},
+    {"TEX_HASH", "performance"}, {"ZSTD_NATIVE", "performance"}, {"ZSTD_CHECK", "performance"}, {"MVK_UPSCALE_BLIT", "performance"}, {"SHADOW_RATE", "performance"}, {"TEX_FRAME_EPOCH", "performance"}, {"TEX_UMA_HOST", "performance"}, {"SMAA_BYPASS", "performance"}, {"CUBEMAP_RATE", "performance"},
     {"PUSH_SKIP", "performance"}, {"SPLIT_DRAWS", "performance"}, {"SPLIT_US", "performance"}, {"VK_VALIDATION", "performance"},
     {"VK_DYN_VERTEX", "performance"}, {"VK_DYN_A2C", "performance"}, {"VK_SUBGROUP_PIN", "performance"},
     {"TRACE", "diagnostics"}, {"MEM_REPORT", "diagnostics"}, {"HEAP_LAZY", "diagnostics"}, {"FLIGHT", "diagnostics"}, {"FLIGHT_SPIKE_MS", "diagnostics"},
@@ -129,7 +129,7 @@ static const CfgMeta metas[] = {
     // Bananza: the 3D scene ratio of the temporal upscalers by name, when scene_res is auto (dkb_wide.c dkb_scene_ratio)
     {"DLSS_MODE", "auto", "auto|dlaa|quality|balanced|performance|ultra_performance", RESTART},
     // A defaults table by level, below the environment and dkb.ini (cfg.c PRESETS); custom changes nothing
-    {"PRESET", "custom", "custom|recommended|1|2|3|4|5", RESTART},
+    {"PRESET", "custom", "custom|recommended|1|2|3|4|5|lowspec", RESTART},
     {"FSR4_LDR", "0", "0|1", RESTART},   // vk_fsr4.c: diagnosis, the colour is taken as perceptual up to 1
     {"WINDOW_FILTER", "fsr1", "fsr1|linear|catmull_rom|lanczos", LIVE},
     {"LOD_BIAS", "off", "off|auto", RESTART},
@@ -193,7 +193,12 @@ static const CfgMeta metas[] = {
     {"TEX_ALIAS", "1", "0|1", RESTART}, {"TEX_HASH", "1", "0|1", RESTART}, {"TEX_VRAM_PRESSURE", "90", "0..100", RESTART}, {"ASTC_BC", "0", "0|1", RESTART}, {"ASTC_BC1", "1", "0|1", RESTART}, {"ZSTD_NATIVE", "1", "0|1", RESTART}, {"ZSTD_CHECK", "0", "0|1", RESTART},
     // render fixes
     {"EXPERIMENTAL_GEOMETRY", "0", "0|1", RESTART}, {"NATIVE_GS", "1", "0|1", RESTART},
-    {"MVK_UPSCALE_BLIT", "1", "0|1", RESTART},
+    {"MVK_UPSCALE_BLIT", "1", "0|1", RESTART},   // on by default on MoltenVK only; 1 also on other GPUs (a blit in place of the game's upscaler)
+    {"CUBEMAP_RATE", "0", "0..60", RESTART},   // vk_exec.c resolve_rt: the same for the 128x128 cubemap face passes
+    {"SMAA_BYPASS", "0", "0|1", RESTART},   // vk_exec_draw.c smaa_bypass_draw: the game's SMAA passes become a copy
+    {"TEX_UMA_HOST", "0", "0..2", RESTART},   // vk_texture.c create_tex: on an integrated GPU, textures may use the host heap
+    {"TEX_FRAME_EPOCH", "0", "0|1", RESTART},   // vk_texture.c vk_texture_by_id_locked: check an uploaded texture once per frame
+    {"SHADOW_RATE", "0", "0..60", RESTART},   // vk_exec.c resolve_rt: render square depth-only passes one frame in N (0 or 1 every frame)
     {"LOD_GUARD", "1", "0|1", RESTART}, {"FIX_C0", "1", "0|1", RESTART}, {"FIX_INDIRECT_RESET", "1", "0|1", RESTART}, {"FIX_VS_FAULT", "1", "0|1|all", RESTART}, {"FIX_LQ_FOLD", "1", "0|1|all", RESTART}, {"FIX_ZERO", "1", "0|1", RESTART}, {"FIX_SCREEN_UV", "1", "0|1", RESTART}, {"LIST_RESTART", "1", "0|1", RESTART},
     {"BIND_SKIP", "1", "0|1", RESTART}, {"SHADER_MEMO", "1", "0|1", RESTART}, {"PIPE_MEMO", "1", "0|1", RESTART}, {"TEX_MEMO", "1", "0|1", RESTART},
     {"DESC_KEEP", "1", "0|1|ab", RESTART}, {"LOOKAHEAD", "1", "0|1|ab", RESTART}, {"DESC_TEMPLATE", "1", "0|1", RESTART},
@@ -382,7 +387,15 @@ static const struct { const char *key, *level[5]; } PRESETS[] = {
     {"ASTC_BC", {"1", "1", "0", "0", "0"}},
     {"FRAME_GEN", {"off", "off", "off", "off", "auto"}},
 };
-static int preset = -1;   // 0 none, 1..5; -1 until cfg_preset_resolve
+// preset = lowspec (from evolis-game's low-spec fork, whose v1.1.0 dkb.ini these values are; not a menu row): a table of
+// its own for an integrated GPU or a weak PC, below the environment and dkb.ini like the levels. It leaves the
+// resolution, upscaler and frame rate alone. Every line is a setting of docs/dkb-lowend.md, "Low-spec options".
+#define PRESET_LOWSPEC 6
+static const struct { const char *key, *value; } LOWSPEC[] = {
+    {"ASTC", "gpu"}, {"ASTC_BC", "1"}, {"TEX_UMA_HOST", "1"}, {"TEX_VRAM_PRESSURE", "72"}, {"VRAM_HEADROOM", "0"},
+    {"SHADOW_RATE", "8"}, {"CUBEMAP_RATE", "6"}, {"REPLAY_THREADS", "2"},
+};
+static int preset = -1;   // 0 none, 1..5, PRESET_LOWSPEC; -1 until cfg_preset_resolve
 static int preset_nvidia;
 
 // The level a machine fits: the lowest of what its video memory (MiB), memory (MiB) and logical processors allow, an
@@ -402,11 +415,13 @@ void cfg_preset_resolve(void) {
     const char *set = raw_get(PREFIX "PRESET");
     int p = set && set[0] >= '1' && set[0] <= '5' && !set[1] ? set[0] - '0' : 0;
     int recommended = set && !strcasecmp(set, "recommended");
+    if (set && !strcasecmp(set, "lowspec")) p = PRESET_LOWSPEC;
     if (profile_of()) p = 0, recommended = 0;
     unsigned vram = 0;
     int integrated = 0, nvidia = 0, ok = 0;
-    if (recommended || p >= 3) vk_driver_env_apply();
-    if (recommended || p >= 3) ok = vk_hw_probe(&vram, &integrated, &nvidia);   // the Vulkan device is not up yet here
+    int probe = recommended || (p >= 3 && p <= 5);
+    if (probe) vk_driver_env_apply();
+    if (probe) ok = vk_hw_probe(&vram, &integrated, &nvidia);   // the Vulkan device is not up yet here
     preset_nvidia = CFG_HAS_DLSS && nvidia;
     if (preset_nvidia) {   // DLSS only with its model next to dkb.exe, where vk_dlss.c init looks for it
         char path[1024] = "";
@@ -426,7 +441,8 @@ void cfg_preset_resolve(void) {
                vram / 1024.0, parts[0], total / 1024.0, parts[1], plat_cpu_usable(), parts[2],
                integrated ? ", integrated GPU caps at 2" : ok ? "" : ", no Vulkan GPU found");
     } else if (p) {
-        rt_log("[host] preset: %d", p);
+        if (p == PRESET_LOWSPEC) rt_log("[host] preset: lowspec");
+        else rt_log("[host] preset: %d", p);
     }
     __atomic_store_n(&preset, p, __ATOMIC_RELEASE);
 }
@@ -434,6 +450,11 @@ void cfg_preset_resolve(void) {
 static const char *preset_value(const char *key) {
     int p = __atomic_load_n(&preset, __ATOMIC_ACQUIRE);
     if (p <= 0) return NULL;
+    if (p == PRESET_LOWSPEC) {
+        for (size_t i = 0; i < sizeof LOWSPEC / sizeof *LOWSPEC; i++)
+            if (!strcasecmp(LOWSPEC[i].key, key)) return LOWSPEC[i].value;
+        return NULL;
+    }
     for (size_t i = 0; i < sizeof PRESETS / sizeof *PRESETS; i++) {
         if (strcasecmp(PRESETS[i].key, key)) continue;
         const char *v = PRESETS[i].level[p - 1];

@@ -533,6 +533,17 @@ int probe_cfg(void) {
     cfg_preset_resolve();
     CHECK(cfg_get("DKB_OUTPUT_RES") == NULL, "no preset: the table's default applies again");
     plat_setenv("DKB_DEVICE_PROFILE", NULL);
+    // preset = lowspec: its table gives the low-spec settings, and a key the player sets still wins
+    plat_setenv("DKB_PRESET", "lowspec");
+    plat_setenv("DKB_SHADOW_RATE", NULL);
+    plat_setenv("DKB_CUBEMAP_RATE", "3");
+    cfg_preset_resolve();
+    CHECK(EQ(cfg_get("DKB_SHADOW_RATE"), "8"), "preset lowspec: shadow_rate 8");
+    CHECK(EQ(cfg_get("DKB_CUBEMAP_RATE"), "3"), "preset lowspec: a key set by the player wins");
+    plat_setenv("DKB_PRESET", NULL);
+    plat_setenv("DKB_CUBEMAP_RATE", NULL);
+    cfg_preset_resolve();
+    CHECK(!cfg_get("DKB_SHADOW_RATE"), "no preset: shadow_rate unset");
     printf("probe-cfg: %s\n", fails ? "FAIL" : "ok");
     return fails ? 1 : 0;
 }

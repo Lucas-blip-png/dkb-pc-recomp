@@ -276,3 +276,36 @@ Recommended for a weak GPU: `scene_res = auto`, so the game's dynamic resolution
 output on each side, with the game's own upscaler (the default; DLSS and FSR were not measured here). `full` costs 2.3
 ms a frame of GPU time at 1920x1080 and 3.3 ms at 2560x1440. Each step up in output resolution costs about as much as
 `full` at the step below: keep the output at the monitor's size, and lower it before turning `full` on.
+
+## Low-spec options
+
+Opt-in settings ported from evolis-game's low-spec fork of this runtime (`donkey-kong-bananza-pc-lowspec`, commit
+e78174cac4) and a profile that sets them for an integrated GPU (below). They all default to off. Each trades picture quality for
+frame time, so turn them on one at a time and compare.
+
+| Setting | Effect |
+| --- | --- |
+| `shadow_rate = N` (2 to 60) | Renders each shadow map one frame in N. Shadows lag by up to N frames; the fork ran 8 on an integrated GPU. |
+| `cubemap_rate = N` (2 to 60) | Renders the dynamic cubemap faces (reflections) one step in N of 6 frames. The fork ran 6. |
+| `smaa_bypass = 1` | Replaces the game's SMAA passes with a copy of their input: no anti-aliasing from the game, three fewer full-screen passes. |
+| `tex_uma_host = 1` (or 2) | On an integrated GPU, new textures go to the host heap when video memory is above 74% of its budget (50% for compressed ones), falling back to device memory on failure. Ignored on a discrete GPU. |
+| `tex_frame_epoch = 1` | Checks an uploaded texture for guest writes once per frame, not once per submit. A texture the game rewrites mid-frame shows the change a frame late. |
+| `output_res = 640x360` and up, `scene_res` up to 4.0 | Bananza now accepts output sizes from 640x360 and a scene ratio up to 4.0 (the scene drawn at a quarter of the output on each side), for very weak GPUs (`runtime/dkb_wide.c` `dkb_output_size`, `dkb_scene_ratio`). Both ranges only widen what was accepted. |
+| `mvk_upscale_blit = 1` | Replaces the game's compute upscaler with a linear blit on any GPU (default on MoltenVK only). Cheaper, softer. |
+
+## Integrated GPU profile
+
+`preset = lowspec` in `dkb.ini` (or `DKB_PRESET=lowspec`) sets these defaults, the values of the fork's v1.1.0 `dkb.ini`.
+Like the numbered presets, they sit below the environment and `dkb.ini`, so any key you set yourself wins; it changes
+nothing about the resolution, upscaler or frame rate limit. The Steam Deck profile ignores it. It is not a menu row.
+
+```ini
+astc = gpu
+astc_bc = 1
+tex_uma_host = 1
+tex_vram_pressure = 72
+vram_headroom = 0
+shadow_rate = 8
+cubemap_rate = 6
+replay_threads = 2
+```
