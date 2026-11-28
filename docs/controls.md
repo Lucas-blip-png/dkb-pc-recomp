@@ -228,6 +228,27 @@ Without the above, Windows does not present the Switch 2 Pro Controller as a gam
 
 Bridges that output a ViGEm DualShock 4 (ProCon2Windows, connectyourpro as tested) give buttons and rumble but no motion: their virtual DualShock 4 reports a gyro and an accelerometer that never change, so motion aiming and Ultrahand rotation do nothing. Run one bridge at a time; Steam Input can also claim the controller, so close Steam if the bridge does not find it.
 
+## Steam Input and motion
+
+A game Steam starts sees Steam's virtual gamepad in place of the controllers Steam Input reads (Steam lists them in
+`SDL_GAMECONTROLLER_IGNORE_DEVICES`), and that virtual pad has no gyro or accelerometer. With `motion = 1` the game
+clears that list before SDL starts (`runtime/input.c`, `steam_reveal`): buttons and sticks still come from the virtual
+pad, so Steam's remapping applies and nothing is read twice, and when the virtual pad has no sensors the motion thread
+opens the real controller behind it for its gyro and accelerometer only (`motion_source`). The log then shows
+`input: motion from "<name>" (<vendor>:<product>), the controller behind Steam Input's virtual gamepad`. Gyro therefore
+works under Steam Input: the Steam Controller, the Steam Deck's built-in controls (Steam Input cannot be turned off
+for them) and other controllers Steam Input wraps. A controller Steam hid serves for buttons only while no other
+gamepad is there (Steam's virtual pad can come up after the game starts). With `motion = 0` at start Steam's list
+stays in force.
+
+Steam switches the controller's gyro off while the game's layout binds nothing to it: the reports keep coming with the
+gyro at zero, and the game's request for it (SDL renews it every 3 s) does not win. The Steam layout must bind the
+gyro to something, for example Gyro Behavior "As Mouse" with an activation button the game does not use (a back
+button): the activation only decides when Steam itself moves the mouse, the game gets the gyro all the time, and a
+button the game needs would make Steam's mouse turn the camera on top of the game's own motion.
+
+This follows TotK Recomp's Steam Input motion support (patch by St5sz2Jk, upstream issue #1282); here it is issue #551.
+
 ## Scripted input
 
 `DKB_INPUT_SCRIPT=<file>` replays presses. It is ORed with real input and still applies under `DKB_INPUT=none`. One event per line, `#` starts a comment:
