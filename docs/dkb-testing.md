@@ -385,6 +385,7 @@ The Windows build picks DLSS on an NVIDIA GPU with `nvngx_dlss.dll` next to `dkb
 | 4 High | 2560x1440 | full | DLSS or FSR 3.1 | off | off | 10-12 GB VRAM, 8+ logical |
 | 5 Ultra | 3840x2160 | auto | DLSS or FSR 3.1 | off | auto | 12 GB+ VRAM, 32 GB RAM, 12+ logical |
 | `DKB_SHADOW_RATE=N` (`shadow_rate` in `dkb.ini`, default `0` = off; 2 to 60) | From evolis-game's low-spec fork. Renders each shadow map (a square depth-only pass of 1024 pixels or more) one frame in N and leaves it out in between, draws and clears included, so the map keeps its last content and shadows lag by up to N frames. Starts at frame 120; two phases by depth image so the maps do not all land on one frame. Passes left out are not sliced (`vk_exec.c` `resolve_rt`, `walk`, `par_try`). |
+| `DKB_CUBEMAP_RATE=N` (`cubemap_rate` in `dkb.ini`, default `0` = off; 2 to 60) | From evolis-game's low-spec fork. Renders the dynamic cubemap passes (128x128, six layers, with depth) one step in N and leaves them out in between, from frame 120; a step is 6 frames, so the faces of one refresh stay together. Reflections lag. Same mechanism as `DKB_SHADOW_RATE` (`vk_exec.c` `resolve_rt`). |
 
 Native anti-aliasing (update 3.2.0): `scene_res = full` with `upscaler = fsr3`, `fsr4` or `dlss` runs that upscaler at
 100% (input and output the same size), as FSR 3.1, FSR 4 and DLSS in DLAA mode, which anti-alias the 3D scene alone.

@@ -667,8 +667,9 @@ static void resolve_rt(VkExec *ex) {
     // Each depth image has its own phase (two, by address), so the maps do not all fall on one frame. Not before frame
     // 120, so every map is drawn once first. Left alone while a dump is armed, on the upload helper (it never makes
     // passes) and in a slice, which must agree with the pass the walk opened.
-    static int shadow_rate = -1;
+    static int shadow_rate = -1, cube_rate = -1;
     if (shadow_rate < 0) shadow_rate = cfg_int("DKB_SHADOW_RATE");
+    if (cube_rate < 0) cube_rate = cfg_int("DKB_CUBEMAP_RATE");
     int has_color = 0;
     for (int i = 0; i < n; i++)
         if (ex->color[i].image) { has_color = 1; break; }
@@ -678,6 +679,12 @@ static void resolve_rt(VkExec *ex) {
         if (shadow_rate > 1 && f >= 120 && !has_color && ex->pass_depth && ex->pass_w >= 1024 && ex->pass_w == ex->pass_h) {
             uint64_t slot = (((uintptr_t)ex->depth.image >> 6) + ex->depth.base_layer) & 1u;
             if (((f + slot) % (uint64_t)shadow_rate) != 0) ex->skip_shadow = 1;
+        } else if (cube_rate > 1 && f >= 120 && n == 1 && ex->color[0].image && ex->color[0].img &&
+                   ex->color[0].img->layers == 6 && ex->pass_w == 128 && ex->pass_h == 128 && ex->pass_depth) {
+            // DKB_CUBEMAP_RATE=N (also from evolis-game's low-spec fork): the same for the 128x128 passes that draw a
+            // dynamic cubemap's six faces, one frame in N (counted in steps of 6 frames, so the six faces of a
+            // refresh stay together).
+            if (((f / 6) % (uint64_t)cube_rate) != 0) ex->skip_shadow = 1;
         }
     }
 }

@@ -112,6 +112,8 @@
 # Render each shadow map one frame in N (2 to 60; 0 or 1 = every frame). The map keeps its last content in between, so
 # shadows lag by up to N frames. Applies from frame 120.
 # shadow_rate = 0
+# The same for the dynamic cubemap faces (reflections): rendered one frame in N of every 6 (2 to 60; 0 or 1 = every frame).
+# cubemap_rate = 0
 
 # Vulkan.
 # Vulkan validation layer: checks every call and slows the game down a lot. Needs the layer installed (Vulkan SDK).
