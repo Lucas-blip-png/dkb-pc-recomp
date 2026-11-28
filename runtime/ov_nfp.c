@@ -15,8 +15,9 @@
 // (".bin": 540 bytes, or 532 or 572) or a Flipper Zero NFC file (".nfc": a "Page N: xx xx xx xx" line per page). The
 // file is read each time the game starts looking for a tag, so the setting can change while the game runs. With the
 // tag at the reader from the start, the game finds it as soon as it looks, reads it, and the tag counts as lifted off
-// once the game unmounts it; the next time the game looks, it is tapped again. Unset, or with a file that is no
-// figure's tag, there is no NFC reader, as before: ListDevices reports no device and the game says so.
+// once the game unmounts it; the next time the game looks, it is tapped again. Unset, there is no NFC
+// reader, as before: ListDevices reports no device and the game says so. With a path set the game sees a reader
+// (reader_on); a file that is no figure's tag (tag_load logs why) leaves it searching until the player cancels.
 //
 // The file formats, the test for a figure's tag and the tag bytes ModelInfo is made from are Longshot's
 // (https://git.magicbean.dev/MagicBeanDev/Longshot @ 86b3b9e4f0e198a74d5ff7afa9bbf717096a9c39, host/nn_nfp.c,
@@ -86,6 +87,13 @@ static int tag_is_figure(const uint8_t t[TAG_BYTES]) {
     return !memcmp(t + 0x0c, cc, 4) && t[TAG_MODEL + 7] == 0x02;
 }
 
+static const char *base_name(const char *path) {
+    const char *base = path;
+    for (const char *p = path; *p; p++)
+        if (*p == '/' || *p == '\\') base = p + 1;
+    return base;
+}
+
 // Reads the tag file of DKB_AMIIBO into tag. 0 when the setting is empty or the file is not a figure's tag (logged
 // once per path).
 static int tag_load(void) {
@@ -110,15 +118,12 @@ static int tag_load(void) {
     if (!ok) {
         if (strncmp(warned, path, sizeof warned - 1)) {
             snprintf(warned, sizeof warned, "%s", path);
-            rt_log("nfp: amiibo = %s is not used: %s", path, why);
+            rt_log("nfp: amiibo = %s is not used: %s", base_name(path), why);
         }
         return 0;
     }
     memcpy(tag, t, sizeof tag);
-    const char *base = path;
-    for (const char *p = path; *p; p++)
-        if (*p == '/' || *p == '\\') base = p + 1;
-    snprintf(tag_name, sizeof tag_name, "%s", base);
+    snprintf(tag_name, sizeof tag_name, "%s", base_name(path));
     return 1;
 }
 
@@ -174,7 +179,8 @@ static int lib_entry(const char *name, int kind, uint64_t size, void *ctx) {
     // A .bin of a tag dump's size, or a .nfc text file: what tag_load can take (installer/amiibo.py is_tag_file)
     int what = kind == PLAT_FS_FILE ? tag_kind(name) : 0;
     int sized = what == 'b' ? size == 540 || size == 532 || size == 572 : size > 0 && size <= 65536;
-    if (!what || !sized || nlib == LIB_MAX) return 1;
+    // ponytail: at most 4096 files, the rest of a huge tree is not listed; raise it if a library needs more
+    if (!what || !sized || nlib >= 4096) return 1;
     int n = (int)strlen(name) - 4;
     char path[2048];
     snprintf(path, sizeof path, "%s/%s%s%s", lib_root, w->rel, *w->rel ? "/" : "", name);
@@ -219,8 +225,9 @@ int ov_nfp_folders(const char **out, int max) {
     return n;
 }
 
+// No lib_scan() here: ov_nfp_folders (called first by the menu's rows_amiibo) refreshes the list, and a second scan
+// could free the folder name the caller still holds.
 int ov_nfp_tags(const char *folder, const char **paths, const char **names, int max) {
-    lib_scan();
     int n = 0;
     for (int i = 0; i < nlib && n < max; i++)
         if (!strcmp(lib[i].dir, folder)) paths[n] = lib[i].path, names[n] = lib[i].name, n++;
@@ -326,8 +333,12 @@ static void ov_nfp_start(Cpu *c) {
 static void ov_nfp_stop(Cpu *c) {
     if (!handle_ok(c, 0)) return ret_x(c, NFP_R_DEVICE_NOT_FOUND);
     plat_mutex_lock(&nfp_lock);
+    // Leaving a found or mounted tag signals the deactivate event, as Eglantine's NfcDevice::StopDetection does by
+    // closing the tag (CloseNfcTag)
+    uint64_t ev = dev_state == ST_FOUND || dev_state == ST_MOUNTED ? ev_deactivate : 0;
     dev_state = ST_INIT;
     plat_mutex_unlock(&nfp_lock);
+    if (ev) kern_signal_system_event(ev);
     ret_x(c, 0);
 }
 
@@ -359,7 +370,8 @@ static void ov_nfp_unmount(Cpu *c) {
 // ModelInfo (0x40) is {characterId[3], seriesId, numberingId (u16), nfpType}: the tag has the type before the number
 // and the series after it, and the number big-endian. With the bytes in the tag's order Bananza took the Donkey Kong
 // and Pauline figure (series 0x1a) for one of an earlier series: it gave the KONG tiles but played the other figures'
-// voice line.
+// voice line. This byte order departs from Eglantine's nfp_types.h ModelInfo (type at byte 3, series at byte 6) on
+// purpose: it matches the in-game result and libnx's NfpModelInfo.
 static void model_fill(uint8_t m[0x40], const uint8_t *t) {
     memset(m, 0, 0x40);
     memcpy(m, t + TAG_MODEL, 3);                         // characterId[3]: the character and its variant

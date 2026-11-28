@@ -385,6 +385,8 @@
 # amiibo =
 # The folder the Amiibo tab lists tag files from. Default: the amiibo folder next to dkb.exe.
 # amiibo_dir =
+# The subfolder of the amiibo folder the Amiibo tab shows. The menu writes it. Default: the top folder.
+# amiibo_folder =
 
 [diagnostics]
 # Experimental Switch 2 reads of up to 4 KiB without waiting; requires replay_async = 1. Opt-in only: its background

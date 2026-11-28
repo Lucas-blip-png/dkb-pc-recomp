@@ -1,4 +1,4 @@
-// --probe-services: every override of ov_system.c, ov_input.c, ov_media.c, swkbd.c and
+// --probe-services: every override of ov_system.c, ov_input.c, ov_media.c, ov_nfp.c, swkbd.c and
 // ov_gfx.c called the way guest code calls it: by its synthetic address through rt_call / rt_dispatch, with AAPCS64
 // arguments, on the guest main thread. Checks that each one matches a relocation of the loaded modules, then the
 // values: language, operation mode, notification messages, account, time round trips, controllers, codec state,
@@ -357,6 +357,7 @@ static void probe_applet(void) {
     CHECK(CALL("prepo.RequestImmediateTransmission", 0) == 0, "RequestImmediateTransmission");
     CHECK(CALL("prepo.AddInternetConnectionStatus", U(report), U("a"), U("b"), U("c")) == 0,
           "AddInternetConnectionStatus");
+    cfg_set("DKB_AMIIBO", "");   // an amiibo set in dkb.ini would give the reader a device (ov_nfp.c reader_on)
     CHECK(CALL("nfp.Initialize", 0) == 0 && (uint32_t)CALL("nfp.GetState", 0) == 1, "nfp initialize");
     uint8_t handles[64];
     int32_t count = 7;

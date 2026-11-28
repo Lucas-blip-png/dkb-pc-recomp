@@ -19,7 +19,8 @@ Requested in [#508](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/508).
 3. In the game, use the pause menu's amiibo option, or talk to a character who asks for one. The figure is found as
    soon as the game looks, is read, and counts as lifted off again; the next time the game looks, it is scanned again.
 
-With **None** chosen (the default) the game is told there is no NFC reader, as before.
+With **None** chosen (the default) the game is told there is no NFC reader, as before. With a file chosen the game
+always sees a reader; if the file is no figure's tag (the log says why), the game searches until the player cancels.
 
 The menu's Amiibo tab, and the row of the setup program:
 

@@ -921,7 +921,7 @@ static void tab_graphics(float scale, const MenuTarget &target) {
 // The amiibo at the game's NFC reader (ov_nfp.c): a folder of the player's tag files, then a file of it.
 static void rows_amiibo(void) {
     enum { MAXF = 512, MAXT = 1024 };
-    static const char *folders[MAXF + 1], *fnames[MAXF + 1], *paths[MAXT + 1], *names[MAXT + 1];
+    static const char *folders[MAXF + 1], *fnames[MAXF + 1], *paths[MAXT + 2], *names[MAXT + 2];   // +1 for "None", +1 for a file of another folder
     int nf = ov_nfp_folders(folders, MAXF);
     if (!nf) opt_text(UI_MENU_AMIIBO_EMPTY);
     // The folder the files are looked for in, made on the way: the player drops tag files into it
@@ -936,13 +936,15 @@ static void rows_amiibo(void) {
         open_folder(ov_nfp_dir());
     }
     if (!nf) return;
-    const char *folder = cfg_value("DKB_AMIIBO_FOLDER");
+    char folder_buf[1024];   // a copy: the list ov_nfp_folders returned is rebuilt by the next library scan
+    snprintf(folder_buf, sizeof folder_buf, "%s", cfg_value("DKB_AMIIBO_FOLDER"));
+    const char *folder = folder_buf;
     int cur = -1;
     for (int i = 0; i < nf; i++) {
         fnames[i] = *folders[i] ? folders[i] : menu_text(UI_MENU_AMIIBO_TOP);
         if (!strcmp(folders[i], folder)) cur = i;
     }
-    if (cur < 0) cur = 0, folder = folders[0];   // the folder went, or none was chosen yet: the first one
+    if (cur < 0) cur = 0, snprintf(folder_buf, sizeof folder_buf, "%s", folders[0]);   // the folder went, or none was chosen yet: the first one
     // "" writes the key unset, which stands for the top folder; the others are written as they are
     if (nf > 1) opt_choice_list("DKB_AMIIBO_FOLDER", UI_MENU_AMIIBO_FOLDER, folders, fnames, nf, UI_MENU_AMIIBO_FOLDER_DESC, cur);
     paths[0] = "", names[0] = menu_text(UI_MENU_AMIIBO_NONE);
