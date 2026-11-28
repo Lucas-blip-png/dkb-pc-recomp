@@ -25,12 +25,19 @@ As far as we know, no other static recompilation of a Switch 2 game is public.
 ## Status
 
 **Playable on recent NVIDIA cards, well past the first level.** Players report runs through layer -101, sublayer 200,
-the Glacier layer, Snow World (Layer 500), the Resort and the Tempest layer. The current release is 0.5.2
-(24 November): the TOTK to DKB rename of settings and files, the Feast Layer black shards (#439), 4 GB cards (#437)
-and Switch 2 controllers on USB. The [latest release](https://github.com/Lucas-blip-png/dkb-pc-recomp/releases/latest) carries
+the Glacier layer, Snow World (Layer 500), the Resort and the Tempest layer. The current release is 0.5.3
+(28 November): amiibo from your own tag files, selectable button prompts and a Player 2 controller, NVIDIA DLSS
+Frame Generation, Chinese, fewer shader stalls and an opt-in low-spec profile. The [latest release](https://github.com/Lucas-blip-png/dkb-pc-recomp/releases/latest) carries
 `DKB-Launcher.exe`, one small Windows file that installs the build tools, builds the game from your own dump (`.nup`,
 `.nx` or folders) and updates in place with one click. It also has the setup zip, a Linux AppImage, and a
 macOS preview: [docs/installer.md](docs/installer.md).
+
+New in 0.5.3:
+- Amiibo from your own tag dumps (F1 > Amiibo, #567), button prompt style and Player 2 controller rows (#569),
+  `frame_gen_by = dlss` on RTX 40 or newer (#561), Simplified Chinese (#553, #554) and gyro under Steam Input (#551).
+- Shader pipelines precompiled before start (#564), many replay speed-ups (#529 to #544) and ten guest registers in C locals.
+- `preset = lowspec` and its opt-in settings for integrated GPUs, ported from evolis-game's low-spec fork
+  ([docs/dkb-lowend.md](docs/dkb-lowend.md)).
 
 New in 0.5.2:
 - Settings are `DKB_*` and files `dkb.*`; `TOTK_*` variables are ignored, and `totk.ini` is copied to `dkb.ini` once.
