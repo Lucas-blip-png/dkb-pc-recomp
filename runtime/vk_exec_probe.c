@@ -914,6 +914,9 @@ static int test_mirror(const GfxBackend *b, uint8_t *guest, int *bytes) {
 
 int probe_vkexec(void) {
     vk_hdr_off();   // the present checks read 8-bit swapchain pixels
+    // The probe submits streams it built itself, not recording copies: nvn_handle_ubo_list would read a copy_prefix in
+    // front of them that is not there (#578, an access violation in vk_usnap_begin). The uniform snapshot walks them.
+    cfg_set("DKB_USNAP_LIST", "0");
     layouts_equal = 0;
     main_tid = plat_thread_id();
     const GfxBackend *b = &gfx_vulkan_backend;
@@ -926,7 +929,11 @@ int probe_vkexec(void) {
     int sync_bad = bad;
     if (!bad) bad = test_clear(b, guest, &inside);
     int draw_bad = 0, drawn = 0, tries = 0, dispatched = 0;
-    if (!bad) bad = draw_bad = vk_pipeline_selftest() || test_draw(b, guest, &drawn, &tries, &dispatched);
+    // The draw part needs the shader census (tools/shader_census.py): without it the part is skipped and the parts
+    // after it still run (#578), as a machine without the census could otherwise never test them.
+    char census[PLAT_PATH_MAX * 2];
+    int draw_skip = !probe_census_dir(census, sizeof census);
+    if (!bad && !draw_skip) bad = draw_bad = vk_pipeline_selftest() || test_draw(b, guest, &drawn, &tries, &dispatched);
     if (!bad) bad = test_xfer(b, guest, &xfer_bytes);
     int zero_bytes = 0;
     if (!bad) bad = test_c0() || test_zero(b, guest, &zero_bytes);
@@ -951,9 +958,13 @@ int probe_vkexec(void) {
     printf("probe-vkexec: clear part passed (RGBA8 + D32 %dx%d: image clears outside a pass, scissored attachment "
            "clears in a pass on %d texels, read back exact, 0 validation errors)\n",
            TEX_W, TEX_H, inside);
-    printf("probe-vkexec: draw part passed (pipeline self-test; one triangle of census pair %d changed %d of %d texels of the "
-           "cleared RGBA8 target; %d census compute shaders dispatched; 0 validation errors)\n",
-           tries, drawn, TEX_W * TEX_H, dispatched);
+    if (draw_skip)
+        printf("probe-vkexec: draw part skipped (no build/v%d/shaders/jobs.json above the exe: run tools/shader_census.py)\n",
+               rt_game_version);
+    else
+        printf("probe-vkexec: draw part passed (pipeline self-test; one triangle of census pair %d changed %d of %d texels "
+               "of the cleared RGBA8 target; %d census compute shaders dispatched; 0 validation errors)\n",
+               tries, drawn, TEX_W * TEX_H, dispatched);
     if (layouts_equal)
         printf("probe-vkexec: layout part passed (the same draw through independent sets 0 and 1 and the shared set 0: "
                "%d of %d texels equal)\n", layouts_equal, TEX_W * TEX_H);
