@@ -905,7 +905,7 @@ static int test_mirror(const GfxBackend *b, uint8_t *guest, int *bytes) {
     CHECK(m[0x8800] == 0x77, "a CPU write stamped before the update's fence did not reach the mirror (%02x)", m[0x8800]);
     CHECK(m[0x8900] == 0x99, "the page copied in after the CPU write lacks the guest byte (%02x)", m[0x8900]);
     b->pool_fini(&pool);
-    *bytes = 4096 + 0x1000 + 4096 + 0x1000 + 257 + 258;
+    *bytes = 4096 + 0x1000 + 4096 + 0x1000 + 257 + 258 + (in_shadow > 0 ? 4096 : 0);
     return 0;
 }
 

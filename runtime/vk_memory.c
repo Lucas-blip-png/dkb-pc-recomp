@@ -1760,7 +1760,7 @@ static uint64_t page_hi(const PoolRec *r) { return (r->lo + r->size + 0xfff) & ~
 // DKB_SHADOW=1/0 forces the mode on or off; the default is on for Linux except NVIDIA's proprietary driver (mirror_mode), off where importing is cheap (Windows, and
 // MoltenVK, which imports host memory without Linux's write-watch and page re-protection).
 typedef struct { uint64_t lo, hi, sync; } SRange;   // sync: s_syncs_done when the write was noted
-static PlatMutex shadow_lock = PLAT_MUTEX_INIT;   // after pool_lock; before gen_lock
+static PlatMutex shadow_lock = PLAT_MUTEX_INIT;   // after pool_lock, mirror_lock and a pool's sync_lock; before gen_lock
 static PoolRec **stouch;                          // shadow_lock: pools marked (shadow_touch) since the last sync
 static int nstouch, cstouch;
 static SRange *spend;                             // shadow_lock: GPU writes recorded and not copied back yet, in order
@@ -1844,7 +1844,8 @@ static int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size, Impor
     return 1;
 }
 
-// Marks the pool for the next shadow sync. Callers: the resolve paths (resolve_locked with pool_lock held shared),
+// Marks the pool for the next shadow sync. Callers: the resolve paths (resolve_locked with pool_lock held shared, and
+// the fast path of vk_mem_resolve with no lock held),
 // mirror_sync (with the pool's sync_lock) and mirror_create (with mirror_lock); nothing takes any of those locks with
 // shadow_lock held.
 static void shadow_touch(PoolRec *r) {
