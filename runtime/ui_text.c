@@ -114,6 +114,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                   "a frame they cannot make gets the built-in one.",
     [UI_MENU_FRAME_GEN_BUILTIN] = "Built-in", [UI_MENU_FRAME_GEN_FSR3] = "AMD FSR 3.1",
     [UI_MENU_FRAME_GEN_DLSS] = "NVIDIA DLSS",
+    [UI_MENU_SUPPORT] = "支持本项目：ko-fi.com/lucasblippng",
     [UI_MENU_FRAME_GEN_BY_NEEDS] = "needs DLSS, FSR 3.1 or FSR 4 with the 3D below the output size",
     [UI_MENU_MIRROR_BUDGET] = "Mirror memory limit",
     [UI_MENU_MIRROR_BUDGET_DESC] = "A ceiling on the video memory the copies of game memory (GPU memory mode: Mirror) take together, so that they leave room for textures on a small card. "
@@ -591,6 +592,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
                                   "кадр, который они не могут сделать, получается встроенным способом.",
     [UI_MENU_FRAME_GEN_BUILTIN] = "Встроенный", [UI_MENU_FRAME_GEN_FSR3] = "AMD FSR 3.1",
     [UI_MENU_FRAME_GEN_DLSS] = "NVIDIA DLSS",
+    [UI_MENU_SUPPORT] = "支持本项目：ko-fi.com/lucasblippng",
     [UI_MENU_FRAME_GEN_BY_NEEDS] = "нужен DLSS, FSR 3.1 или FSR 4 и 3D ниже выходного разрешения",
     [UI_MENU_MIRROR_BUDGET] = "Предел памяти зеркал",
     [UI_MENU_MIRROR_BUDGET_DESC] = "Ограничивает видеопамять, которую занимают все копии памяти игры (режим памяти GPU «Зеркало»), чтобы на небольшой видеокарте осталось место для текстур. "
@@ -1614,6 +1616,7 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_PAD_PROMPTS_PLAYSTATION] = "PlayStation",
     [UI_MENU_PAD_PROMPTS_XBOX] = "Xbox",
     [UI_MENU_FRAME_GEN_DLSS] = "NVIDIA DLSS",
+    [UI_MENU_SUPPORT] = "支持本项目：ko-fi.com/lucasblippng",
 };
 
 #define SWKBD_ONLY(name, ...) static const char *const name[UI_TEXT_COUNT] = {SWKBD(__VA_ARGS__)}

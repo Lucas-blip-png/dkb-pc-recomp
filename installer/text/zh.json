@@ -87,6 +87,7 @@
  "warn.low_commit_limit": "Windows 最多只能提交 {commit} GB 内存（物理内存加分页文件），而游戏在系统和其它程序占用之外还需要约 14 GB；低于 {need} GB 时可能卡死或崩溃。解决办法是加大页面文件：设置 → 系统 → 关于 → 高级系统设置 → 高级 → 性能设置 → 高级 → 虚拟内存 → 更改，然后选择自定义大小或让 Windows 自动管理，并重启。",
  "warn.kernel_old": "Linux {version} 缺少游戏依赖的写入跟踪（需要 6.7 或更高版本）；游戏可能运行得非常慢。更新系统即可解决。",
  "ui.title": "王国之泪 安装程序",
+ "ui.support": "支持本项目（Ko-fi）",
  "ui.version": "版本 {version}",
  "ui.update_available": "有新版本 {tag}。点击打开其页面。",
  "warn.update_available": "有新版本 {tag}：{url}",
