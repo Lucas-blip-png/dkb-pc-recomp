@@ -137,6 +137,8 @@ int vk_exec_reset_indirect(VkExec *ex, uint64_t list_addr, uint32_t descriptor_b
 void vk_exec_pass_begin(VkExec *ex);
 // Ends the open pass (no-op without one) and marks its targets GPU-written. Call before copies and dispatches.
 void vk_exec_pass_end(VkExec *ex);
+// Resolves ex->rt to color[] and depth when not yet resolved for the current pass (smaa_bypass_draw reads color[0]).
+void vk_exec_resolve_targets(VkExec *ex);
 // Full memory barrier (all commands, all memory); ends the open pass first. Copies and dispatches order themselves with
 // it. Skipped when nothing was recorded since the last one.
 void vk_exec_barrier(VkExec *ex);

@@ -287,3 +287,4 @@ frame time, so turn them on one at a time and compare.
 | --- | --- |
 | `shadow_rate = N` (2 to 60) | Renders each shadow map one frame in N. Shadows lag by up to N frames; the fork ran 8 on an integrated GPU. |
 | `cubemap_rate = N` (2 to 60) | Renders the dynamic cubemap faces (reflections) one step in N of 6 frames. The fork ran 6. |
+| `smaa_bypass = 1` | Replaces the game's SMAA passes with a copy of their input: no anti-aliasing from the game, three fewer full-screen passes. |

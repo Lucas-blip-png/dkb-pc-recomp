@@ -689,6 +689,8 @@ static void resolve_rt(VkExec *ex) {
     }
 }
 
+void vk_exec_resolve_targets(VkExec *ex) { resolve_rt(ex); }
+
 // The attachment view of a target. A registered texture's view lives as long as its image (vk_exec_target_view); any
 // other image's view is made for this command buffer and freed at its fence.
 static VkImageView view_of(VkExec *ex, const VkExecTarget *t) {

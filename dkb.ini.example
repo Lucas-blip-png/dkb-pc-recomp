@@ -114,6 +114,8 @@
 # shadow_rate = 0
 # The same for the dynamic cubemap faces (reflections): rendered one frame in N of every 6 (2 to 60; 0 or 1 = every frame).
 # cubemap_rate = 0
+# Replace the game's own SMAA passes (edge detection, blend weights, blend) with a copy of its input, 0 or 1.
+# smaa_bypass = 0
 
 # Vulkan.
 # Vulkan validation layer: checks every call and slows the game down a lot. Needs the layer installed (Vulkan SDK).

@@ -5346,10 +5346,73 @@ static int indirect_reset_draw(VkExec *ex, const p_draw *d) {
     return 1;
 }
 
+static int blit_ok(VkFormat f, int dst);
+
+// DKB_SMAA_BYPASS=1 (from evolis-game's low-spec fork): the game's SMAA edge-detect and blend-weight draws (fragment
+// shaders 3c050d9686cf358a and 5ea510329f353dba, by NVN 2 origin) are dropped and the neighbourhood-blend draw
+// (1daec4428216177b) becomes a copy, or a linear blit when the sizes or formats differ, of its texture 0 into colour
+// target 0. Returns 1 when the draw was handled or dropped, 0 to draw it as usual (also when the copy cannot be made).
+// On a helper thread the part is given up: the replay thread records the copy.
+static int smaa_bypass_draw(VkExec *ex, uint64_t fs_origin) {
+    if (fs_origin == 0x3c050d9686cf358aull || fs_origin == 0x5ea510329f353dbaull) return 1;
+    if (fs_origin != 0x1daec4428216177bull) return 0;
+    DrawCtx *const dc = DC_OF(ex);
+    if (IS_HELPER(dc)) { vk_spec_fail(VK_SPEC_WRITE); return 1; }
+    uint64_t hs = ex->tex[NVN_STAGE_FS][0];
+    if (!hs) return 0;
+    vk_exec_resolve_targets(ex);
+    VkExecTarget *t = &ex->color[0];
+    if (!t->image || !t->img || t->is3d || t->blocks || t->samples > 1) return 0;
+    view_t vs;
+    int hvs = 0;
+    const VkTexImage *s = vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(hs), &vs, &hvs);
+    if (!s || s->samples > 1 || s->type != VK_IMAGE_TYPE_2D) return 0;
+    if (!(s->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || !(t->img->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return 0;
+    int same = s->format == t->format && s->width == t->width && s->height == t->height;
+    if (!same && (!blit_ok(s->format, 0) || !blit_ok(t->format, 1))) return 0;
+    vk_exec_barrier(ex);   // ends the open pass and orders the copy after what wrote the source
+    static int logged;
+    if (!logged++)
+        rt_log("vk_exec: SMAA bypassed (%s %ux%u fmt %d -> %ux%u fmt %d)", same ? "copy" : "blit", s->width, s->height,
+               (int)s->format, t->width, t->height, (int)t->format);
+    if (s->image != t->image) {
+        if (same) {
+            VkImageCopy cp = {
+                .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, t->level, t->base_layer, 1},
+                .extent = {t->width, t->height, 1},
+            };
+            vkCmdCopyImage(ex->cb, s->image, VK_IMAGE_LAYOUT_GENERAL, t->image, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+        } else {
+            VkImageBlit bl = {
+                .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, t->level, t->base_layer, 1},
+            };
+            bl.srcOffsets[1] = (VkOffset3D){(int32_t)s->width, (int32_t)s->height, 1};
+            bl.dstOffsets[1] = (VkOffset3D){(int32_t)t->width, (int32_t)t->height, 1};
+            vkCmdBlitImage(ex->cb, s->image, VK_IMAGE_LAYOUT_GENERAL, t->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
+                           VK_FILTER_LINEAR);
+        }
+        ex->recorded++;
+    }
+    if (t->tex) vk_texture_gpu_written(t->tex);
+    vk_exec_barrier(ex);
+    return 1;
+}
+
+static int post_fx_skip(VkExec *ex) {
+    static int smaa = -1;
+    if (smaa < 0) smaa = cfg_int("DKB_SMAA_BYPASS") > 0;
+    if (!smaa || !ex->prog) return 0;
+    uint64_t fso = stage_origin(DC_OF(ex), ex->prog, NVN_STAGE_FS);
+    return fso && smaa_bypass_draw(ex, fso);
+}
+
 static void op_draw(VkExec *ex, const p_draw *d) {
     DrawCtx *const dc = DC_OF(ex);
     dc->c0_binst = (uint32_t)d->base_instance;
     if (indirect_reset_draw(ex, d)) return;
+    if (post_fx_skip(ex)) return;
     if (d->count <= 0 || !prepare_draw(ex, d->prim, d->count, 0)) return;
     dc->frame->draws++;
     merge_note(ex, 0, d->prim, d->count, d->first, 0, 0, d->instances, d->base_instance);
@@ -5429,6 +5492,7 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
     static const uint32_t isize[3] = {1, 2, 4};
     if (d->itype < 0 || d->itype > 2) return warn_once(W_INDEX, "index type %d is unknown: draw skipped", d->itype);
     int restart = restart_for(ex, d->prim, d->itype);
+    if (post_fx_skip(ex)) return;
     if (d->count <= 0 || !prepare_draw(ex, d->prim, d->count, restart)) return;
     dc->frame->draws++;
     uint64_t bytes = (uint64_t)d->count * isize[d->itype];
