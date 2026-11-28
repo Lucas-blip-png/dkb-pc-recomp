@@ -422,8 +422,9 @@ uint32_t input_pad_choose(InputPadSelection *s, const InputPadDevice *devices, i
         for (int i = 0; i < count; i++) {
             int known = 0;
             for (int j = 0; j < s->count; j++) if (devices[i].id == s->ids[j]) known = 1;
-            if (!known && !keep_current && devices[i].id != reserved) {
-                // If several devices arrive in one poll, the last enumerated arrival wins.
+            if (!known && devices[i].id != reserved && (!keep_current || !strcmp(devices[i].key, preferred))) {
+                // If several devices arrive in one poll, the last enumerated arrival wins. In co-op the current pad
+                // stays, except for the configured one: it takes Player 1 back when it connects.
                 s->pending = devices[i].id;
                 s->automatic = 1;
             }

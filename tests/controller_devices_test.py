@@ -22,7 +22,8 @@ def main():
     (out / 'controller_devices_under_test.inc').write_text(block, encoding='utf-8')
     for opt in ('-O0', '-O2'):
         exe = out / f'controller-devices-{opt[1:]}.exe'
-        subprocess.run([args.cc, '-std=gnu11', opt, '-Wall', '-Wextra', '-Werror',
+        # the block also holds functions the fixture does not call (open_pad1_locked): unused ones are no error
+        subprocess.run([args.cc, '-std=gnu11', opt, '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                         '-I', str(ROOT / 'runtime'), '-I', str(out),
                         str(ROOT / 'tests/controller_devices_test.c'), '-o', str(exe)], check=True)
         subprocess.run([str(exe)], check=True)
