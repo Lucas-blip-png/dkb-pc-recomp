@@ -44,8 +44,10 @@
 #endif
 
 #define LANGID_RUSSIAN 0x19
+#define LANGID_CHINESE 0x04
 
 int russian;
+int chinese;
 
 void fill(wchar_t *out, size_t cap, const wchar_t *tmpl, const wchar_t *const *pairs)
 {
@@ -195,7 +197,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE previous, LPWSTR args, int show)
 {
     wchar_t exe[PATH_CHARS], folder[PATH_CHARS];
     (void)inst, (void)previous, (void)show;
-    russian = (GetUserDefaultUILanguage() & 0x3ff) == LANGID_RUSSIAN;
+    LANGID display = GetUserDefaultUILanguage();
+    russian = (display & 0x3ff) == LANGID_RUSSIAN;
+    chinese = (display & 0x3ff) == LANGID_CHINESE;
     if (!args) args = L"";
     DWORD n = GetModuleFileNameW(NULL, exe, PATH_CHARS);
     if (n == 0 || n >= PATH_CHARS) { ask(NULL, T(PYTHON_MISSING), MB_OK | MB_ICONERROR); return 1; }

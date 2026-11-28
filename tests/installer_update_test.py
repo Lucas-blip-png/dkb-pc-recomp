@@ -978,7 +978,7 @@ class ReleaseToolTest(unittest.TestCase):
         self.m.launcher_header(out, 'dkb')
         text = out.read_text(encoding='ascii')
         for key in self.m.LAUNCHER_TEXT:
-            for lang in ('EN', 'RU'):
+            for lang in ('EN', 'RU', 'ZH'):
                 self.assertIn(f'#define LAUNCHER_{key.upper()}_{lang} L"', text)
         self.assertIn(f'#define LAUNCHER_REPO L"{update.REPO}"', text)
         self.assertNotIn('\\u000a', text)   # C allows no universal character name for a newline

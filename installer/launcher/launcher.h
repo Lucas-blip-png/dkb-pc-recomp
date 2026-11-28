@@ -11,7 +11,8 @@
 #define TEXT_CHARS 2048
 
 extern int russian;
-#define T(id) (russian ? LAUNCHER_##id##_RU : LAUNCHER_##id##_EN)
+extern int chinese;
+#define T(id) (chinese ? LAUNCHER_##id##_ZH : russian ? LAUNCHER_##id##_RU : LAUNCHER_##id##_EN)
 
 /* tmpl with each {name} replaced by its value (pairs: name, value, ..., NULL); other text is copied as it is */
 void fill(wchar_t *out, size_t cap, const wchar_t *tmpl, const wchar_t *const *pairs);

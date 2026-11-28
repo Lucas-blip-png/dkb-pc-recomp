@@ -2,10 +2,10 @@
 
 A front end over the CLI (docs/installer.md): it collects the game files, the keys file path, the game language and the
 install folder, runs `python -m installer ...` as a subprocess and shows its JSON events. Decisions live in guilogic.py;
-this file only draws. The window text is in installer/text/<en|ru>.json under "ui.*" and "launcher.*" ids.
+this file only draws. The window text is in installer/text/<en|ru|zh>.json under "ui.*" and "launcher.*" ids.
 
-    --selftest [--shots DIR]   build every screen in both languages and close by itself (PNG per screen with --shots)
-    --lang en|ru               window language (default: the Windows display language)
+    --selftest [--shots DIR]   build every screen in each language and close by itself (PNG per screen with --shots)
+    --lang en|ru|zh            window language (default: the Windows display language)
 
 Started by the launcher (installer/launcher/launcher.c: --base <DKB-Recomp> --launcher <exe>) the window also has a
 home screen: Play, the release check at start (off with the screen's tick box, --no-update-check or
@@ -198,6 +198,8 @@ class App:
             root.iconphoto(True, self.icon)
         root.protocol('WM_DELETE_WINDOW', self.on_close)
         self.ui_font = 'Segoe UI' if os.name == 'nt' else 'DejaVu Sans'
+        if self.cat.lang == 'zh' and os.name == 'nt':   # Segoe UI draws Chinese through a fallback Tk cannot
+            self.ui_font = 'Microsoft YaHei UI'
         self.mono_font = 'Consolas' if os.name == 'nt' else 'DejaVu Sans Mono'
         apply_theme(root, self.ui_font)
 
@@ -217,9 +219,10 @@ class App:
         sw = ttk.Frame(top, style='Header.TFrame')
         sw.pack(side='right')
         self.ui_var = tk.StringVar(value=self.cat.lang)
+        labels = {'zh': '中文'}   # the codes are Latin; Chinese reads better as itself
         for code in UI_LANGUAGES:
-            ttk.Radiobutton(sw, text=code.upper(), value=code, variable=self.ui_var, style='Toolbutton',
-                            command=self.switch_language).pack(side='left', padx=1)
+            ttk.Radiobutton(sw, text=labels.get(code, code.upper()), value=code, variable=self.ui_var,
+                            style='Toolbutton', command=self.switch_language).pack(side='left', padx=1)
         tk.Frame(root, height=4, bg=RED).pack(fill='x')   # the DK tie's red under the strip
         self.body = ttk.Frame(root, padding=PAD)
         self.body.pack(fill='both', expand=True)
@@ -1196,7 +1199,7 @@ def grab(root, path):
 
 
 def selftest(layout, shots=None, game='totk'):
-    """Every screen in both languages; the window closes itself. Returns 0 when nothing raised."""
+    """Every screen in every language; the window closes itself. Returns 0 when nothing raised."""
     fix_tcl_paths()
     fix_dpi_awareness()
     root = tk.Tk()
