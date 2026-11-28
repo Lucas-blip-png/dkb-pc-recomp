@@ -349,7 +349,7 @@ and skips the wide overlay. Invalid sizes fall back to the original 2880x1620 di
 `scene_res` (`DKB_SCENE_RES`, `auto|full`, read at start, F1 "3D scene resolution") controls the size of the 3D scene.
 `auto` keeps the game's own dynamic resolution, which settles at a ratio of 1.5 under emulation, so the scene is
 two thirds of the render resolution on each side (1280x720 at 1920x1080) and is then upscaled. `full` (or a ratio from
-1.0 to 3.0) patches the controller (main 3c12b4 on 1.0.0) to store that ratio: the scene is drawn at the whole render
+1.0 to 4.0) patches the controller (main 3c12b4 on 1.0.0) to store that ratio: the scene is drawn at the whole render
 resolution (more GPU cost, the render-target pool grows by (1.5/ratio)^2) and the game's upscaler, and so DLSS, is not
 dispatched. `dkb.log` says `Bananza resolution: 3D scene ratio ...`.
 On update 3.2.0 the game also makes each display's 3D image two thirds of the display (a scale in its render

@@ -182,6 +182,7 @@
 # 1280x800, 1680x1050, 1920x1200 and 2560x1600 (16:10). Any other size
 # gets the camera's view but a 16:9 HUD, stretched over the picture, unless you build its layout with
 # tools/make_romfs_patches.py --aspect WxH. Read at start.
+# Sizes from 640x360 (from evolis-game's low-spec fork) to 7680x4320 are accepted on Bananza.
 # output_res = 1920x1080
 # 3D render scale: the scene's size relative to the game resolution, game (5/6, the game's own 1600x900 at 1080p) or
 # a percentage (25 to 400, at most 4096 pixels a side); above 100 supersamples the scene (anti-aliasing). Read at start.
@@ -211,7 +212,7 @@
 # window_filter = fsr1
 # Bananza only: auto keeps the game's dynamic 3D resolution (usually two thirds of output_res on each side), full draws
 # the 3D scene at output_res (sharper, more GPU cost; no upscaler then, except that on update 3.2.0 upscaler = fsr3,
-# fsr4 or dlss runs at that size as native anti-aliasing, docs/dkb-testing.md), a ratio from 1.0 to 3.0 draws it at
+# fsr4 or dlss runs at that size as native anti-aliasing, docs/dkb-testing.md), a ratio from 1.0 to 4.0 draws it at
 # output_res divided by that ratio and upscales it to output_res (1.5 with upscaler = dlss: DLSS Quality at output_res).
 # Read at start.
 # scene_res = auto

@@ -290,3 +290,4 @@ frame time, so turn them on one at a time and compare.
 | `smaa_bypass = 1` | Replaces the game's SMAA passes with a copy of their input: no anti-aliasing from the game, three fewer full-screen passes. |
 | `tex_uma_host = 1` (or 2) | On an integrated GPU, new textures go to the host heap when video memory is above 74% of its budget (50% for compressed ones), falling back to device memory on failure. Ignored on a discrete GPU. |
 | `tex_frame_epoch = 1` | Checks an uploaded texture for guest writes once per frame, not once per submit. A texture the game rewrites mid-frame shows the change a frame late. |
+| `output_res = 640x360` and up, `scene_res` up to 4.0 | Bananza now accepts output sizes from 640x360 and a scene ratio up to 4.0 (the scene drawn at a quarter of the output on each side), for very weak GPUs (`runtime/dkb_wide.c` `dkb_output_size`, `dkb_scene_ratio`). Both ranges only widen what was accepted. |
