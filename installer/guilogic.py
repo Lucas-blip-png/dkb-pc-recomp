@@ -365,20 +365,23 @@ def translate_command(dest):
     return [str(Path(dest) / GAME_EXE), '--translate-shaders']
 
 
-def needs_legacy_warm(dest):
-    """For an older dkb.exe without --warm-shaders-if-needed: True if lib-warm.progress remains or setup recorded
-    dkb_shaders.libraries = False."""
-    p = Path(dest)
-    if not (p / 'shader-prepared.bin').is_file():
-        return False
-    if (p / 'lib-warm.progress').is_file():
-        return True
+def libraries_failed(dest):
+    """True when setup recorded dkb_shaders.libraries = False (installer/bananza.py Shaders.run): the driver crashed
+    building the pipeline libraries, so the automatic warm is not retried. The record holds no driver information, so a
+    changed GPU or driver does not clear it; the player runs --warm-shaders by hand then."""
     try:
-        state = statefile.load(p, 'dkb-install.json')
+        state = statefile.load(Path(dest), 'dkb-install.json')
     except statefile.StateError:
         return False
     record = (state or {}).get('steps', {}).get('dkb_shaders')
     return isinstance(record, dict) and record.get('libraries') is False
+
+
+def needs_legacy_warm(dest):
+    """For an older dkb.exe without --warm-shaders-if-needed: True if lib-warm.progress remains (an interrupted warm)
+    and setup did not record dkb_shaders.libraries = False."""
+    p = Path(dest)
+    return (p / 'shader-prepared.bin').is_file() and (p / 'lib-warm.progress').is_file() and not libraries_failed(p)
 
 
 def can_translate_shaders(dest, layout):
@@ -517,7 +520,11 @@ def _translate_and_warm(dest, layout, on_phase, on_progress, cancelled):
                                      cancelled=cancelled)
         if rc is None:
             return ('cancelled', None)
+        if rc != 0:
+            return ('failed', f'pack_shader_cache.py exit code {rc}')
 
+    if libraries_failed(dest_path):
+        return ('ok', None)
     if on_phase:
         on_phase('warm')
     if on_progress:
@@ -540,6 +547,8 @@ def run_precompile(dest, layout=None, on_phase=None, on_progress=None, cancelled
     dest_path = Path(dest)
     try:
         if (dest_path / 'shader-prepared.bin').is_file():
+            if libraries_failed(dest_path):
+                return ('ready', None)
             rc, tail, up_to_date = _run_warm(dest_path, if_needed=True, on_phase=on_phase, on_progress=on_progress,
                                              cancelled=cancelled)
             if rc is None:

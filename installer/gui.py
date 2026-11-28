@@ -41,8 +41,8 @@ from . import update
 from .runner import InstallError
 from .guilogic import (DKB_STEP_ORDER, DONE, FAILED, GAME_EXE, PENDING, RUNNING, SKIPPED, UI_LANGUAGES, Catalog, Form, Launcher, Model,
                        Process, Settings, amount, default_dest, default_game_language, describe_event, install_state,
-                       parse_line, play_command, previous_version, release_page, run_precompile, update_status,
-                       windows_ui_language)
+                       libraries_failed, parse_line, play_command, previous_version, release_page, run_precompile,
+                       update_status, warm_command, windows_ui_language, _run_precompile_proc)
 
 POLL_MS = 100
 GLYPH = {PENDING: '\u25cb', RUNNING: '\u25b6', DONE: '\u2714', SKIPPED: '\u2013', FAILED: '\u2716'}
@@ -171,6 +171,7 @@ class App:
         self.update_stop = threading.Event()
         self.precompile_stop = threading.Event()
         self.precompile_running = False
+        self.precompile_after = None
         self.precompile_closing = False
         self.precompile_skip = False
         self.precompile_dest = ''
@@ -643,6 +644,9 @@ class App:
 
     def finish_precompile(self, status, detail):
         self.precompile_running = False
+        if self.precompile_after:
+            self.root.after_cancel(self.precompile_after)
+            self.precompile_after = None
         self.precompile_bar.stop()
         self.set_play_enabled(True)
         if self.precompile_closing:
@@ -891,7 +895,7 @@ class App:
         self.precompile_fraction = None
         self.precompile_failure = None
         self.set_play_enabled(False)
-        self.root.after(500, self.show_precompile_if_busy)
+        self.precompile_after = self.root.after(500, self.show_precompile_if_busy)
 
         def work():
             status, detail = run_precompile(
@@ -1556,7 +1560,7 @@ def start_launcher(args, layout):
 
 
 def play_now(dest, layout=None):
-    """--play: precompile missing shader pipelines if needed, then start the game in dest and wait for it (#402);
+    """--play: warm missing shader pipelines if needed (--warm-shaders-if-needed, progress on stdout), then start the game in dest and wait for it (#402);
     1 when dest holds no finished install, as the Play button would stay disabled."""
     if sys.stderr is None:   # pythonw.exe started with no handles
         sys.stdout = sys.stderr = open(os.devnull, 'w')
@@ -1564,9 +1568,11 @@ def play_now(dest, layout=None):
         print(f'--play: no finished install in {dest or "(no folder given or remembered)"}', file=sys.stderr)
         return 1
     dest_path = Path(dest)
-    if (dest_path / GAME_EXE).is_file() and (
-            (dest_path / 'shader-prepared.bin').is_file() or (dest_path / 'romfs' / 'index.json').is_file()):
-        run_precompile(dest, layout=layout)
+    if (dest_path / GAME_EXE).is_file() and (dest_path / 'shader-prepared.bin').is_file() and not libraries_failed(dest_path):
+        try:
+            _run_precompile_proc(warm_command(dest_path), dest_path, on_line=lambda line: print(line, end='', flush=True))
+        except OSError as e:
+            print(f'--play: {e}', file=sys.stderr)
     try:
         return subprocess.call(play_command(dest), cwd=dest)
     except OSError as e:

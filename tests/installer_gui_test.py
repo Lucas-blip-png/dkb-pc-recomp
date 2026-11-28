@@ -32,7 +32,8 @@ from installer.events import Reporter  # noqa: E402
 from installer.runner import Context  # noqa: E402
 from installer.steps import all_steps  # noqa: E402
 from installer.guilogic import (DONE, FAILED, GAME_EXE, PENDING, RUNNING, SKIPPED, Catalog, Form, Model, Process,  # noqa: E402
-                                amount, describe_event, parse_line, parse_warm_progress, run_precompile, windows_ui_language)
+                                amount, describe_event, needs_legacy_warm, parse_line, parse_warm_progress, run_precompile,
+                                windows_ui_language)
 
 INSTALLED = ROOT / 'build' / 'install-test'
 FIXTURE = ROOT / 'build' / 'inst-gui' / 'e2e-install'
@@ -569,7 +570,7 @@ class PrecompileTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d)
             (dest / 'shader-prepared.bin').write_bytes(b'x' * 16)
-            statefile.save(dest, {'format': 1, 'steps': {'dkb_shaders': {'prepared': True, 'libraries': False}}},
+            statefile.save(dest, {'format': 1, 'steps': {'dkb_shaders': {'prepared': True}}},
                            'dkb-install.json')
             phases, progress = [], []
             with mock.patch('installer.guilogic._run_precompile_proc') as run:
@@ -590,8 +591,9 @@ class PrecompileTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d)
             (dest / 'shader-prepared.bin').write_bytes(b'x' * 16)
-            statefile.save(dest, {'format': 1, 'steps': {'dkb_shaders': {'prepared': True, 'libraries': False}}},
+            statefile.save(dest, {'format': 1, 'steps': {'dkb_shaders': {'prepared': True}}},
                            'dkb-install.json')
+            (dest / 'lib-warm.progress').write_bytes(b'1')   # an interrupted warm: the legacy fallback finishes it
             calls, phases = [], []
             with mock.patch('installer.guilogic._run_precompile_proc') as run:
                 def fake(cmd, cwd, on_line=None, cancelled=None):
@@ -613,7 +615,7 @@ class PrecompileTest(unittest.TestCase):
             (dest / 'romfs').mkdir()
             (dest / 'romfs' / 'index.json').write_text('{}', encoding='utf-8')
             (dest / 'shader-cache').mkdir()
-            statefile.save(dest, {'format': 1, 'game': 'dkb458752', 'steps': {'dkb_shaders': {'prepared': True, 'libraries': False}}},
+            statefile.save(dest, {'format': 1, 'game': 'dkb458752', 'steps': {'dkb_shaders': {'prepared': True}}},
                            'dkb-install.json')
             tools_dir = dest / 'tools'
             tools_dir.mkdir()
@@ -636,6 +638,19 @@ class PrecompileTest(unittest.TestCase):
             self.assertFalse((dest / 'seed-nvn2.bin').exists())
             self.assertTrue(statefile.load(dest, 'dkb-install.json')['steps']['dkb_shaders']['libraries'])
 
+    def test_run_precompile_skips_warm_when_setup_recorded_libraries_failed(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d)
+            (dest / 'shader-prepared.bin').write_bytes(b'x' * 16)
+            (dest / 'lib-warm.progress').write_bytes(b'1')
+            statefile.save(dest, {'format': 1, 'steps': {'dkb_shaders': {'prepared': True, 'libraries': False}}},
+                           'dkb-install.json')
+            with mock.patch('installer.guilogic._run_precompile_proc') as run:
+                self.assertEqual(run_precompile(dest), ('ready', None))
+                run.assert_not_called()
+            self.assertFalse(needs_legacy_warm(dest))
+
     def test_run_precompile_cancel(self):
         import threading
         ev = threading.Event()
@@ -650,11 +665,12 @@ class PrecompileTest(unittest.TestCase):
         from installer import gui
         with tempfile.TemporaryDirectory() as d, mock.patch('subprocess.call', return_value=0) as call, \
                 mock.patch.object(gui, 'install_state', return_value='ready'), \
-                mock.patch.object(gui, 'run_precompile', return_value=('ready', None)) as pre:
+                mock.patch.object(gui, '_run_precompile_proc', return_value=(0, [])) as pre:
             (Path(d) / GAME_EXE).write_bytes(b'')
             (Path(d) / 'shader-prepared.bin').write_bytes(b'x' * 16)
             self.assertEqual(gui.play_now(d, layout='L'), 0)
-            pre.assert_called_once_with(d, layout='L')
+            pre.assert_called_once()
+            self.assertIn('--warm-shaders-if-needed', pre.call_args[0][0][1])
             call.assert_called_once()
 
 
