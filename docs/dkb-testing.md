@@ -365,13 +365,14 @@ quality mode") names the 3D scene ratio for `upscaler = dlss`, `fsr3` or `fsr4`,
 only while `scene_res` is `auto`: a `scene_res` the player set wins. `dlss_preset` stays `auto|k|m` (the NGX headers
 used here define the render presets K, L and M only). `dkb.log` says `Bananza resolution: dlss_mode = ...`.
 
-`preset` (`DKB_PRESET`, `custom|recommended|1|2|3|4|5`, read at start, F1 "Performance preset") is a defaults table
+`preset` (`DKB_PRESET`, `custom|recommended|lowspec|1|2|3|4|5`, read at start, F1 "Performance preset") is a defaults table
 layered like the Steam Deck profile (`cfg.c` `PRESETS`): below the environment and `dkb.ini`, above the built-in
 defaults, so an option the player set by hand wins. `custom` (the default) changes nothing; the Steam Deck profile
 keeps its own table and ignores the preset. `recommended` takes the lowest of three levels, from the largest
 device-local Vulkan heap (under 4.8 GiB 1, 6.7 GiB 2, 9.7 GiB 3, 11.5 GiB 4, else 5), the RAM (under 10.7 GiB 1, 22.5 GiB 4,
 else 5) and the logical processors the process may use (4 or fewer 2, under 8 3, under 12 4, else 5), at most 2 on an
-integrated GPU; `dkb.log` says `[host] preset: recommended -> N (VRAM ..., RAM ..., ... logical ...)`.
+integrated GPU; `dkb.log` says `[host] preset: recommended -> N (VRAM ..., RAM ..., ... logical ...)`. `lowspec` (not in the menu; from
+evolis-game's low-spec fork) is a table of its own for an integrated GPU, see [dkb-lowend.md](dkb-lowend.md), "Integrated GPU profile".
 
 On Bananza `output_res` is the game's virtual display (built-in 2880x1620); under `scene_res = auto` the game draws the
 3D smaller and upscales it (at the built-in output on update 3.2.0, `dkb.log` says `dlss: Quality 1280x720 -> 1920x1080`).

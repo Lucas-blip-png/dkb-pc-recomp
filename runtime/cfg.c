@@ -129,7 +129,7 @@ static const CfgMeta metas[] = {
     // Bananza: the 3D scene ratio of the temporal upscalers by name, when scene_res is auto (dkb_wide.c dkb_scene_ratio)
     {"DLSS_MODE", "auto", "auto|dlaa|quality|balanced|performance|ultra_performance", RESTART},
     // A defaults table by level, below the environment and dkb.ini (cfg.c PRESETS); custom changes nothing
-    {"PRESET", "custom", "custom|recommended|1|2|3|4|5", RESTART},
+    {"PRESET", "custom", "custom|recommended|lowspec|1|2|3|4|5", RESTART},
     {"FSR4_LDR", "0", "0|1", RESTART},   // vk_fsr4.c: diagnosis, the colour is taken as perceptual up to 1
     {"WINDOW_FILTER", "fsr1", "fsr1|linear|catmull_rom|lanczos", LIVE},
     {"LOD_BIAS", "off", "off|auto", RESTART},
@@ -387,7 +387,15 @@ static const struct { const char *key, *level[5]; } PRESETS[] = {
     {"ASTC_BC", {"1", "1", "0", "0", "0"}},
     {"FRAME_GEN", {"off", "off", "off", "off", "auto"}},
 };
-static int preset = -1;   // 0 none, 1..5; -1 until cfg_preset_resolve
+// preset = lowspec (from evolis-game's low-spec fork, whose v1.1.0 dkb.ini these values are; not a menu row): a table of
+// its own for an integrated GPU or a weak PC, below the environment and dkb.ini like the levels. It leaves the
+// resolution, upscaler and frame rate alone. Every line is a setting of docs/dkb-lowend.md, "Low-spec options".
+#define PRESET_LOWSPEC 6
+static const struct { const char *key, *value; } LOWSPEC[] = {
+    {"ASTC", "gpu"}, {"ASTC_BC", "1"}, {"TEX_UMA_HOST", "1"}, {"TEX_VRAM_PRESSURE", "72"}, {"VRAM_HEADROOM", "0"},
+    {"SHADOW_RATE", "8"}, {"CUBEMAP_RATE", "6"}, {"REPLAY_THREADS", "2"},
+};
+static int preset = -1;   // 0 none, 1..5, PRESET_LOWSPEC; -1 until cfg_preset_resolve
 static int preset_nvidia;
 
 // The level a machine fits: the lowest of what its video memory (MiB), memory (MiB) and logical processors allow, an
@@ -407,11 +415,13 @@ void cfg_preset_resolve(void) {
     const char *set = raw_get(PREFIX "PRESET");
     int p = set && set[0] >= '1' && set[0] <= '5' && !set[1] ? set[0] - '0' : 0;
     int recommended = set && !strcasecmp(set, "recommended");
+    if (set && !strcasecmp(set, "lowspec")) p = PRESET_LOWSPEC;
     if (profile_of()) p = 0, recommended = 0;
     unsigned vram = 0;
     int integrated = 0, nvidia = 0, ok = 0;
-    if (recommended || p >= 3) vk_driver_env_apply();
-    if (recommended || p >= 3) ok = vk_hw_probe(&vram, &integrated, &nvidia);   // the Vulkan device is not up yet here
+    int probe = recommended || (p >= 3 && p <= 5);
+    if (probe) vk_driver_env_apply();
+    if (probe) ok = vk_hw_probe(&vram, &integrated, &nvidia);   // the Vulkan device is not up yet here
     preset_nvidia = CFG_HAS_DLSS && nvidia;
     if (preset_nvidia) {   // DLSS only with its model next to dkb.exe, where vk_dlss.c init looks for it
         char path[1024] = "";
@@ -439,6 +449,11 @@ void cfg_preset_resolve(void) {
 static const char *preset_value(const char *key) {
     int p = __atomic_load_n(&preset, __ATOMIC_ACQUIRE);
     if (p <= 0) return NULL;
+    if (p == PRESET_LOWSPEC) {
+        for (size_t i = 0; i < sizeof LOWSPEC / sizeof *LOWSPEC; i++)
+            if (!strcasecmp(LOWSPEC[i].key, key)) return LOWSPEC[i].value;
+        return NULL;
+    }
     for (size_t i = 0; i < sizeof PRESETS / sizeof *PRESETS; i++) {
         if (strcasecmp(PRESETS[i].key, key)) continue;
         const char *v = PRESETS[i].level[p - 1];

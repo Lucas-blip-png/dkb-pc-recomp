@@ -279,8 +279,8 @@ ms a frame of GPU time at 1920x1080 and 3.3 ms at 2560x1440. Each step up in out
 
 ## Low-spec options
 
-Four opt-in settings ported from evolis-game's low-spec fork of this runtime (`donkey-kong-bananza-pc-lowspec`, commit
-e78174cac4) and a profile that sets them for an integrated GPU. They all default to off. Each trades picture quality for
+Opt-in settings ported from evolis-game's low-spec fork of this runtime (`donkey-kong-bananza-pc-lowspec`, commit
+e78174cac4) and a profile that sets them for an integrated GPU (below). They all default to off. Each trades picture quality for
 frame time, so turn them on one at a time and compare.
 
 | Setting | Effect |
@@ -292,3 +292,20 @@ frame time, so turn them on one at a time and compare.
 | `tex_frame_epoch = 1` | Checks an uploaded texture for guest writes once per frame, not once per submit. A texture the game rewrites mid-frame shows the change a frame late. |
 | `output_res = 640x360` and up, `scene_res` up to 4.0 | Bananza now accepts output sizes from 640x360 and a scene ratio up to 4.0 (the scene drawn at a quarter of the output on each side), for very weak GPUs (`runtime/dkb_wide.c` `dkb_output_size`, `dkb_scene_ratio`). Both ranges only widen what was accepted. |
 | `mvk_upscale_blit = 1` | Replaces the game's compute upscaler with a linear blit on any GPU (default on MoltenVK only). Cheaper, softer. |
+
+## Integrated GPU profile
+
+`preset = lowspec` in `dkb.ini` (or `DKB_PRESET=lowspec`) sets these defaults, the values of the fork's v1.1.0 `dkb.ini`.
+Like the numbered presets, they sit below the environment and `dkb.ini`, so any key you set yourself wins; it changes
+nothing about the resolution, upscaler or frame rate limit. The Steam Deck profile ignores it. It is not a menu row.
+
+```ini
+astc = gpu
+astc_bc = 1
+tex_uma_host = 1
+tex_vram_pressure = 72
+vram_headroom = 0
+shadow_rate = 8
+cubemap_rate = 6
+replay_threads = 2
+```

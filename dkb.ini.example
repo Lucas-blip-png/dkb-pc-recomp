@@ -223,7 +223,9 @@
 # dlss_mode = auto
 # A set of defaults for a class of PC (output_res, scene_res, upscaler, astc_bc, fps_limit, frame_gen): custom (nothing
 # changes), recommended (from your GPU memory, RAM and processors) or 1 Minimum, 2 Low, 3 Medium, 4 High, 5 Ultra
-# (docs/dkb-testing.md). A key you set here wins over it. Read at start.
+# (docs/dkb-testing.md), or lowspec: the integrated GPU profile of docs/dkb-lowend.md (astc = gpu, astc_bc = 1,
+# tex_uma_host = 1, tex_vram_pressure = 72, vram_headroom = 0, shadow_rate = 8, cubemap_rate = 6, replay_threads = 2).
+# A key you set here wins over it. Read at start.
 # preset = custom
 # auto chooses mip levels for the upscaled size with a temporal upscaler below full scene resolution. Restart to apply.
 # lod_bias = off
