@@ -6,6 +6,7 @@
 [![Help wanted](https://img.shields.io/github/issues/Lucas-blip-png/dkb-pc-recomp/help%20wanted?label=help%20wanted)](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues?q=is%3Aopen+label%3A%22help+wanted%22)
 [![Discussions](https://img.shields.io/github/discussions/Lucas-blip-png/dkb-pc-recomp)](https://github.com/Lucas-blip-png/dkb-pc-recomp/discussions)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-support%20the%20work-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/lucasblippng)
+[![GitHub Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-support-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Lucas-blip-png)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/kCkDsqu37y)
 
 **DKB Recomp** is a static recompilation of *Donkey Kong Bananza* (Nintendo Switch 2, 2025) into a native Windows
@@ -150,9 +151,9 @@ before committing; CI runs the same check. Questions go to
 ## Support the project
 
 If you want to support the work without writing code, tips go to
-[ko-fi.com/lucasblippng](https://ko-fi.com/lucasblippng), once or monthly. The current goal there, US$20 a month, pays
-for the Claude Pro plan used for reviews, tests and much of the lifter and renderer work, and its progress bar is on
-that page. A tip pays for time on the project; it buys no game files, builds or early access, and everything stays open
+[ko-fi.com/lucasblippng](https://ko-fi.com/lucasblippng) or [GitHub Sponsors](https://github.com/sponsors/Lucas-blip-png),
+once or monthly. The current goal, US$20 a month, pays for the Claude Pro plan used for reviews, tests and much of the
+lifter and renderer work; its progress bar is on both pages. A tip pays for time on the project; it buys no game files, builds or early access, and everything stays open
 source here.
 
 Help that costs nothing counts as much:
