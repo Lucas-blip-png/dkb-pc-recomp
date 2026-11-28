@@ -150,9 +150,16 @@ before committing; CI runs the same check. Questions go to
 ## Support the project
 
 If you want to support the work without writing code, tips go to
-[ko-fi.com/lucasblippng](https://ko-fi.com/lucasblippng). A tip pays for time on the project; it buys no game files,
-builds or early access, and everything stays open source here. Starring the repository and sharing it with people who
-know GPUs, ARM64 or the Switch also helps.
+[ko-fi.com/lucasblippng](https://ko-fi.com/lucasblippng), once or monthly. The current goal there, US$20 a month, pays
+for the Claude Pro plan used for reviews, tests and much of the lifter and renderer work, and its progress bar is on
+that page. A tip pays for time on the project; it buys no game files, builds or early access, and everything stays open
+source here.
+
+Help that costs nothing counts as much:
+- Test on hardware we don't have (AMD and Intel GPUs, handhelds, 4-thread CPUs) and post the numbers in #3 or on Discord.
+- When something breaks, attach `logs/dkb.log`; for a bug at one spot, your `profile/save` folder (zipped) and an input
+  recording (`input_record` in `dkb.ini`) let us replay it here.
+- Star the repository and share it with people who know GPUs, ARM64 or the Switch.
 
 ## Building from source
 
